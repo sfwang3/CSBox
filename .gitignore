@@ -33,3 +33,7 @@ Thumbs.db
 
 # Local project notes
 .python-version
+
+# CSBox runtime state
+.csbox/*
+!.csbox/config.example.toml
