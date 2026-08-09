@@ -120,6 +120,19 @@ def test_config_paths_use_xdg_config_home_when_injected(tmp_path: Path) -> None:
     assert paths.user == tmp_path / "xdg/csbox/config.toml"
 
 
+def test_config_paths_do_not_call_home_when_home_is_injected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_home() -> Path:
+        raise AssertionError("Path.home() must not be called")
+
+    monkeypatch.setattr(Path, "home", fail_home)
+
+    paths = ConfigPaths.from_cwd(tmp_path, environ={"HOME": str(tmp_path / "home")})
+
+    assert paths.user == tmp_path / "home/.config/csbox/config.toml"
+
+
 def test_save_project_config_replaces_same_directory_temporary_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

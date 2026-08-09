@@ -24,6 +24,7 @@ class ConfigPaths:
             if config_home:
                 user = Path(config_home) / "csbox" / "config.toml"
             else:
-                home = Path(environment.get("HOME", Path.home()))
+                home_value = environment.get("HOME")
+                home = Path(home_value) if home_value else Path.home()
                 user = home / ".config" / "csbox" / "config.toml"
         return cls(user=user, project=Path(cwd) / ".csbox" / "config.toml")
