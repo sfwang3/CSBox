@@ -50,3 +50,6 @@ indent-style = "space"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+markers = [
+  "pty: real pseudoterminal integration tests",
+]

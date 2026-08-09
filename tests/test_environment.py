@@ -1,7 +1,7 @@
 import os
 
 from csbox.core.environment import detect_environment, detect_is_wsl, detect_terminal_size
-from csbox.core.shell import ShellKind, detect_shell
+from csbox.core.shell import PowerShell7Profile, ShellKind, detect_shell
 
 
 def test_detects_powershell_7_from_explicit_shell() -> None:
@@ -13,6 +13,7 @@ def test_detects_powershell_7_from_explicit_shell() -> None:
 
     assert profile.kind is ShellKind.POWERSHELL_7
     assert profile.executable == "pwsh.exe"
+    assert profile is PowerShell7Profile
 
 
 def test_unknown_shell_profile_has_no_user_facing_fallback_copy() -> None:
