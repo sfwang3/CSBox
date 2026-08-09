@@ -34,6 +34,7 @@ class FakePtyProcess:
         exitstatus: int | None = None,
         write_results: Sequence[int | BaseException] = (),
         close_failures: Sequence[BaseException] = (),
+        read_gate: threading.Event | None = None,
     ) -> None:
         self.frames = deque(frames)
         self.alive = alive
@@ -45,6 +46,8 @@ class FakePtyProcess:
         self.close_calls = 0
         self.close_forces: list[bool] = []
         self.closed = False
+        self.read_gate = read_gate
+        self.read_started = threading.Event()
         self._condition = threading.Condition()
         type(self).instances.append(self)
 
@@ -75,6 +78,9 @@ class FakePtyProcess:
         return cls.next_process
 
     def read(self, size: int = 1024) -> str:
+        if self.read_gate is not None:
+            self.read_started.set()
+            self.read_gate.wait()
         with self._condition:
             while not self.frames and self.alive and not self.closed:
                 self._condition.wait()
@@ -111,8 +117,11 @@ class FakePtyProcess:
             failure = self.close_failures.popleft()
             raise failure
         with self._condition:
+            self.frames.clear()
             self.alive = False
             self.closed = True
+            if self.read_gate is not None:
+                self.read_gate.set()
             self._condition.notify_all()
 
     def feed(self, frame: str | BaseException) -> None:
@@ -278,19 +287,56 @@ def test_eof_error_becomes_eof_and_captures_exit_status(tmp_path: Path) -> None:
     assert not backend.is_alive()
 
 
-def test_close_drains_last_frame_and_is_idempotent(tmp_path: Path) -> None:
-    process = FakePtyProcess(frames=["最后一帧"], alive=False, exitstatus=0)
+def test_close_waits_for_delayed_final_frame_before_closing_dead_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    read_gate = threading.Event()
+    process = FakePtyProcess(frames=["最后一帧"], alive=False, exitstatus=0, read_gate=read_gate)
     backend = make_backend(process)
     spawn_backend(backend, tmp_path)
+    assert process.read_started.wait(0.5)
+
+    reader = backend._reader_thread
+    assert reader is not None
+    real_join = reader.join
+    join_close_states: list[bool] = []
+
+    def release_delayed_frame_while_joining(timeout: float | None = None) -> None:
+        join_close_states.append(process.closed)
+        if not process.closed:
+            read_gate.set()
+        real_join(timeout)
+
+    monkeypatch.setattr(reader, "join", release_delayed_frame_while_joining)
 
     backend.close()
     backend.close()
 
+    assert join_close_states[0] is False
     assert process.close_calls == 1
     assert process.close_forces == [False]
     assert backend.read(timeout=0.1) == "最后一帧".encode()
     assert backend.read(timeout=0.1) == b""
     assert backend.exit_code == 0
+
+
+def test_close_dead_process_has_finite_bound_when_reader_never_finishes(
+    tmp_path: Path,
+) -> None:
+    read_gate = threading.Event()
+    process = FakePtyProcess(
+        frames=["无法读取的尾帧"], alive=False, exitstatus=0, read_gate=read_gate
+    )
+    backend = make_backend(process)
+    spawn_backend(backend, tmp_path)
+    assert process.read_started.wait(0.5)
+
+    started = time.monotonic()
+    backend.close()
+
+    assert time.monotonic() - started < 1.5
+    assert process.close_forces == [False]
+    assert backend.read(timeout=0.1) == b""
 
 
 def test_close_forces_a_live_process_after_a_bounded_grace_period(tmp_path: Path) -> None:

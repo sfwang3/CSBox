@@ -38,6 +38,7 @@ class WindowsConPTYBackend(TerminalBackend):
         self._exit_code: int | None = None
         self._closed = False
         self._closing = False
+        self._close_lock = threading.Lock()
         self._state_lock = threading.RLock()
         self._output_ready = threading.Condition()
 
@@ -161,40 +162,47 @@ class WindowsConPTYBackend(TerminalBackend):
             return self._exit_code
 
     def close(self) -> None:
-        with self._state_lock:
-            if self._closed:
-                return
-            process = self._process
-            if process is None:
-                self._closed = True
-                with self._output_ready:
-                    self._reader_done = True
-                    self._output_ready.notify_all()
-                return
+        with self._close_lock:
+            with self._state_lock:
+                if self._closed:
+                    return
+                process = self._process
+                if process is None:
+                    self._closed = True
+                    with self._output_ready:
+                        self._reader_done = True
+                        self._output_ready.notify_all()
+                    return
 
             force = self._wait_for_natural_exit(process, self._CLOSE_GRACE)
-            self._closing = True
-            try:
-                process.close(force=force)
-            except Exception as cause:
-                self._closing = False
-                raise TerminalBackendError(
-                    "关闭 Windows ConPTY 失败，可重试清理。", cause
-                ) from cause
-
             reader = self._reader_thread
+            if not force and reader is not None:
+                reader.join(self._READER_JOIN_TIMEOUT)
+
+            with self._state_lock:
+                self._closing = True
+                try:
+                    process.close(force=force)
+                except Exception as cause:
+                    self._closing = False
+                    raise TerminalBackendError(
+                        "关闭 Windows ConPTY 失败，可重试清理。", cause
+                    ) from cause
+
             if reader is not None:
                 reader.join(self._READER_JOIN_TIMEOUT)
                 if reader.is_alive():
-                    self._closing = False
+                    with self._state_lock:
+                        self._closing = False
                     cause = TimeoutError("pywinpty reader did not stop after close")
                     raise TerminalBackendError(
                         "Windows ConPTY 读取线程未能及时停止，可重试清理。", cause
                     ) from cause
 
-            self._capture_exit_status()
-            self._closed = True
-            self._closing = False
+            with self._state_lock:
+                self._capture_exit_status()
+                self._closed = True
+                self._closing = False
 
     def _load_factory(self) -> Any:
         if self._pty_process_factory is not None:
