@@ -129,11 +129,12 @@ def _row_from_pyte(screen: pyte.Screen, row: int, columns: int) -> tuple[Termina
                 combined = unicodedata.normalize("NFC", lead.character + cell.character)
                 cells[lead_column] = replace(lead, character=combined)
                 cells[column] = replace(cell, character="")
-        elif cell.width > columns - column:
-            # A glyph without enough trailing cells cannot be represented by
-            # the fixed domain grid. The private screen normally wraps first;
-            # this replacement also protects snapshots restored by old pyte.
-            cells[column] = replace(cell, character="\N{REPLACEMENT CHARACTER}", width=1)
+    for column, cell in enumerate(cells):
+        if cell.width == 2:
+            if column + 1 >= columns or cells[column + 1].width != 0:
+                cells[column] = TerminalCell()
+        elif cell.width == 0 and (column == 0 or cells[column - 1].width != 2):
+            cells[column] = TerminalCell()
     return tuple(cells)
 
 
@@ -157,6 +158,12 @@ class _CSBoxScreen(pyte.Screen):
             ):
                 continue
             super().draw(character)
+            self._repair_wide_row(self.cursor.y)
+
+    def resize(self, lines: int | None = None, columns: int | None = None) -> None:
+        super().resize(lines=lines, columns=columns)
+        for row in range(self.lines):
+            self._repair_wide_row(row)
 
     def _combine_with_wide_lead(self, combining_character: str) -> bool:
         row = self.cursor.y
@@ -174,3 +181,23 @@ class _CSBoxScreen(pyte.Screen):
         line[column - 1] = lead._replace(data=combined)
         self.dirty.add(row)
         return True
+
+    def _repair_wide_row(self, row: int) -> None:
+        line = self.buffer[row]
+        repaired = False
+        for column in range(self.columns):
+            data = line[column].data
+            width = display_width(data)
+            if width == 2:
+                if column + 1 >= self.columns or line[column + 1].data != "":
+                    line[column] = self.default_char
+                    repaired = True
+            elif data == "":
+                if column == 0 or display_width(line[column - 1].data) != 2:
+                    line[column] = self.default_char
+                    repaired = True
+            elif width == 0:
+                line[column] = self.default_char
+                repaired = True
+        if repaired:
+            self.dirty.add(row)

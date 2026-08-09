@@ -6,6 +6,7 @@ import math
 import queue
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
@@ -70,7 +71,10 @@ class AsciicastV3Recorder:
         self._enqueue_timeout = enqueue_timeout
         self._close_timeout = close_timeout
         self._state_lock = threading.Lock()
-        self._closed = False
+        self._close_lock = threading.Lock()
+        self._accepting = True
+        self._stop_enqueued = False
+        self._fully_closed = False
         self._writer_error: BaseException | None = None
         self._ready = threading.Event()
         self._thread = threading.Thread(
@@ -91,7 +95,7 @@ class AsciicastV3Recorder:
         if not isinstance(event, TerminalEvent):
             raise TypeError("event must be a TerminalEvent")
         with self._state_lock:
-            if self._closed:
+            if not self._accepting:
                 raise RecorderError("recorder is closed")
             self._raise_writer_error()
             try:
@@ -99,6 +103,8 @@ class AsciicastV3Recorder:
             except queue.Full as exc:
                 self._raise_writer_error()
                 raise RecorderError("recorder queue remained full") from exc
+            if event.type is TerminalEventType.EXIT:
+                self._accepting = False
             self._raise_writer_error()
 
     handle = record
@@ -106,30 +112,45 @@ class AsciicastV3Recorder:
     __call__ = record
 
     def close(self) -> None:
-        with self._state_lock:
-            already_closed = self._closed
-            self._closed = True
-
-        if not already_closed:
+        if not self._close_lock.acquire(timeout=self._close_timeout):
+            raise RecorderError("another recorder close did not finish in time")
+        try:
             deadline = time.monotonic() + self._close_timeout
-            while True:
-                self._raise_writer_error()
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise RecorderError("recorder shutdown timed out while queueing stop")
-                try:
-                    self._queue.put(_STOP, timeout=min(self._enqueue_timeout, remaining))
-                    break
-                except queue.Full as exc:
-                    if not self._thread.is_alive():
-                        self._raise_writer_error()
-                        raise RecorderError("recorder writer stopped before shutdown") from exc
+            with self._state_lock:
+                if self._fully_closed:
+                    self._raise_writer_error()
+                    return
+                self._accepting = False
+                stop_enqueued = self._stop_enqueued
 
+            if not stop_enqueued:
+                self._enqueue_stop(deadline)
             self._thread.join(timeout=max(0.0, deadline - time.monotonic()))
             if self._thread.is_alive():
                 raise RecorderError("recorder writer did not stop in time")
+            with self._state_lock:
+                self._fully_closed = True
+            self._raise_writer_error()
+        finally:
+            self._close_lock.release()
 
-        self._raise_writer_error()
+    def _enqueue_stop(self, deadline: float) -> None:
+        while True:
+            if not self._thread.is_alive():
+                with self._state_lock:
+                    self._fully_closed = True
+                self._raise_writer_error()
+                raise RecorderError("recorder writer stopped before shutdown")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RecorderError("recorder shutdown timed out while queueing stop")
+            try:
+                self._queue.put(_STOP, timeout=min(self._enqueue_timeout, remaining))
+            except queue.Full:
+                continue
+            with self._state_lock:
+                self._stop_enqueued = True
+            return
 
     def _raise_writer_error(self) -> None:
         if self._writer_error is not None:
@@ -155,16 +176,14 @@ class AsciicastV3Recorder:
         }
         previous_time = 0.0
         rounding_error = 0.0
+        decoders_finalized = False
 
         while True:
             item = self._queue.get()
             try:
                 if item is _STOP:
-                    for event_type, decoder in decoders.items():
-                        tail = decoder.decode(b"", final=True)
-                        if tail:
-                            code = "o" if event_type is TerminalEventType.OUTPUT else "i"
-                            self._write_json_line(stream, [0.0, code, tail])
+                    if not decoders_finalized:
+                        self._flush_decoder_tails(stream, decoders)
                     return
                 assert isinstance(item, TerminalEvent)
                 delta = item.relative_time - previous_time
@@ -175,6 +194,9 @@ class AsciicastV3Recorder:
                 milliseconds = math.floor(adjusted * 1000.0 + 0.5)
                 interval = milliseconds / 1000.0
                 rounding_error = adjusted - interval
+                if item.type is TerminalEventType.EXIT:
+                    self._flush_decoder_tails(stream, decoders)
+                    decoders_finalized = True
                 code, data = _encode_event(item, decoders)
                 self._write_json_line(stream, [interval, code, data])
             finally:
@@ -185,6 +207,14 @@ class AsciicastV3Recorder:
         stream.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
         stream.write("\n")
         stream.flush()
+
+    @classmethod
+    def _flush_decoder_tails(cls, stream: Any, decoders: dict[TerminalEventType, Any]) -> None:
+        for event_type, decoder in decoders.items():
+            tail = decoder.decode(b"", final=True)
+            if tail:
+                code = "o" if event_type is TerminalEventType.OUTPUT else "i"
+                cls._write_json_line(stream, [0.0, code, tail])
 
 
 def _encode_event(event: TerminalEvent, decoders: dict[TerminalEventType, Any]) -> tuple[str, str]:
@@ -211,6 +241,7 @@ class AsciicastV3Reader:
         warnings: list[str] = []
         header: dict[str, Any] | None = None
         events: list[CastEvent] = []
+        pending_unknown_interval = 0.0
 
         for line_number, raw_line in enumerate(raw_lines, start=1):
             complete_line = raw_line.endswith((b"\n", b"\r"))
@@ -219,7 +250,11 @@ class AsciicastV3Reader:
                 continue
             try:
                 value = json.loads(stripped)
-            except (UnicodeDecodeError, json.JSONDecodeError):
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                if header is None:
+                    raise RecorderError(
+                        f"invalid asciicast v3 header on line {line_number}"
+                    ) from exc
                 if line_number == len(raw_lines) and not complete_line:
                     warnings.append(f"truncated cast line {line_number} ignored")
                 else:
@@ -227,8 +262,9 @@ class AsciicastV3Reader:
                 continue
 
             if header is None:
-                if not isinstance(value, dict) or value.get("version") != 3:
+                if not _is_valid_v3_header(value):
                     raise RecorderError(f"invalid asciicast v3 header on line {line_number}")
+                assert isinstance(value, dict)
                 header = value
                 continue
 
@@ -238,8 +274,16 @@ class AsciicastV3Reader:
                 continue
             if parsed.code not in _CAST_CODES:
                 warnings.append(f"unknown event code {parsed.code!r} on line {line_number} ignored")
+                pending_unknown_interval += parsed.interval
                 continue
-            events.append(parsed)
+            events.append(
+                CastEvent(
+                    interval=parsed.interval + pending_unknown_interval,
+                    code=parsed.code,
+                    data=parsed.data,
+                )
+            )
+            pending_unknown_interval = 0.0
 
         if header is None:
             raise RecorderError("asciicast v3 header is missing")
@@ -260,3 +304,18 @@ def _parse_cast_event(value: object) -> CastEvent | None:
     if not isinstance(code, str) or not isinstance(data, str):
         return None
     return CastEvent(interval=float(interval), code=code, data=data)
+
+
+def _is_valid_v3_header(value: object) -> bool:
+    if not isinstance(value, dict) or type(value.get("version")) is not int:
+        return False
+    if value["version"] != 3:
+        return False
+    term = value.get("term")
+    if not isinstance(term, Mapping):
+        return False
+    for dimension in ("cols", "rows"):
+        size = term.get(dimension)
+        if type(size) is not int or size <= 0:
+            return False
+    return "type" not in term or isinstance(term["type"], str)

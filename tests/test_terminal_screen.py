@@ -27,6 +27,21 @@ def row_text(snapshot: TerminalSnapshot, row: int) -> str:
     return "".join(cell.character for cell in snapshot.cells[row] if cell.width != 0)
 
 
+def assert_valid_grid(snapshot: TerminalSnapshot) -> None:
+    assert len(snapshot.cells) == snapshot.rows
+    for row in snapshot.cells:
+        assert len(row) == snapshot.columns
+        for column, cell in enumerate(row):
+            assert cell.width in {0, 1, 2}
+            if cell.width == 2:
+                assert column + 1 < snapshot.columns
+                assert row[column + 1].width == 0
+                assert row[column + 1].character == ""
+            elif cell.width == 0:
+                assert column > 0
+                assert row[column - 1].width == 2
+
+
 def test_snapshot_converts_ascii_cjk_ansi_colors_and_attributes_to_domain_types() -> None:
     emulator = TerminalEmulator(columns=16, rows=3)
     emulator.apply(
@@ -122,6 +137,42 @@ def test_wide_character_at_last_column_wraps_without_invalid_cell_geometry() -> 
     assert snapshot.cells[1][0].character == "中"
     assert snapshot.cells[1][0].width == 2
     assert snapshot.cells[1][1].width == 0
+    assert_valid_grid(snapshot)
+
+
+def test_overwriting_either_half_of_a_wide_cell_clears_only_the_orphan() -> None:
+    overwritten_lead = TerminalEmulator(columns=4, rows=2)
+    overwritten_lead.apply(event(1, 0.1, TerminalEventType.OUTPUT, "中".encode()))
+    overwritten_lead.apply(event(2, 0.2, TerminalEventType.OUTPUT, b"\x1b[1;1HA"))
+    lead_snapshot = overwritten_lead.snapshot()
+
+    assert lead_snapshot.cells[0][0].character == "A"
+    assert lead_snapshot.cells[0][1] == TerminalCell()
+    assert_valid_grid(lead_snapshot)
+
+    overwritten_continuation = TerminalEmulator(columns=4, rows=2)
+    overwritten_continuation.apply(event(1, 0.1, TerminalEventType.OUTPUT, "中".encode()))
+    overwritten_continuation.apply(event(2, 0.2, TerminalEventType.OUTPUT, b"\x1b[1;2HA"))
+    continuation_snapshot = overwritten_continuation.snapshot()
+
+    assert continuation_snapshot.cells[0][0] == TerminalCell()
+    assert continuation_snapshot.cells[0][1].character == "A"
+    assert_valid_grid(continuation_snapshot)
+
+
+def test_resize_shrink_then_grow_does_not_revive_a_truncated_wide_pair() -> None:
+    emulator = TerminalEmulator(columns=4, rows=2)
+    emulator.apply(event(1, 0.1, TerminalEventType.OUTPUT, b"ab" + "中".encode()))
+
+    emulator.apply(event(2, 0.2, TerminalEventType.RESIZE, TerminalSize(3, 2)))
+    shrunk = emulator.snapshot()
+    assert shrunk.cells[0][2] == TerminalCell()
+    assert_valid_grid(shrunk)
+
+    emulator.apply(event(3, 0.3, TerminalEventType.RESIZE, TerminalSize(4, 2)))
+    grown = emulator.snapshot()
+    assert grown.cells[0][2:] == (TerminalCell(), TerminalCell())
+    assert_valid_grid(grown)
 
 
 def test_emulator_ignores_non_screen_events() -> None:
