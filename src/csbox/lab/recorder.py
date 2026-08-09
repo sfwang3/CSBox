@@ -23,6 +23,10 @@ class CastEvent:
     interval: float
     code: str
     data: str
+    # Byte position immediately after this event's source line.  A replay
+    # checkpoint can resume reading at this position without decoding the
+    # already-applied prefix again.
+    cast_offset: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +34,7 @@ class CastReadResult:
     header: dict[str, Any]
     events: tuple[CastEvent, ...]
     warnings: tuple[str, ...]
+    data_offset: int = 0
 
 
 _STOP: Final = object()
@@ -242,8 +247,11 @@ class AsciicastV3Reader:
         header: dict[str, Any] | None = None
         events: list[CastEvent] = []
         pending_unknown_interval = 0.0
+        cast_offset = 0
+        data_offset = 0
 
         for line_number, raw_line in enumerate(raw_lines, start=1):
+            cast_offset += len(raw_line)
             complete_line = raw_line.endswith((b"\n", b"\r"))
             stripped = raw_line.strip()
             if not stripped or stripped.startswith(b"#"):
@@ -266,6 +274,7 @@ class AsciicastV3Reader:
                     raise RecorderError(f"invalid asciicast v3 header on line {line_number}")
                 assert isinstance(value, dict)
                 header = value
+                data_offset = cast_offset
                 continue
 
             parsed = _parse_cast_event(value)
@@ -281,13 +290,19 @@ class AsciicastV3Reader:
                     interval=parsed.interval + pending_unknown_interval,
                     code=parsed.code,
                     data=parsed.data,
+                    cast_offset=cast_offset,
                 )
             )
             pending_unknown_interval = 0.0
 
         if header is None:
             raise RecorderError("asciicast v3 header is missing")
-        return CastReadResult(header=header, events=tuple(events), warnings=tuple(warnings))
+        return CastReadResult(
+            header=header,
+            events=tuple(events),
+            warnings=tuple(warnings),
+            data_offset=data_offset,
+        )
 
 
 def _parse_cast_event(value: object) -> CastEvent | None:

@@ -77,6 +77,31 @@ class TerminalEmulator:
     def snapshot(self) -> TerminalSnapshot:
         return _snapshot_from_pyte(self._screen, self._relative_time)
 
+    def restore(self, snapshot: TerminalSnapshot) -> None:
+        """Replace emulator state with an immutable domain snapshot."""
+
+        _validate_snapshot(snapshot)
+        screen = _CSBoxScreen(snapshot.columns, snapshot.rows)
+        for row_index, row in enumerate(snapshot.cells):
+            for column_index, cell in enumerate(row):
+                screen.buffer[row_index][column_index] = screen.default_char._replace(
+                    data=cell.character,
+                    fg=cell.foreground,
+                    bg=cell.background,
+                    bold=cell.bold,
+                    italics=cell.italic,
+                    underscore=cell.underline,
+                    strikethrough=cell.strikethrough,
+                    reverse=cell.reverse,
+                )
+        screen.cursor.y = snapshot.cursor.row
+        screen.cursor.x = snapshot.cursor.column
+        screen.cursor.hidden = not snapshot.cursor.visible
+        screen.dirty = set(range(snapshot.rows))
+        self._screen = screen
+        self._stream = pyte.ByteStream(screen)
+        self._relative_time = snapshot.relative_time
+
 
 def _snapshot_from_pyte(screen: pyte.Screen, relative_time: float) -> TerminalSnapshot:
     """The one boundary where pyte quirks become stable domain values."""
@@ -98,6 +123,33 @@ def _snapshot_from_pyte(screen: pyte.Screen, relative_time: float) -> TerminalSn
         cursor=cursor,
         relative_time=relative_time,
     )
+
+
+def _validate_snapshot(snapshot: TerminalSnapshot) -> None:
+    if not isinstance(snapshot, TerminalSnapshot):
+        raise TypeError("snapshot must be a TerminalSnapshot")
+    if snapshot.rows <= 0 or snapshot.columns <= 0:
+        raise ValueError("snapshot dimensions must be positive")
+    if len(snapshot.cells) != snapshot.rows or any(
+        len(row) != snapshot.columns for row in snapshot.cells
+    ):
+        raise ValueError("snapshot cell geometry does not match its dimensions")
+    if not 0 <= snapshot.cursor.row < snapshot.rows:
+        raise ValueError("snapshot cursor row is outside the terminal")
+    if not 0 <= snapshot.cursor.column < snapshot.columns:
+        raise ValueError("snapshot cursor column is outside the terminal")
+    for row in snapshot.cells:
+        for column, cell in enumerate(row):
+            if cell.width not in {0, 1, 2}:
+                raise ValueError("snapshot contains an invalid cell width")
+            if cell.width == 2 and (
+                column + 1 >= snapshot.columns
+                or row[column + 1].width != 0
+                or row[column + 1].character != ""
+            ):
+                raise ValueError("snapshot contains an incomplete wide cell")
+            if cell.width == 0 and (column == 0 or row[column - 1].width != 2):
+                raise ValueError("snapshot contains an orphan continuation cell")
 
 
 def _cell_from_pyte(character: Any) -> TerminalCell:
