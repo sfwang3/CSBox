@@ -1,0 +1,187 @@
+Screen {
+    background: #08111a;
+    color: #dbe7f2;
+}
+
+#home-layout {
+    height: 100%;
+    padding: 1 2 0 2;
+}
+
+#brand-block {
+    height: auto;
+    padding: 0 0 1 0;
+    border-bottom: solid #25384b;
+}
+
+#brand-name {
+    color: #8f95ff;
+    text-style: bold;
+    height: 1;
+}
+
+#brand-subtitle {
+    color: #afc0d1;
+    height: 1;
+}
+
+#brand-version {
+    color: #70859a;
+    height: 1;
+}
+
+#home-greeting {
+    color: #e7f0f8;
+    margin-top: 1;
+    height: 1;
+}
+
+#home-description {
+    color: #8ea5b9;
+    height: 1;
+}
+
+#environment-panel,
+#action-panel,
+#recent-panel {
+    background: #0e1a26;
+    border: round #29455f;
+    padding: 1;
+}
+
+#environment-panel {
+    height: auto;
+    margin-top: 1;
+}
+
+.panel-title {
+    color: #6fc7e8;
+    text-style: bold;
+    height: 1;
+    margin-bottom: 1;
+}
+
+#environment-content {
+    color: #b3c5d6;
+    height: auto;
+}
+
+#main-scroll {
+    height: 1fr;
+    margin-top: 1;
+    padding-bottom: 1;
+    scrollbar-size: 1 1;
+}
+
+#content-grid {
+    height: auto;
+    layout: vertical;
+}
+
+#action-panel,
+#recent-panel {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#recent-panel {
+    min-height: 8;
+}
+
+.entry-button {
+    width: 100%;
+    height: 3;
+    margin-bottom: 1;
+    border: round #326fa2;
+    background: #122335;
+    color: #dbeeff;
+}
+
+.entry-button:hover {
+    background: #19344c;
+    color: #ffffff;
+}
+
+.entry-button:focus {
+    border: tall #969dff;
+    text-style: bold;
+}
+
+#demo-note {
+    color: #f0bd60;
+    height: auto;
+    margin-bottom: 1;
+}
+
+#demo-count {
+    color: #8da6ba;
+    height: 1;
+    margin-bottom: 1;
+}
+
+#recent-content {
+    color: #c1d4e4;
+    height: auto;
+}
+
+#shortcut-bar {
+    height: 1;
+    color: #a5bacd;
+    background: #101e2b;
+    padding: 0 1;
+}
+
+UnavailableDialog {
+    align: center middle;
+    background: rgba(0, 0, 0, 0.72);
+}
+
+#unavailable-dialog {
+    width: 56;
+    height: auto;
+    border: round #6d79e8;
+    background: #101c29;
+    padding: 1 2;
+}
+
+#dialog-title {
+    color: #9da4ff;
+    text-style: bold;
+    height: 1;
+    margin-bottom: 1;
+}
+
+#dialog-message {
+    color: #dbe7f2;
+    height: auto;
+    margin-bottom: 1;
+}
+
+#dialog-close {
+    width: 100%;
+    height: 3;
+    border: round #326fa2;
+    background: #162d43;
+}
+
+#dialog-close:focus {
+    border: tall #f0bd60;
+}
+
+.wide #content-grid {
+    layout: horizontal;
+    height: 1fr;
+}
+
+.wide #action-panel {
+    width: 2fr;
+    height: 1fr;
+    margin-right: 1;
+    margin-bottom: 0;
+}
+
+.wide #recent-panel {
+    width: 3fr;
+    height: 1fr;
+    margin-bottom: 0;
+}
