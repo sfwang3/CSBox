@@ -111,7 +111,7 @@ def font_supports_text(font: ImageFont.FreeTypeFont, text: str) -> bool:
 
     return all(
         character.isspace()
-        or unicodedata.category(character).startswith("C")
+        or unicodedata.category(character) in {"Cc", "Cf"}
         or _has_glyph(font, character)
         for character in text
     )

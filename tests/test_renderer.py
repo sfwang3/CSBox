@@ -220,12 +220,15 @@ def test_font_resolver_missing_cjk_error_does_not_depend_on_system_cjk_font(
         FontResolver(candidates=(dummy_font,)).resolve()
 
 
+@pytest.mark.parametrize(
+    "missing_glyph", ("\U00020000", "\ue000"), ids=("extension-b", "private-use")
+)
 def test_renderer_rejects_actual_snapshot_glyph_missing_from_all_candidates(
-    tmp_path: Path, font_paths: tuple[Path, Path]
+    tmp_path: Path, font_paths: tuple[Path, Path], missing_glyph: str
 ) -> None:
     terminal = snapshot(
         (
-            TerminalCell(character="\U00020000", width=2),
+            TerminalCell(character=missing_glyph, width=2),
             TerminalCell(character="", width=0),
         )
     )
