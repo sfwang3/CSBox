@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -116,7 +117,7 @@ def test_export_writes_ordered_safe_pngs_cast_commands_and_stable_chinese_markdo
         "结果：\n\n"
         "![实验记录](evidence/01-查看网络接口.png)\n"
     )
-    assert "### 2. ../../课程/实验二:*?" in markdown
+    assert r"### 2. ../../课程/实验二:\*?" in markdown
     assert "![实验记录](evidence/02-课程-实验二.png)" in markdown
     assert "命令：" not in markdown
     assert result.commands is not None
@@ -161,3 +162,114 @@ def test_export_refuses_existing_destination_without_force_and_force_is_explicit
     forced = exporter.export(session_with_captures, destination, force=True)
     assert forced.markdown.is_file()
     assert marker.read_text(encoding="utf-8") == "user data"
+
+
+def test_export_escapes_markdown_html_and_percent_encodes_reserved_link_characters(
+    tmp_path: Path, exporter: LabExporter
+) -> None:
+    paths = SessionPaths(tmp_path / "session")
+    paths.root.mkdir()
+    paths.cast.write_bytes(FIXTURE_CAST.read_bytes())
+    CaptureStore(paths.captures).create_capture(
+        rendered_snapshot("done", 1.0),
+        cwd=tmp_path,
+        title="C# (测试)% <b>*粗*</b> [链接](x)",
+    )
+
+    result = exporter.export(paths, tmp_path / "export")
+    markdown = result.markdown.read_text(encoding="utf-8")
+
+    assert "<b>" not in markdown
+    assert "&lt;b&gt;" in markdown
+    assert r"C\# \(测试\)\%" in markdown
+    assert r"\*粗\*" in markdown
+    assert r"\[链接\]\(x\)" in markdown
+    image_link = markdown.split("![实验记录](", maxsplit=1)[1].split(")", maxsplit=1)[0]
+    assert "%23" in image_link
+    assert "%28" in image_link
+    assert "%29" in image_link
+    assert "%25" in image_link
+    assert "测试" in image_link
+
+
+def test_export_limits_utf8_and_windows_component_length_with_collision_hash(
+    tmp_path: Path, exporter: LabExporter
+) -> None:
+    paths = SessionPaths(tmp_path / "session")
+    paths.root.mkdir()
+    paths.cast.write_bytes(FIXTURE_CAST.read_bytes())
+    store = CaptureStore(paths.captures)
+    common = "实验😀" * 100
+    for suffix in ("甲", "乙"):
+        store.create_capture(
+            rendered_snapshot("done", 1.0),
+            cwd=tmp_path,
+            title=common + suffix,
+        )
+
+    result = exporter.export(paths, tmp_path / "export")
+
+    assert len(result.evidence) == 2
+    assert result.evidence[0].name != result.evidence[1].name
+    for image in result.evidence:
+        assert len(image.name.encode("utf-8")) <= 240
+        assert len(image.name.encode("utf-16-le")) // 2 <= 240
+        assert image.is_file()
+
+
+def test_export_rejects_control_and_bidi_commands_instead_of_emitting_terminal_actions(
+    tmp_path: Path, exporter: LabExporter
+) -> None:
+    paths = SessionPaths(tmp_path / "session")
+    paths.root.mkdir()
+    paths.cast.write_bytes(FIXTURE_CAST.read_bytes())
+    store = CaptureStore(paths.captures)
+    commands = (
+        "ip addr",
+        "printf '\x1b[2J'",
+        "printf '\x1b]8;;https://example.invalid\x07link\x1b]8;;\x07'",
+        "echo ab\bcd",
+        "echo safe\u202egnp.exe",
+    )
+    for index, command in enumerate(commands):
+        store.create_capture(
+            rendered_snapshot(str(index), float(index)),
+            cwd=tmp_path,
+            command=command,
+            title=f"记录 {index}",
+        )
+
+    result = exporter.export(paths, tmp_path / "export")
+
+    assert result.commands is not None
+    assert result.commands.read_text(encoding="utf-8") == "ip addr\n"
+
+
+def test_export_rejects_session_sidecar_symlinks_before_reading_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = SessionPaths(tmp_path / "session")
+    paths.root.mkdir()
+    external = tmp_path / "outside-sensitive-placeholder.cast"
+    external.write_text("fake private content", encoding="utf-8")
+    try:
+        paths.cast.symlink_to(external)
+    except OSError as exc:
+        pytest.skip(f"symlinks are unavailable: {exc}")
+
+    class UnexpectedRenderer:
+        def render(self, *args: object, **kwargs: object) -> Path:
+            raise AssertionError("renderer must not run for an unsafe session")
+
+    def unexpected_copy(*args: object, **kwargs: object) -> None:
+        raise AssertionError("unsafe session.cast must not be copied")
+
+    monkeypatch.setattr("csbox.lab.exporter.shutil.copyfile", unexpected_copy)
+    exporter = LabExporter(cast(Any, UnexpectedRenderer()))
+    destination = tmp_path / "export"
+
+    with pytest.raises(LabExportError, match="符号链接|实验目录"):
+        exporter.export(paths, destination)
+
+    assert external.read_text(encoding="utf-8") == "fake private content"
+    assert not destination.exists()

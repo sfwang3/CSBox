@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import html
 import re
 import shutil
 import unicodedata
@@ -9,6 +11,8 @@ from pathlib import Path
 from csbox.lab.captures import CaptureStore
 from csbox.lab.models import CaptureRecord, SessionPaths
 from csbox.lab.renderer import RenderTheme, TerminalEvidenceRenderer
+
+_COMPONENT_BUDGET = 240
 
 
 class LabExportError(RuntimeError):
@@ -46,8 +50,7 @@ class LabExporter:
     ) -> LabExportResult:
         paths = session if isinstance(session, SessionPaths) else SessionPaths(session)
         output = Path(destination)
-        if not paths.cast.is_file():
-            raise LabExportError(f"找不到实验录制文件：{paths.cast}")
+        _validate_session_sources(paths)
         if output.exists() and output.resolve() == paths.root.resolve():
             raise LabExportError("导出目录不能覆盖原始实验目录。")
         self._prepare_destination(output, force=force)
@@ -128,13 +131,13 @@ def _markdown_entry(
         "时间：\n"
         f"{capture.created_at:%H:%M:%S}\n\n"
         "结果：\n\n"
-        f"![实验记录](evidence/{image_name})"
+        f"![实验记录]({_markdown_url(f'evidence/{image_name}')})"
     )
 
 
 def _display_title(title: str, index: int) -> str:
     normalized = " ".join(title.split())
-    return normalized or f"实验记录 {index}"
+    return _escape_markdown_text(normalized or f"实验记录 {index}")
 
 
 def _safe_slug(title: str, index: int) -> str:
@@ -150,7 +153,6 @@ def _safe_slug(title: str, index: int) -> str:
     slug = re.sub(r"-+", "-", "".join(characters)).strip(" .-_")
     while ".." in slug:
         slug = slug.replace("..", ".")
-    slug = slug[:80].rstrip(" .-_")
     if not slug:
         slug = f"实验记录-{index}"
     if slug.split(".", maxsplit=1)[0].upper() in {
@@ -178,11 +180,30 @@ def _safe_slug(title: str, index: int) -> str:
         "LPT9",
     }:
         slug = f"_{slug}"
+    prefix = f"{index:02d}-"
+    extension = ".png"
+    byte_budget = _COMPONENT_BUDGET - len((prefix + extension).encode())
+    windows_budget = _COMPONENT_BUDGET - _windows_units(prefix + extension)
+    if len(slug.encode()) > byte_budget or _windows_units(slug) > windows_budget:
+        digest = hashlib.sha256(normalized.encode()).hexdigest()[:8]
+        suffix = f"-{digest}"
+        byte_budget -= len(suffix.encode())
+        windows_budget -= _windows_units(suffix)
+        shortened: list[str] = []
+        for character in slug:
+            candidate = "".join(shortened) + character
+            if len(candidate.encode()) > byte_budget or _windows_units(candidate) > windows_budget:
+                break
+            shortened.append(character)
+        slug = "".join(shortened).rstrip(" .-_") + suffix
     return slug
 
 
 def _known_command(command: str | None) -> str | None:
-    if command is None or any(character in command for character in "\r\n\0"):
+    if command is None or any(
+        not character.isprintable() or unicodedata.category(character).startswith("C")
+        for character in command
+    ):
         return None
     stripped = command.strip()
     return stripped or None
@@ -191,3 +212,47 @@ def _known_command(command: str | None) -> str | None:
 def _reject_symlink(path: Path) -> None:
     if path.is_symlink():
         raise LabExportError(f"拒绝覆盖符号链接：{path}")
+
+
+def _validate_session_sources(paths: SessionPaths) -> None:
+    if paths.root.is_symlink():
+        raise LabExportError("实验目录不能是符号链接。")
+    try:
+        root = paths.root.resolve(strict=True)
+    except OSError as exc:
+        raise LabExportError(f"找不到实验目录：{paths.root}") from exc
+    if not root.is_dir():
+        raise LabExportError(f"实验路径不是目录：{paths.root}")
+    sidecars = (
+        paths.cast,
+        paths.captures,
+        paths.captures.with_suffix(paths.captures.suffix + ".bak"),
+        paths.metadata,
+        paths.checkpoints,
+    )
+    for sidecar in sidecars:
+        if sidecar.is_symlink():
+            raise LabExportError(f"实验 sidecar 不能是符号链接：{sidecar.name}")
+        if sidecar.exists() and not sidecar.resolve(strict=True).is_relative_to(root):
+            raise LabExportError(f"实验 sidecar 越出实验目录：{sidecar.name}")
+    if not paths.cast.is_file():
+        raise LabExportError(f"找不到实验录制文件：{paths.cast}")
+
+
+def _escape_markdown_text(value: str) -> str:
+    escaped = re.sub(r"([\\`*_{}\[\]()#+|%])", r"\\\1", value)
+    return html.escape(escaped, quote=False)
+
+
+def _markdown_url(value: str) -> str:
+    parts: list[str] = []
+    for character in value:
+        if ord(character) > 127 or character.isalnum() or character in "-._~/":
+            parts.append(character)
+        else:
+            parts.extend(f"%{byte:02X}" for byte in character.encode())
+    return "".join(parts)
+
+
+def _windows_units(value: str) -> int:
+    return len(value.encode("utf-16-le")) // 2
