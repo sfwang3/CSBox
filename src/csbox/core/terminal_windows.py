@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import codecs
+import os
 import threading
 import time
-from collections import deque
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -14,14 +15,31 @@ from csbox.core.terminal import DEFAULT_TERMINAL_SIZE, TerminalBackend, Terminal
 class WindowsConPTYBackend(TerminalBackend):
     """A thread-safe adapter around pywinpty's high-level PtyProcess API."""
 
-    def __init__(self, *, pty_process_factory: Any | None = None) -> None:
+    _READ_SIZE = 65536
+    _CLOSE_GRACE = 0.05
+    _READER_JOIN_TIMEOUT = 0.5
+
+    def __init__(
+        self,
+        *,
+        pty_process_factory: Any | None = None,
+        write_timeout: float = 0.1,
+    ) -> None:
+        if write_timeout <= 0:
+            raise ValueError("终端写入超时时间必须是正数。")
         self._pty_process_factory = pty_process_factory
+        self._write_timeout = write_timeout
         self._process: Any | None = None
-        self._pending: deque[bytes] = deque()
+        self._reader_thread: threading.Thread | None = None
+        self._output = bytearray()
+        self._reader_done = False
+        self._reader_error: Exception | None = None
+        self._input_buffer = b""
         self._exit_code: int | None = None
-        self._eof = False
         self._closed = False
-        self._lock = threading.RLock()
+        self._closing = False
+        self._state_lock = threading.RLock()
+        self._output_ready = threading.Condition()
 
     def spawn(
         self,
@@ -33,67 +51,79 @@ class WindowsConPTYBackend(TerminalBackend):
     ) -> None:
         if not command or not all(isinstance(argument, str) and argument for argument in command):
             raise ValueError("终端启动命令不能为空，且参数必须是非空字符串。")
-        with self._lock:
+        with self._state_lock:
             if self._process is not None:
                 raise RuntimeError("终端进程已经启动。")
             factory = self._load_factory()
+            child_env = os.environ.copy()
+            if env is not None:
+                child_env.update(env)
             try:
-                self._process = factory.spawn(
+                process = factory.spawn(
                     list(command),
                     cwd=None if cwd is None else str(cwd),
-                    env=None if env is None else dict(env),
+                    env=child_env,
                     dimensions=(size.rows, size.columns),
-                    backend=0,
+                    backend="0",
                 )
             except Exception as cause:
                 raise TerminalBackendError(
                     "无法创建 Windows ConPTY，请检查 Windows 版本和 Shell 配置。", cause
                 ) from cause
+            self._process = process
             self._closed = False
+            reader = threading.Thread(
+                target=self._reader_loop,
+                args=(process,),
+                name="csbox-conpty-reader",
+                daemon=True,
+            )
+            self._reader_thread = reader
+            reader.start()
 
     def read(self, max_bytes: int = 65536, timeout: float = 0.05) -> bytes | None:
         if type(max_bytes) is not int or max_bytes <= 0:
             raise ValueError("单次读取字节数必须是正整数。")
         if timeout < 0:
             raise ValueError("读取超时时间不能为负数。")
+        if self._process is None:
+            raise RuntimeError("终端进程尚未启动。")
 
         deadline = time.monotonic() + timeout
-        while True:
-            with self._lock:
-                pending = self._take_pending(max_bytes)
-                if pending is not None:
-                    return pending
-                if self._eof:
+        with self._output_ready:
+            while True:
+                if self._output:
+                    data = bytes(self._output[:max_bytes])
+                    del self._output[:max_bytes]
+                    return data
+                if self._reader_error is not None:
+                    cause = self._reader_error
+                    raise TerminalBackendError("读取 Windows ConPTY 输出失败。", cause) from cause
+                if self._reader_done:
                     return b""
-                if self._process is None:
-                    raise RuntimeError("终端进程尚未启动。")
-                result = self._read_process_once(max_bytes)
-                if result is not None:
-                    return result
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return None
-            time.sleep(min(0.005, remaining))
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                self._output_ready.wait(remaining)
 
     def write(self, data: bytes) -> int:
         if not isinstance(data, bytes):
             raise TypeError("终端输入必须是 bytes。")
-        text = data.decode("utf-8")
-        with self._lock:
+        with self._state_lock:
             process = self._require_process()
-            if self._closed or self._eof:
+            if self._closed:
                 raise BrokenPipeError("终端已关闭，无法写入。")
-            try:
-                process.write(text)
-            except Exception as cause:
-                raise TerminalBackendError("写入 Windows ConPTY 失败。", cause) from cause
+            candidate = self._input_buffer + data
+            self._complete_utf8_length(candidate)
+            self._input_buffer = candidate
+            self._flush_complete_input(process)
         return len(data)
 
     def resize(self, columns: int, rows: int) -> None:
         self._validate_dimensions(columns, rows)
-        with self._lock:
+        with self._state_lock:
             process = self._require_process()
-            if self._closed or self._eof:
+            if self._closed:
                 raise RuntimeError("终端进程已经关闭。")
             try:
                 process.setwinsize(rows, columns)
@@ -101,7 +131,7 @@ class WindowsConPTYBackend(TerminalBackend):
                 raise TerminalBackendError("调整 Windows ConPTY 尺寸失败。", cause) from cause
 
     def is_alive(self) -> bool:
-        with self._lock:
+        with self._state_lock:
             if self._process is None or self._closed:
                 return False
             try:
@@ -126,33 +156,45 @@ class WindowsConPTYBackend(TerminalBackend):
 
     @property
     def exit_code(self) -> int | None:
-        with self._lock:
-            if self._process is not None and not self._closed:
-                try:
-                    if not self._process.isalive():
-                        self._capture_exit_status()
-                except Exception:
-                    pass
+        with self._state_lock:
+            self._capture_exit_status()
             return self._exit_code
 
     def close(self) -> None:
-        with self._lock:
+        with self._state_lock:
             if self._closed:
                 return
             process = self._process
-            failure: Exception | None = None
-            if process is not None:
-                self._drain_available()
-                self._capture_exit_status()
-                try:
-                    process.close()
-                except Exception as cause:
-                    failure = cause
-                self._capture_exit_status()
+            if process is None:
+                self._closed = True
+                with self._output_ready:
+                    self._reader_done = True
+                    self._output_ready.notify_all()
+                return
+
+            force = self._wait_for_natural_exit(process, self._CLOSE_GRACE)
+            self._closing = True
+            try:
+                process.close(force=force)
+            except Exception as cause:
+                self._closing = False
+                raise TerminalBackendError(
+                    "关闭 Windows ConPTY 失败，可重试清理。", cause
+                ) from cause
+
+            reader = self._reader_thread
+            if reader is not None:
+                reader.join(self._READER_JOIN_TIMEOUT)
+                if reader.is_alive():
+                    self._closing = False
+                    cause = TimeoutError("pywinpty reader did not stop after close")
+                    raise TerminalBackendError(
+                        "Windows ConPTY 读取线程未能及时停止，可重试清理。", cause
+                    ) from cause
+
+            self._capture_exit_status()
             self._closed = True
-            self._eof = True
-            if failure is not None:
-                raise TerminalBackendError("关闭 Windows ConPTY 失败。", failure) from failure
+            self._closing = False
 
     def _load_factory(self) -> Any:
         if self._pty_process_factory is not None:
@@ -167,60 +209,85 @@ class WindowsConPTYBackend(TerminalBackend):
         self._pty_process_factory = PtyProcess
         return PtyProcess
 
-    def _read_process_once(self, max_bytes: int) -> bytes | None:
+    def _reader_loop(self, process: Any) -> None:
+        reader_error: Exception | None = None
         try:
-            text = self._process.read(max_bytes, blocking=False)
+            while True:
+                text = process.read(self._READ_SIZE)
+                if not text:
+                    continue
+                if not isinstance(text, str):
+                    raise TypeError(f"PtyProcess.read returned {type(text).__name__}")
+                encoded = text.encode("utf-8")
+                with self._output_ready:
+                    self._output.extend(encoded)
+                    self._output_ready.notify_all()
         except EOFError:
-            self._capture_exit_status()
-            self._eof = True
-            return b""
+            pass
         except Exception as cause:
-            raise TerminalBackendError("读取 Windows ConPTY 输出失败。", cause) from cause
-        if text:
-            if not isinstance(text, str):
-                cause = TypeError(f"PtyProcess.read returned {type(text).__name__}")
-                raise TerminalBackendError(
-                    "Windows ConPTY 返回了无效的文本数据。", cause
-                ) from cause
-            encoded = text.encode("utf-8")
-            if len(encoded) > max_bytes:
-                self._pending.append(encoded[max_bytes:])
-                return encoded[:max_bytes]
-            return encoded
-        try:
-            alive = bool(self._process.isalive())
-        except Exception as cause:
-            raise TerminalBackendError("查询 Windows ConPTY 状态失败。", cause) from cause
-        if alive:
-            return None
-        self._capture_exit_status()
-        self._eof = True
-        return b""
+            if not self._closing:
+                reader_error = cause
+        finally:
+            with self._output_ready:
+                self._reader_error = reader_error
+                self._reader_done = True
+                self._output_ready.notify_all()
 
-    def _drain_available(self) -> None:
-        process = self._process
-        if process is None:
-            return
-        for _ in range(64):
+    def _flush_complete_input(self, process: Any) -> None:
+        deadline = time.monotonic() + self._write_timeout
+        while True:
+            complete_length = self._complete_utf8_length(self._input_buffer)
+            if complete_length == 0:
+                return
+            complete_bytes = self._input_buffer[:complete_length]
+            text = complete_bytes.decode("utf-8")
             try:
-                text = process.read(65536, blocking=False)
-            except EOFError:
-                break
-            except Exception:
-                break
-            if not text:
-                break
-            if isinstance(text, str):
-                self._pending.append(text.encode("utf-8"))
+                written = process.write(text)
+            except Exception as cause:
+                raise TerminalBackendError("写入 Windows ConPTY 失败。", cause) from cause
+            if type(written) is not int or written < 0 or written > len(complete_bytes):
+                cause = ValueError(f"invalid PtyProcess.write result: {written!r}")
+                raise TerminalBackendError(
+                    "Windows ConPTY 返回了无效的写入字节数。", cause
+                ) from cause
+            if written == 0:
+                if time.monotonic() >= deadline:
+                    cause = BlockingIOError("PtyProcess.write made no progress")
+                    raise TerminalBackendError(
+                        "Windows ConPTY 写入暂时无法取得进展。", cause
+                    ) from cause
+                time.sleep(0.001)
+                continue
+            try:
+                complete_bytes[:written].decode("utf-8")
+                complete_bytes[written:].decode("utf-8")
+            except UnicodeDecodeError as cause:
+                raise TerminalBackendError(
+                    "Windows ConPTY 在 UTF-8 字符中间报告了部分写入，无法安全续写。", cause
+                ) from cause
+            self._input_buffer = self._input_buffer[written:]
 
-    def _take_pending(self, max_bytes: int) -> bytes | None:
-        if not self._pending:
-            return None
-        frame = self._pending.popleft()
-        if len(frame) <= max_bytes:
-            return frame
-        self._pending.appendleft(frame[max_bytes:])
-        return frame[:max_bytes]
+    @staticmethod
+    def _complete_utf8_length(data: bytes) -> int:
+        decoder = codecs.getincrementaldecoder("utf-8")()
+        decoder.decode(data, final=False)
+        pending, _ = decoder.getstate()
+        return len(data) - len(pending)
+
+    def _wait_for_natural_exit(self, process: Any, timeout: float) -> bool:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                alive = bool(process.isalive())
+            except Exception as cause:
+                raise TerminalBackendError("查询 Windows ConPTY 状态失败。", cause) from cause
+            if not alive:
+                self._capture_exit_status()
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return True
+            time.sleep(min(0.01, remaining))
 
     def _capture_exit_status(self) -> None:
         if self._process is None or self._exit_code is not None:
