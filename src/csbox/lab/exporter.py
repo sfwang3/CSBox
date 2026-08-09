@@ -6,10 +6,14 @@ import re
 import shutil
 import unicodedata
 from dataclasses import dataclass
-from pathlib import Path
+from datetime import datetime, timedelta
+from pathlib import Path, PurePosixPath
+from urllib.parse import unquote
+
+from pydantic import ValidationError
 
 from csbox.lab.captures import CaptureStore
-from csbox.lab.models import CaptureRecord, SessionPaths
+from csbox.lab.models import SessionMetadata, SessionPaths
 from csbox.lab.renderer import RenderTheme, TerminalEvidenceRenderer
 
 _COMPONENT_BUDGET = 240
@@ -56,8 +60,17 @@ class LabExporter:
         self._prepare_destination(output, force=force)
         evidence_directory = output / "evidence"
         self._prepare_evidence_directory(evidence_directory)
+        markdown_path = output / "evidence.md"
+        cast_path = output / "session.cast"
+        commands_path = output / "commands.txt"
+        for path in (markdown_path, cast_path, commands_path):
+            _reject_symlink(path)
+        previous_evidence, cleanup_warnings = (
+            _previous_generated_evidence(output) if force else ((), ())
+        )
 
         capture_result = CaptureStore(paths.captures).load()
+        session_start, metadata_warnings = _load_session_start(paths)
         rendered: list[Path] = []
         markdown_entries: list[str] = []
         commands: list[str] = []
@@ -68,16 +81,16 @@ class LabExporter:
             _reject_symlink(image_path)
             self.renderer.render(capture.snapshot, image_path, self.theme)
             rendered.append(image_path)
-            markdown_entries.append(_markdown_entry(index, title, capture, image_path.name))
+            captured_at = (
+                session_start + timedelta(seconds=capture.timestamp)
+                if session_start is not None
+                else capture.created_at
+            )
+            markdown_entries.append(_markdown_entry(index, title, captured_at, image_path.name))
             command = _known_command(capture.command)
             if command is not None:
                 commands.append(command)
 
-        markdown_path = output / "evidence.md"
-        cast_path = output / "session.cast"
-        commands_path = output / "commands.txt"
-        for path in (markdown_path, cast_path, commands_path):
-            _reject_symlink(path)
         markdown = "## 实验记录\n"
         if markdown_entries:
             markdown += "\n" + "\n\n".join(markdown_entries) + "\n"
@@ -89,6 +102,10 @@ class LabExporter:
             exported_commands = commands_path
         elif force and commands_path.is_file():
             commands_path.unlink()
+        current_evidence = set(rendered)
+        for stale in previous_evidence:
+            if stale not in current_evidence and stale.is_file():
+                stale.unlink()
 
         return LabExportResult(
             destination=output,
@@ -96,7 +113,7 @@ class LabExporter:
             markdown=markdown_path,
             cast=cast_path,
             commands=exported_commands,
-            warnings=capture_result.warnings,
+            warnings=(*capture_result.warnings, *metadata_warnings, *cleanup_warnings),
         )
 
     @staticmethod
@@ -123,13 +140,13 @@ class LabExporter:
 def _markdown_entry(
     index: int,
     title: str,
-    capture: CaptureRecord,
+    captured_at: datetime,
     image_name: str,
 ) -> str:
     return (
         f"### {index}. {title}\n\n"
         "时间：\n"
-        f"{capture.created_at:%H:%M:%S}\n\n"
+        f"{captured_at:%H:%M:%S}\n\n"
         "结果：\n\n"
         f"![实验记录]({_markdown_url(f'evidence/{image_name}')})"
     )
@@ -256,3 +273,35 @@ def _markdown_url(value: str) -> str:
 
 def _windows_units(value: str) -> int:
     return len(value.encode("utf-16-le")) // 2
+
+
+def _load_session_start(paths: SessionPaths) -> tuple[datetime | None, tuple[str, ...]]:
+    if not paths.metadata.exists():
+        return None, ("metadata.json 缺失，证据时间回退到 capture createdAt。",)
+    try:
+        metadata = SessionMetadata.model_validate_json(paths.metadata.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValidationError, ValueError) as exc:
+        return None, (f"metadata.json 无效，证据时间回退到 capture createdAt：{exc}",)
+    return metadata.started_at, ()
+
+
+def _previous_generated_evidence(
+    destination: Path,
+) -> tuple[tuple[Path, ...], tuple[str, ...]]:
+    markdown = destination / "evidence.md"
+    if not markdown.exists():
+        return (), ()
+    try:
+        content = markdown.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        return (), (f"旧 evidence.md 无法读取，未清理历史 evidence：{exc}",)
+    generated: list[Path] = []
+    for encoded in re.findall(r"!\[实验记录\]\((evidence/[^)\r\n]+)\)", content):
+        relative = PurePosixPath(unquote(encoded))
+        if len(relative.parts) != 2 or relative.parts[0] != "evidence":
+            continue
+        candidate = destination / "evidence" / relative.name
+        if candidate.is_symlink():
+            raise LabExportError(f"历史 evidence 不能是符号链接：{candidate.name}")
+        generated.append(candidate)
+    return tuple(generated), ()

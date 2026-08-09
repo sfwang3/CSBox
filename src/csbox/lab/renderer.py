@@ -1,13 +1,21 @@
 from __future__ import annotations
 
 import math
+import os
+import tempfile
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
 from PIL import Image, ImageDraw, ImageFont
 
-from csbox.lab.fonts import FontResolver, ResolvedFonts
+from csbox.lab.fonts import (
+    FontResolutionError,
+    FontResolver,
+    ResolvedFonts,
+    font_supports_text,
+)
 from csbox.lab.screen import TerminalCell, TerminalSnapshot
 
 RGB = tuple[int, int, int]
@@ -85,6 +93,10 @@ class TerminalEvidenceRenderer:
         self.fonts: ResolvedFonts = (font_resolver or FontResolver()).resolve()
         self._ascii_font = ImageFont.truetype(str(self.fonts.ascii), size=font_size)
         self._cjk_font = ImageFont.truetype(str(self.fonts.cjk), size=font_size)
+        self._fallback_fonts = tuple(
+            ImageFont.truetype(str(path), size=font_size) for path in self.fonts.fallbacks
+        )
+        self._font_cache: dict[str, ImageFont.FreeTypeFont] = {}
         ascii_advance = self._ascii_font.getlength("M")
         cjk_half_advance = self._cjk_font.getlength("中") / 2
         self.cell_width = max(1, math.ceil(ascii_advance), math.ceil(cjk_half_advance))
@@ -114,7 +126,7 @@ class TerminalEvidenceRenderer:
                 if cell.width == 0:
                     continue
                 self._draw_cell(draw, row_index, column_index, cell, selected_theme)
-        image.save(path, format="PNG")
+        _save_png_atomic(image, path)
         return path
 
     def _draw_cell(
@@ -137,11 +149,63 @@ class TerminalEvidenceRenderer:
             fill=background,
         )
         if cell.character:
-            font = self._cjk_font if cell.width == 2 else self._ascii_font
-            draw.text((x, y), cell.character, font=font, fill=foreground)
+            font = self._font_for_text(cell.character, wide=cell.width == 2)
+            text_options: dict[str, object] = {"font": font, "fill": foreground}
+            if cell.bold:
+                text_options.update(stroke_width=1, stroke_fill=foreground)
+            draw.text((x, y), cell.character, **text_options)
         if cell.underline:
             underline_y = y + self.cell_height - 2
             draw.line((x, underline_y, x + span - 1, underline_y), fill=foreground, width=1)
         if cell.strikethrough:
             strike_y = y + self.cell_height // 2
             draw.line((x, strike_y, x + span - 1, strike_y), fill=foreground, width=1)
+
+    def _font_for_text(self, text: str, *, wide: bool) -> ImageFont.FreeTypeFont:
+        cached = self._font_cache.get(text)
+        if cached is not None:
+            return cached
+        preferred = (self._cjk_font, *self._fallback_fonts, self._ascii_font)
+        if not wide and text.isascii():
+            preferred = (self._ascii_font, self._cjk_font, *self._fallback_fonts)
+        for font in preferred:
+            if font_supports_text(font, text):
+                self._font_cache[text] = font
+                return font
+        codepoints = " ".join(f"U+{ord(character):04X}" for character in text)
+        raise FontResolutionError(
+            f"找不到能显示字符 {codepoints} 的字体，请配置包含该字形的 render.font。"
+        )
+
+
+def _save_png_atomic(image: Image.Image, destination: Path) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=destination.parent,
+        prefix=f".{destination.name}.",
+        suffix=".tmp",
+    )
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        image.save(temporary, format="PNG")
+        with temporary.open("rb") as stream:
+            os.fsync(stream.fileno())
+        os.replace(temporary, destination)
+        _fsync_directory(destination.parent)
+    except BaseException:
+        with suppress(OSError):
+            temporary.unlink(missing_ok=True)
+        raise
+
+
+def _fsync_directory(directory: Path) -> None:
+    try:
+        descriptor = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)

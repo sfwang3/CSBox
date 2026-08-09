@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +17,7 @@ class FontResolutionError(RuntimeError):
 class ResolvedFonts:
     ascii: Path
     cjk: Path
+    fallbacks: tuple[Path, ...] = ()
 
 
 class FontResolver:
@@ -48,7 +50,12 @@ class FontResolver:
                 "找不到支持中文的字体，请安装 Noto CJK/微软雅黑，"
                 "或在配置 render.font 中填写支持中文的字体文件路径。"
             )
-        self._resolved = ResolvedFonts(ascii=ascii_font, cjk=cjk_font)
+        fallbacks = tuple(
+            path
+            for path in available
+            if path not in {ascii_font, cjk_font} and _load_font(path) is not None
+        )
+        self._resolved = ResolvedFonts(ascii=ascii_font, cjk=cjk_font, fallbacks=fallbacks)
         return self._resolved
 
 
@@ -97,6 +104,17 @@ def _has_cjk_coverage(path: Path) -> bool:
 
 def _has_glyph(font: ImageFont.FreeTypeFont, character: str) -> bool:
     return _glyph_signature(font, character) != _glyph_signature(font, "\u0378")
+
+
+def font_supports_text(font: ImageFont.FreeTypeFont, text: str) -> bool:
+    """Return whether a loaded font covers every visible codepoint."""
+
+    return all(
+        character.isspace()
+        or unicodedata.category(character).startswith("C")
+        or _has_glyph(font, character)
+        for character in text
+    )
 
 
 def _glyph_signature(

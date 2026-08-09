@@ -194,7 +194,7 @@ def test_reverse_swaps_cell_colors_and_underline_uses_cell_span(
     )
 
 
-def test_font_resolver_is_deterministic_and_requires_real_cjk_coverage(
+def test_font_resolver_is_deterministic(
     font_paths: tuple[Path, Path],
 ) -> None:
     ascii_font, cjk_font = font_paths
@@ -207,5 +207,82 @@ def test_font_resolver_is_deterministic_and_requires_real_cjk_coverage(
     assert first.ascii == ascii_font
     assert first.cjk == cjk_font
 
+
+def test_font_resolver_missing_cjk_error_does_not_depend_on_system_cjk_font(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dummy_font = tmp_path / "ascii-only.ttf"
+    dummy_font.write_bytes(b"test double boundary")
+    monkeypatch.setattr("csbox.lab.fonts._is_ascii_monospace", lambda path: True)
+    monkeypatch.setattr("csbox.lab.fonts._has_cjk_coverage", lambda path: False)
+
     with pytest.raises(FontResolutionError, match="中文.*字体|字体.*中文"):
-        FontResolver(candidates=(ascii_font,)).resolve()
+        FontResolver(candidates=(dummy_font,)).resolve()
+
+
+def test_renderer_rejects_actual_snapshot_glyph_missing_from_all_candidates(
+    tmp_path: Path, font_paths: tuple[Path, Path]
+) -> None:
+    terminal = snapshot(
+        (
+            TerminalCell(character="\U00020000", width=2),
+            TerminalCell(character="", width=0),
+        )
+    )
+    renderer = TerminalEvidenceRenderer(FontResolver(candidates=font_paths))
+    destination = tmp_path / "missing-extension-b.png"
+
+    with pytest.raises(FontResolutionError, match="字符|字形|字体"):
+        renderer.render(terminal, destination, RenderTheme.dark())
+
+    assert not destination.exists()
+
+
+def test_renderer_atomically_preserves_existing_png_when_save_fails(
+    tmp_path: Path,
+    font_paths: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    terminal = snapshot((TerminalCell(character="A"),))
+    renderer = TerminalEvidenceRenderer(FontResolver(candidates=font_paths))
+    destination = tmp_path / "evidence.png"
+    destination.write_bytes(b"previous png")
+
+    def fail_save(image: Image.Image, target: str | Path, *args: object, **kwargs: object) -> None:
+        Path(target).write_bytes(b"partial png")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Image.Image, "save", fail_save)
+
+    with pytest.raises(OSError, match="disk full"):
+        renderer.render(terminal, destination, RenderTheme.dark())
+
+    assert destination.read_bytes() == b"previous png"
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_renderer_marks_bold_text_without_changing_its_cell_origin(
+    tmp_path: Path,
+    font_paths: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    terminal = snapshot((TerminalCell(character="B", bold=True),))
+    renderer = TerminalEvidenceRenderer(FontResolver(candidates=font_paths), padding=4)
+    calls: list[tuple[tuple[float, float], int]] = []
+    original_text = ImageDraw.ImageDraw.text
+
+    def observe_text(
+        draw: ImageDraw.ImageDraw,
+        xy: tuple[float, float],
+        text: str,
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        calls.append((xy, int(kwargs.get("stroke_width", 0))))
+        original_text(draw, xy, text, *args, **kwargs)
+
+    monkeypatch.setattr(ImageDraw.ImageDraw, "text", observe_text)
+
+    renderer.render(terminal, tmp_path / "bold.png", RenderTheme.dark())
+
+    assert calls == [((renderer.padding, renderer.padding), 1)]

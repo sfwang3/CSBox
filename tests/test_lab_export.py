@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -123,6 +124,7 @@ def test_export_writes_ordered_safe_pngs_cast_commands_and_stable_chinese_markdo
     assert result.commands is not None
     assert result.commands.read_text(encoding="utf-8") == "ip addr\n"
     assert "unknown" not in result.commands.read_text(encoding="utf-8").lower()
+    assert any("metadata" in warning for warning in result.warnings)
     assert not (tmp_path / "课程").exists()
 
 
@@ -273,3 +275,66 @@ def test_export_rejects_session_sidecar_symlinks_before_reading_them(
 
     assert external.read_text(encoding="utf-8") == "fake private content"
     assert not destination.exists()
+
+
+def test_force_export_removes_only_stale_generated_evidence(
+    tmp_path: Path,
+    session_with_captures: SessionPaths,
+    exporter: LabExporter,
+) -> None:
+    destination = tmp_path / "export"
+    first = exporter.export(session_with_captures, destination)
+    stale = first.evidence[1]
+    user_png = destination / "evidence" / "notes.png"
+    user_png.write_bytes(b"user image")
+    user_file = destination / "evidence" / "keep.txt"
+    user_file.write_text("keep", encoding="utf-8")
+    assert CaptureStore(session_with_captures.captures).delete("capture-2")
+
+    second = exporter.export(session_with_captures, destination, force=True)
+
+    assert [path.name for path in second.evidence] == ["01-查看网络接口.png"]
+    assert not stale.exists()
+    assert user_png.read_bytes() == b"user image"
+    assert user_file.read_text(encoding="utf-8") == "keep"
+
+
+def test_export_uses_session_start_plus_capture_offset_and_warns_on_bad_metadata(
+    tmp_path: Path, exporter: LabExporter
+) -> None:
+    paths = SessionPaths(tmp_path / "session")
+    paths.root.mkdir()
+    paths.cast.write_bytes(FIXTURE_CAST.read_bytes())
+    CaptureStore(
+        paths.captures,
+        clock=lambda: datetime(2026, 8, 10, 20, 0, tzinfo=UTC),
+    ).create_capture(
+        rendered_snapshot("done", 90.0),
+        cwd=tmp_path,
+        title="时间证据",
+    )
+    metadata = {
+        "id": "session-1",
+        "name": "实验",
+        "status": "completed",
+        "startedAt": "2026-08-10T14:23:00Z",
+        "endedAt": "2026-08-10T14:30:00Z",
+        "platform": "linux",
+        "shell": "bash",
+        "shellVersion": "5.2",
+        "initialRows": 24,
+        "initialColumns": 80,
+        "cwd": str(tmp_path),
+        "csboxVersion": "0.1.0",
+    }
+    paths.metadata.write_text(json.dumps(metadata), encoding="utf-8")
+
+    reliable = exporter.export(paths, tmp_path / "reliable")
+
+    assert "14:24:30" in reliable.markdown.read_text(encoding="utf-8")
+    assert not any("metadata" in warning for warning in reliable.warnings)
+
+    paths.metadata.write_text("{broken", encoding="utf-8")
+    fallback = exporter.export(paths, tmp_path / "fallback")
+    assert "20:00:00" in fallback.markdown.read_text(encoding="utf-8")
+    assert any("metadata" in warning for warning in fallback.warnings)
