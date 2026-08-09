@@ -35,6 +35,7 @@ class CastReadResult:
     events: tuple[CastEvent, ...]
     warnings: tuple[str, ...]
     data_offset: int = 0
+    trailing_interval: float = 0.0
 
 
 _STOP: Final = object()
@@ -302,6 +303,7 @@ class AsciicastV3Reader:
             events=tuple(events),
             warnings=tuple(warnings),
             data_offset=data_offset,
+            trailing_interval=pending_unknown_interval,
         )
 
 

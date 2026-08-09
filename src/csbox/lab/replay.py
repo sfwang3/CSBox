@@ -7,15 +7,23 @@ import os
 import tempfile
 from collections.abc import Callable, Mapping
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Final
 
 from csbox.core.events import TerminalEvent, TerminalEventType, TerminalSize
 from csbox.lab.recorder import AsciicastV3Reader, CastEvent, CastReadResult
-from csbox.lab.screen import TerminalCell, TerminalCursor, TerminalEmulator, TerminalSnapshot
+from csbox.lab.screen import (
+    TerminalAttributes,
+    TerminalCell,
+    TerminalCursor,
+    TerminalEmulator,
+    TerminalEmulatorState,
+    TerminalSavepoint,
+    TerminalSnapshot,
+)
 
-CHECKPOINT_VERSION: Final = 1
+CHECKPOINT_VERSION: Final = 2
 CHECKPOINT_SECONDS: Final = 5.0
 CHECKPOINT_EVENTS: Final = 500
 
@@ -60,6 +68,9 @@ class CheckpointStore:
             if not isinstance(raw_checkpoints, list):
                 return None
             checksum = value.get("checksum")
+            # This detects accidental corruption only.  It is not an
+            # authentication boundary against a local writer who can also
+            # recompute the checksum; structural/source checks remain below.
             if not isinstance(checksum, str) or checksum != _checkpoint_checksum(raw_checkpoints):
                 return None
             checkpoints = tuple(_checkpoint_from_json(item) for item in raw_checkpoints)
@@ -106,7 +117,8 @@ class ReplayService:
         self.warnings = read_result.warnings
         self._columns, self._rows = _header_dimensions(read_result.header)
         self._events = _timed_events(read_result.events)
-        self.duration = self._events[-1].relative_time if self._events else 0.0
+        event_duration = self._events[-1].relative_time if self._events else 0.0
+        self.duration = event_duration + read_result.trailing_interval
         checkpoints = self.checkpoint_store.load(self.cast_path)
         if not _checkpoints_match(checkpoints, read_result, self._events):
             checkpoints = self._build_checkpoints(read_result)
@@ -119,7 +131,7 @@ class ReplayService:
             raise TypeError("relative_time must be a number")
         if not math.isfinite(relative_time):
             raise ValueError("relative_time must be finite")
-        target = max(0.0, float(relative_time))
+        target = min(max(0.0, float(relative_time)), self.duration)
         checkpoint = max(
             (item for item in self.checkpoints if item.relative_time <= target),
             key=lambda item: (item.relative_time, item.event_index),
@@ -138,7 +150,7 @@ class ReplayService:
             event = _terminal_event(event_index, replay_event)
             if event is not None:
                 emulator.apply(event)
-        return emulator.snapshot()
+        return replace(emulator.snapshot(), relative_time=target)
 
     def _build_checkpoints(self, read_result: CastReadResult) -> tuple[Checkpoint, ...]:
         emulator = self._emulator_factory(columns=self._columns, rows=self._rows)
@@ -156,7 +168,7 @@ class ReplayService:
             event = _terminal_event(event_index - 1, replay_event)
             if event is not None:
                 emulator.apply(event)
-            if (
+            if emulator.checkpoint_safe and (
                 replay_event.relative_time - last_checkpoint_time >= CHECKPOINT_SECONDS
                 or event_index - last_checkpoint_index >= CHECKPOINT_EVENTS
             ):
@@ -235,8 +247,6 @@ def _checkpoints_match(
 ) -> bool:
     if not checkpoints:
         return False
-    if tuple(checkpoint.event_index for checkpoint in checkpoints) != _checkpoint_indices(events):
-        return False
     previous_index = -1
     previous_time = -1.0
     for checkpoint in checkpoints:
@@ -254,6 +264,13 @@ def _checkpoints_match(
         )
         if checkpoint.relative_time != expected_time or checkpoint.cast_offset != expected_offset:
             return False
+        if checkpoint.event_index > 0 and not (
+            checkpoint.relative_time - previous_time >= CHECKPOINT_SECONDS
+            or checkpoint.event_index - previous_index >= CHECKPOINT_EVENTS
+        ):
+            return False
+        if checkpoint.snapshot.state is None:
+            return False
         previous_index = checkpoint.event_index
         previous_time = checkpoint.relative_time
     initial = checkpoints[0]
@@ -264,21 +281,6 @@ def _checkpoints_match(
         and initial.snapshot.columns == columns
         and initial.snapshot.rows == rows
     )
-
-
-def _checkpoint_indices(events: tuple[_ReplayEvent, ...]) -> tuple[int, ...]:
-    indices = [0]
-    last_checkpoint_time = 0.0
-    last_checkpoint_index = 0
-    for event_index, event in enumerate(events, start=1):
-        if (
-            event.relative_time - last_checkpoint_time >= CHECKPOINT_SECONDS
-            or event_index - last_checkpoint_index >= CHECKPOINT_EVENTS
-        ):
-            indices.append(event_index)
-            last_checkpoint_time = event.relative_time
-            last_checkpoint_index = event_index
-    return tuple(indices)
 
 
 def _cast_fingerprint(path: Path) -> dict[str, int | str]:
@@ -357,6 +359,7 @@ def _snapshot_to_json(snapshot: TerminalSnapshot) -> dict[str, Any]:
             "visible": snapshot.cursor.visible,
         },
         "relativeTime": snapshot.relative_time,
+        "state": None if snapshot.state is None else _state_to_json(snapshot.state),
     }
 
 
@@ -405,11 +408,207 @@ def _snapshot_from_json(value: object) -> TerminalSnapshot:
         cells=cells,
         cursor=TerminalCursor(cursor_row, cursor_column, cursor_visible),
         relative_time=float(relative_time),
+        state=_state_from_json(value.get("state"), columns=columns, rows=rows),
     )
     # Reuse the adapter's public validation boundary without importing a
     # private helper: restore rejects malformed wide-cell geometry.
     TerminalEmulator(columns=columns, rows=rows).restore(snapshot)
     return snapshot
+
+
+def _state_to_json(state: TerminalEmulatorState) -> dict[str, Any]:
+    return {
+        "version": state.version,
+        "cursorRow": state.cursor_row,
+        "cursorColumn": state.cursor_column,
+        "cursorAttributes": _attributes_to_json(state.cursor_attributes),
+        "modes": list(state.modes),
+        "margins": None if state.margins is None else list(state.margins),
+        "tabstops": list(state.tabstops),
+        "charset": state.charset,
+        "g0Charset": state.g0_charset,
+        "g1Charset": state.g1_charset,
+        "savepoints": [_savepoint_to_json(savepoint) for savepoint in state.savepoints],
+        "savedColumns": state.saved_columns,
+        "title": state.title,
+        "iconName": state.icon_name,
+        "useUtf8": state.use_utf8,
+    }
+
+
+def _state_from_json(
+    value: object,
+    *,
+    columns: int,
+    rows: int,
+) -> TerminalEmulatorState | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or value.get("version") != 1:
+        raise ValueError("invalid terminal emulator state version")
+    cursor_row = _required_int(value, "cursorRow")
+    cursor_column = _required_int(value, "cursorColumn")
+    modes = _int_tuple(value.get("modes"), "terminal modes")
+    tabstops = _int_tuple(value.get("tabstops"), "terminal tabstops")
+    margins_value = value.get("margins")
+    margins: tuple[int, int] | None
+    if margins_value is None:
+        margins = None
+    elif (
+        isinstance(margins_value, list)
+        and len(margins_value) == 2
+        and all(type(item) is int for item in margins_value)
+    ):
+        margins = (margins_value[0], margins_value[1])
+    else:
+        raise ValueError("invalid terminal margins")
+    charset = _required_int(value, "charset")
+    saved_columns = value.get("savedColumns")
+    if saved_columns is not None and type(saved_columns) is not int:
+        raise ValueError("invalid terminal saved columns")
+    g0_charset = value.get("g0Charset")
+    g1_charset = value.get("g1Charset")
+    title = value.get("title")
+    icon_name = value.get("iconName")
+    use_utf8 = value.get("useUtf8")
+    if not all(isinstance(item, str) for item in (g0_charset, g1_charset, title, icon_name)):
+        raise ValueError("invalid terminal string state")
+    if type(use_utf8) is not bool:
+        raise ValueError("invalid terminal decoder state")
+    raw_savepoints = value.get("savepoints")
+    if not isinstance(raw_savepoints, list):
+        raise ValueError("invalid terminal savepoints")
+    state = TerminalEmulatorState(
+        version=1,
+        cursor_row=cursor_row,
+        cursor_column=cursor_column,
+        cursor_attributes=_attributes_from_json(value.get("cursorAttributes")),
+        modes=modes,
+        margins=margins,
+        tabstops=tabstops,
+        charset=charset,
+        g0_charset=g0_charset,
+        g1_charset=g1_charset,
+        savepoints=tuple(_savepoint_from_json(item) for item in raw_savepoints),
+        saved_columns=saved_columns,
+        title=title,
+        icon_name=icon_name,
+        use_utf8=use_utf8,
+    )
+    # The adapter performs bounds and semantic validation against the grid.
+    TerminalEmulator(columns=columns, rows=rows).restore(
+        TerminalSnapshot(
+            rows=rows,
+            columns=columns,
+            cells=tuple(tuple(TerminalCell() for _ in range(columns)) for _ in range(rows)),
+            cursor=TerminalCursor(),
+            state=state,
+        )
+    )
+    return state
+
+
+def _attributes_to_json(attributes: TerminalAttributes) -> dict[str, Any]:
+    return {
+        "foreground": attributes.foreground,
+        "background": attributes.background,
+        "bold": attributes.bold,
+        "italic": attributes.italic,
+        "underline": attributes.underline,
+        "strikethrough": attributes.strikethrough,
+        "reverse": attributes.reverse,
+        "blink": attributes.blink,
+    }
+
+
+def _attributes_from_json(value: object) -> TerminalAttributes:
+    if not isinstance(value, Mapping):
+        raise ValueError("invalid terminal attributes")
+    foreground = value.get("foreground")
+    background = value.get("background")
+    flags = [
+        value.get("bold"),
+        value.get("italic"),
+        value.get("underline"),
+        value.get("strikethrough"),
+        value.get("reverse"),
+        value.get("blink"),
+    ]
+    if (
+        not isinstance(foreground, str)
+        or not isinstance(background, str)
+        or any(type(flag) is not bool for flag in flags)
+    ):
+        raise ValueError("invalid terminal attributes")
+    return TerminalAttributes(
+        foreground=foreground,
+        background=background,
+        bold=flags[0],
+        italic=flags[1],
+        underline=flags[2],
+        strikethrough=flags[3],
+        reverse=flags[4],
+        blink=flags[5],
+    )
+
+
+def _savepoint_to_json(savepoint: TerminalSavepoint) -> dict[str, Any]:
+    return {
+        "row": savepoint.row,
+        "column": savepoint.column,
+        "visible": savepoint.visible,
+        "attributes": _attributes_to_json(savepoint.attributes),
+        "g0Charset": savepoint.g0_charset,
+        "g1Charset": savepoint.g1_charset,
+        "charset": savepoint.charset,
+        "origin": savepoint.origin,
+        "wrap": savepoint.wrap,
+    }
+
+
+def _savepoint_from_json(value: object) -> TerminalSavepoint:
+    if not isinstance(value, Mapping):
+        raise ValueError("invalid terminal savepoint")
+    visible = value.get("visible")
+    origin = value.get("origin")
+    wrap = value.get("wrap")
+    g0_charset = value.get("g0Charset")
+    g1_charset = value.get("g1Charset")
+    if (
+        type(visible) is not bool
+        or type(origin) is not bool
+        or type(wrap) is not bool
+        or not isinstance(g0_charset, str)
+        or not isinstance(g1_charset, str)
+    ):
+        raise ValueError("invalid terminal savepoint")
+    return TerminalSavepoint(
+        row=_required_int(value, "row"),
+        column=_required_int(value, "column"),
+        visible=visible,
+        attributes=_attributes_from_json(value.get("attributes")),
+        g0_charset=g0_charset,
+        g1_charset=g1_charset,
+        charset=_required_int(value, "charset"),
+        origin=origin,
+        wrap=wrap,
+    )
+
+
+def _required_int(value: Mapping[str, object], key: str) -> int:
+    item = value.get(key)
+    if type(item) is not int:
+        raise ValueError(f"invalid integer field {key}")
+    return item
+
+
+def _int_tuple(value: object, label: str) -> tuple[int, ...]:
+    if not isinstance(value, list) or any(type(item) is not int for item in value):
+        raise ValueError(f"invalid {label}")
+    result = tuple(value)
+    if result != tuple(sorted(set(result))):
+        raise ValueError(f"invalid {label}")
+    return result
 
 
 def _cell_from_json(value: object) -> TerminalCell:

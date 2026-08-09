@@ -175,12 +175,18 @@ def test_resize_shrink_then_grow_does_not_revive_a_truncated_wide_pair() -> None
     assert_valid_grid(grown)
 
 
-def test_emulator_ignores_non_screen_events() -> None:
+def test_emulator_advances_timeline_for_non_screen_events_without_changing_grid() -> None:
     emulator = TerminalEmulator(columns=8, rows=2)
     before = emulator.snapshot()
 
     emulator.apply(event(1, 1.0, TerminalEventType.INPUT, b"secret"))
+    after_input = emulator.snapshot()
     emulator.apply(event(2, 2.0, TerminalEventType.MARK, "mark"))
+    after_mark = emulator.snapshot()
     emulator.apply(event(3, 3.0, TerminalEventType.EXIT, 0))
+    after_exit = emulator.snapshot()
 
-    assert emulator.snapshot() == before
+    assert after_input.cells == after_mark.cells == after_exit.cells == before.cells
+    assert after_input.relative_time == 1.0
+    assert after_mark.relative_time == 2.0
+    assert after_exit.relative_time == 3.0
