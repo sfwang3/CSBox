@@ -81,11 +81,13 @@ def test_native_windows_conpty_shell_unicode_resize_and_exit(
     )
     backend.resize(100, 30)
     backend.write(
-        ""
-        "$size = $Host.UI.RawUI.WindowSize; "
-        "Write-Output ('CSBOX_SIZE_{0}x{1}' -f $size.Width, $size.Height); "
-        "Write-Output 'CSBOX_NATIVE_中文_OK'; Write-Output (Get-Location); exit 0\r\n"
-    ).encode()
+        (
+            ""
+            "$size = $Host.UI.RawUI.WindowSize; "
+            "Write-Output ('CSBOX_SIZE_{0}x{1}' -f $size.Width, $size.Height); "
+            "Write-Output 'CSBOX_NATIVE_中文_OK'; Write-Output (Get-Location); exit 0\r\n"
+        ).encode()
+    )
 
     output = _read_until(backend, b"CSBOX_SIZE_100x30")
     output += _read_to_eof(backend)
