@@ -331,3 +331,65 @@ UnavailableDialog {
     min-width: 10;
     margin-left: 1;
 }
+
+#check-layout {
+    height: 100%;
+    padding: 1 2 0 2;
+}
+
+#check-summary {
+    height: 3;
+    color: #9da4ff;
+    text-style: bold;
+    border-bottom: solid #25384b;
+    margin-bottom: 1;
+}
+
+#check-body {
+    height: 1fr;
+    layout: horizontal;
+}
+
+#check-findings,
+#check-projects,
+#check-narrow {
+    background: #0e1a26;
+    border: round #29455f;
+    color: #c1d4e4;
+    padding: 1;
+    overflow: hidden;
+}
+
+#check-findings {
+    width: 1fr;
+}
+
+#check-projects {
+    width: 2fr;
+    margin-left: 1;
+}
+
+#check-narrow {
+    display: none;
+    height: 1fr;
+}
+
+#check-footer {
+    height: 1;
+    color: #a5bacd;
+    background: #101e2b;
+    padding: 0 1;
+    margin-top: 1;
+}
+
+.narrow #check-body {
+    display: none;
+}
+
+.narrow #check-narrow {
+    display: block;
+}
+
+.wide #check-narrow {
+    display: none;
+}

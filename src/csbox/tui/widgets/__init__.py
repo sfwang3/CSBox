@@ -7,6 +7,7 @@ from csbox.tui.widgets.home import (
     RecentPanel,
     ShortcutBar,
 )
+from csbox.tui.widgets.project_check import CheckFindings, CheckFooter, CheckSummary
 from csbox.tui.widgets.review import (
     ReviewCaptureList,
     ReviewFooter,
@@ -17,6 +18,9 @@ from csbox.tui.widgets.review import (
 __all__ = [
     "ActionPanel",
     "BrandBlock",
+    "CheckFindings",
+    "CheckFooter",
+    "CheckSummary",
     "EnvironmentPanel",
     "RecentPanel",
     "ReviewCaptureList",

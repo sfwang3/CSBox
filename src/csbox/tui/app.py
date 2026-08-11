@@ -4,6 +4,7 @@ from pathlib import Path
 
 from textual.app import App
 
+from csbox.check.models import CheckReport
 from csbox.core.models import EnvironmentSnapshot
 from csbox.lab.home_data import RealHomeDataSource
 from csbox.lab.ports import HomeDataSource
@@ -11,6 +12,7 @@ from csbox.lab.repository import SessionRepository
 from csbox.locales import Translator
 from csbox.tui.dialogs.unavailable import UnavailableDialog
 from csbox.tui.screens.home import HomeScreen
+from csbox.tui.screens.project_check import ProjectCheckScreen
 from csbox.tui.screens.review import ReviewController, ReviewScreen
 
 
@@ -72,6 +74,25 @@ class ReviewApp(App[None]):
 
     def on_mount(self) -> None:
         self.push_screen(ReviewScreen(controller=self.controller, locale=self.locale))
+
+    def action_quit(self) -> None:
+        self.exit()
+
+
+class CheckApp(App[None]):
+    """Minimal app shell for a service-produced project check report."""
+
+    TITLE = "CSBox Check"
+    CSS_PATH = Path(__file__).parent / "themes" / "csbox.tcss"
+
+    def __init__(self, *, report: CheckReport, locale: Translator) -> None:
+        super().__init__()
+        self.report = report
+        self.locale = locale
+        self.owns_check_screen = True
+
+    def on_mount(self) -> None:
+        self.push_screen(ProjectCheckScreen(report=self.report, locale=self.locale))
 
     def action_quit(self) -> None:
         self.exit()

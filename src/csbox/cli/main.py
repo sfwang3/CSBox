@@ -7,6 +7,7 @@ from typing import Annotated
 import typer
 from rich.console import Console
 
+from csbox.check.service import create_check_service
 from csbox.core.environment import detect_environment
 from csbox.lab.service import create_lab_service
 from csbox.locales import Translator, load_locale
@@ -61,6 +62,76 @@ def doctor() -> None:
         f"{translator('doctor.terminal')}: "
         f"{environment.terminal_columns}×{environment.terminal_rows}"
     )
+
+
+@app.command("check", help="检查项目结构、敏感文件、Git 状态和可选构建。")
+def check_project(
+    root: Path | None = typer.Argument(None, help="待检查的项目目录。"),  # noqa: B008
+    plain: bool = typer.Option(False, "--plain", help="输出纯文本结果。"),
+    json_output: bool = typer.Option(False, "--json", help="输出稳定 JSON。"),
+    build: bool = typer.Option(False, "--build", help="执行检测到的项目构建。"),
+) -> None:
+    if plain and json_output:
+        raise typer.BadParameter("--plain 与 --json 不能同时使用。")
+    try:
+        project_root = root or Path(".")
+        report = create_check_service(project_root).run(project_root, build=build)
+    except Exception as error:
+        Console(markup=False).print(f"项目检查失败：{error}")
+        raise typer.Exit(code=1) from error
+
+    if json_output:
+        payload = report.model_dump(mode="json")
+        payload["findings"] = [_safe_finding_payload(item) for item in payload["findings"]]
+        payload["status"] = report.status.value
+        payload["exitCode"] = report.exit_code
+        Console(markup=False, soft_wrap=True).print(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        )
+    elif plain:
+        _print_check_plain(report)
+    else:
+        from csbox.locales import load_locale
+        from csbox.tui.app import CheckApp
+
+        CheckApp(report=report, locale=load_locale()).run()
+    if report.exit_code:
+        raise typer.Exit(code=report.exit_code)
+
+
+def _print_check_plain(report) -> None:
+    console = Console(markup=False)
+    console.print(f"项目：{report.root}")
+    console.print(f"状态：{report.status.value}")
+    for finding in (*report.findings, *report.builds):
+        location = ""
+        path = getattr(finding, "path", None)
+        if path is not None:
+            location = str(path)
+            line = getattr(finding, "line", None)
+            if line is not None:
+                location += f":{line}"
+        finding_category = getattr(finding, "category", None)
+        category = f" [{finding_category}]" if finding_category else ""
+        identifier = getattr(finding, "rule_id", getattr(finding, "adapter_id", "build"))
+        if (
+            finding_category in {"env", "private-key", "hard-coded-secret"}
+            and finding.status.value == "FAIL"
+        ):
+            console.print(f"{location} {finding_category}")
+            continue
+        console.print(f"{finding.status.value} {identifier}{category} {location} {finding.message}")
+
+
+def _safe_finding_payload(finding: dict[str, object]) -> dict[str, object]:
+    category = finding.get("category")
+    if category in {"env", "private-key", "hard-coded-secret"} and finding.get("status") == "FAIL":
+        return {
+            "path": finding.get("path"),
+            "line": finding.get("line"),
+            "category": category,
+        }
+    return finding
 
 
 @lab_app.command("list")

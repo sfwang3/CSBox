@@ -8,10 +8,12 @@ from textual.events import Resize
 from textual.screen import Screen
 from textual.widgets import Button
 
+from csbox.check.service import CheckService, CheckServiceError
 from csbox.core.models import HomeSnapshot
 from csbox.lab.repository import SessionRepository, SessionRepositoryError
 from csbox.locales import Translator
 from csbox.tui.dialogs.unavailable import UnavailableDialog
+from csbox.tui.screens.project_check import ProjectCheckScreen
 from csbox.tui.screens.review import ReviewController, ReviewScreen
 from csbox.tui.widgets.home import (
     ACTION_DEFINITIONS,
@@ -64,6 +66,9 @@ class HomeScreen(Screen[None]):
         if action_id == "replay":
             self._open_latest_review()
             return
+        if action_id == "check":
+            self._open_project_check()
+            return
         self.app.push_screen(UnavailableDialog(title=self.locale(label_key), locale=self.locale))
 
     def _open_latest_review(self) -> None:
@@ -87,6 +92,21 @@ class HomeScreen(Screen[None]):
                     message_key="home.replay.empty",
                 )
             )
+
+    def _open_project_check(self) -> None:
+        project_dir = self.snapshot.project_dir or Path.cwd()
+        try:
+            report = CheckService().run(project_dir)
+        except (OSError, UnicodeError, ValueError, CheckServiceError):
+            self.app.push_screen(
+                UnavailableDialog(
+                    title=self.locale("home.entry.check"),
+                    locale=self.locale,
+                    message_key="home.check.error",
+                )
+            )
+            return
+        self.app.push_screen(ProjectCheckScreen(report=report, locale=self.locale))
 
     def update_snapshot(self, snapshot: HomeSnapshot) -> None:
         self.snapshot = snapshot
