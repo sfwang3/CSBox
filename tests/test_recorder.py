@@ -63,7 +63,9 @@ def test_recorder_diffuses_millisecond_rounding_error_between_adjacent_events(
         recorder.record(event(sequence, relative_time, TerminalEventType.OUTPUT, b"."))
     recorder.close()
 
-    intervals = [json.loads(line)[0] for line in cast_path.read_text().splitlines()[1:]]
+    intervals = [
+        json.loads(line)[0] for line in cast_path.read_text(encoding="utf-8").splitlines()[1:]
+    ]
     assert intervals == [0.0, 0.001, 0.0, 0.001]
     assert sum(intervals) == pytest.approx(0.002)
 
@@ -78,7 +80,9 @@ def test_recorder_decodes_utf8_split_across_output_events(tmp_path: Path) -> Non
     recorder.record(event(3, 0.03, TerminalEventType.OUTPUT, encoded[4:]))
     recorder.close()
 
-    payload = "".join(json.loads(line)[2] for line in cast_path.read_text().splitlines()[1:])
+    payload = "".join(
+        json.loads(line)[2] for line in cast_path.read_text(encoding="utf-8").splitlines()[1:]
+    )
     assert payload == "项目"
 
 
@@ -93,7 +97,7 @@ def test_incomplete_output_and_input_tails_are_flushed_before_exit(tmp_path: Pat
         recorder.record(event(4, 0.4, TerminalEventType.OUTPUT, b"late"))
     recorder.close()
 
-    events = [json.loads(line) for line in cast_path.read_text().splitlines()[1:]]
+    events = [json.loads(line) for line in cast_path.read_text(encoding="utf-8").splitlines()[1:]]
     assert events[-3:] == [[0.0, "o", "�"], [0.0, "i", "�"], [0.1, "x", "7"]]
     assert events[-1][1] == "x"
 
@@ -105,7 +109,7 @@ def test_stop_without_exit_still_flushes_an_incomplete_utf8_tail(tmp_path: Path)
 
     recorder.close()
 
-    events = [json.loads(line) for line in cast_path.read_text().splitlines()[1:]]
+    events = [json.loads(line) for line in cast_path.read_text(encoding="utf-8").splitlines()[1:]]
     assert events[-1] == [0.0, "o", "�"]
 
 

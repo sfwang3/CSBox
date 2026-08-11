@@ -188,7 +188,7 @@ def _save_png_atomic(image: Image.Image, destination: Path) -> None:
     temporary = Path(temporary_name)
     try:
         image.save(temporary, format="PNG")
-        with temporary.open("rb") as stream:
+        with temporary.open("r+b") as stream:
             os.fsync(stream.fileno())
         os.replace(temporary, destination)
         _fsync_directory(destination.parent)

@@ -8,6 +8,7 @@ from csbox.lab.models import SessionMetadata, SessionPaths
 
 
 def test_session_metadata_defaults_to_running_and_uses_stable_json_aliases() -> None:
+    cwd = Path("/tmp/中文项目")
     metadata = SessionMetadata(
         id="session-001",
         name="网络实验",
@@ -17,7 +18,7 @@ def test_session_metadata_defaults_to_running_and_uses_stable_json_aliases() -> 
         shellVersion="5.2",
         initialRows=24,
         initialColumns=80,
-        cwd=Path("/tmp/中文项目"),
+        cwd=cwd,
         csboxVersion="0.1.0",
     )
 
@@ -34,7 +35,7 @@ def test_session_metadata_defaults_to_running_and_uses_stable_json_aliases() -> 
         "shellVersion": "5.2",
         "initialRows": 24,
         "initialColumns": 80,
-        "cwd": "/tmp/中文项目",
+        "cwd": str(cwd),
         "csboxVersion": "0.1.0",
     }
 

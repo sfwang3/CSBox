@@ -253,7 +253,9 @@ def test_invalid_or_stale_checkpoint_index_is_rebuilt_without_touching_cast(
     repaired = ReplayService(cast_path, checkpoint_store=CheckpointStore(checkpoints_path))
     assert row_text(repaired.seek(6.0), 1).startswith("中文")
 
-    cast_path.write_text(cast_path.read_text(encoding="utf-8") + '[1.0,"o","!"]\n')
+    cast_path.write_text(
+        cast_path.read_text(encoding="utf-8") + '[1.0,"o","!"]\n', encoding="utf-8"
+    )
     changed_cast = cast_path.read_bytes()
     second_service = ReplayService(cast_path, checkpoint_store=CheckpointStore(checkpoints_path))
 

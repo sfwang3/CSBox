@@ -6,7 +6,11 @@ import pytest
 from PIL import Image, ImageDraw
 
 from csbox.lab.fonts import FontResolutionError, FontResolver
-from csbox.lab.renderer import RenderTheme, TerminalEvidenceRenderer
+from csbox.lab.renderer import (
+    RenderTheme,
+    TerminalEvidenceRenderer,
+    _save_png_atomic,
+)
 from csbox.lab.screen import TerminalCell, TerminalCursor, TerminalSnapshot
 
 ASCII_FONT_CANDIDATES = (
@@ -262,6 +266,32 @@ def test_renderer_atomically_preserves_existing_png_when_save_fails(
 
     assert destination.read_bytes() == b"previous png"
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_renderer_fsynchronizes_png_with_a_write_capable_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    destination = tmp_path / "evidence.png"
+    opened_modes: list[str] = []
+    real_open = Path.open
+
+    def observe_open(
+        path: Path,
+        mode: str = "r",
+        buffering: int = -1,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ) -> object:
+        if path.parent == tmp_path and path.name.startswith(".evidence.png."):
+            opened_modes.append(mode)
+        return real_open(path, mode, buffering, encoding, errors, newline)
+
+    monkeypatch.setattr(Path, "open", observe_open)
+
+    _save_png_atomic(Image.new("RGB", (2, 2), "black"), destination)
+
+    assert "r+b" in opened_modes
 
 
 def test_renderer_marks_bold_text_without_changing_its_cell_origin(

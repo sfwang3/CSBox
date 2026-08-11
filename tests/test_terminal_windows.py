@@ -199,7 +199,10 @@ def test_spawn_merges_environment_overrides_with_parent_environment(
     spawned_env = FakePtyProcess.spawn_calls[0]["env"]
     assert isinstance(spawned_env, dict)
     assert spawned_env["PATH"] == "C:\\Windows\\System32"
-    assert spawned_env["SystemRoot"] == "C:\\Windows"
+    assert (
+        next(value for name, value in spawned_env.items() if name.casefold() == "systemroot")
+        == "C:\\Windows"
+    )
     assert spawned_env["CSBOX_TEST"] == "值"
 
 

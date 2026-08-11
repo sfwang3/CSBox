@@ -10,12 +10,15 @@ from csbox.check.rules import DEFAULT_RULES
 def test_rules_report_sensitive_locations_without_secret_content(tmp_path: Path) -> None:
     fixture_value = "super-secret-value-123456"
     setting_name = "api" + "_key"
-    (tmp_path / "README.md").write_text("# demo\n")
-    (tmp_path / ".env").write_text(f"TOKEN={fixture_value}\n")
-    (tmp_path / "private.pem").write_text("-----BEGIN OPENSSH PRIVATE KEY-----\nnot emitted\n")
-    (tmp_path / "settings.py").write_text(f'{setting_name} = "{fixture_value}"\n')
+    (tmp_path / "README.md").write_text("# demo\n", encoding="utf-8")
+    (tmp_path / ".env").write_text(f"TOKEN={fixture_value}\n", encoding="utf-8")
+    (tmp_path / "private.pem").write_text(
+        "-----BEGIN OPENSSH PRIVATE KEY-----\nnot emitted\n", encoding="utf-8"
+    )
+    (tmp_path / "settings.py").write_text(f'{setting_name} = "{fixture_value}"\n', encoding="utf-8")
     (tmp_path / "notes.txt").write_text(
-        "Windows C:\\Users\\测试用户\\桌面\\实验一\nUnix /home/student/project\n"
+        "Windows C:\\Users\\测试用户\\桌面\\实验一\nUnix /home/student/project\n",
+        encoding="utf-8",
     )
     inventory = FileInventory.build(tmp_path)
     context = CheckContext(root=tmp_path, inventory=inventory)
@@ -34,7 +37,7 @@ def test_rules_report_sensitive_locations_without_secret_content(tmp_path: Path)
 
 
 def test_rules_return_pass_or_skip_when_project_is_clean(tmp_path: Path) -> None:
-    (tmp_path / "README.md").write_text("# clean\n")
+    (tmp_path / "README.md").write_text("# clean\n", encoding="utf-8")
     inventory = FileInventory.build(tmp_path)
     context = CheckContext(root=tmp_path, inventory=inventory)
 
