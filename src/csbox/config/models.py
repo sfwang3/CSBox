@@ -20,7 +20,7 @@ class CourseConfig(_ConfigModel):
 
 class LabConfig(_ConfigModel):
     shell: Literal["powershell", "pwsh", "bash", "zsh"] | None = None
-    capture_key: Literal["f12"] = "f12"
+    capture_key: Literal["f12", "ctrl-space"] = "f12"
 
 
 class RenderConfig(_ConfigModel):
