@@ -309,17 +309,17 @@ def _previous_generated_evidence(
     evidence_directory = destination / "evidence"
     for relative_name in files:
         if "\\" in relative_name:
-            continue
+            return (), ("旧 evidence manifest 包含非法路径，未清理历史 evidence。",)
         relative = PurePosixPath(relative_name)
         if (
             len(relative.parts) != 2
             or relative.parts[0] != "evidence"
             or relative.parts[1] in {"", ".", ".."}
         ):
-            continue
+            return (), ("旧 evidence manifest 包含非法路径，未清理历史 evidence。",)
         candidate = destination.joinpath(*relative.parts)
         if candidate.parent != evidence_directory:
-            continue
+            return (), ("旧 evidence manifest 包含非法路径，未清理历史 evidence。",)
         if candidate.is_symlink():
             raise LabExportError(f"历史 evidence 不能是符号链接：{candidate.name}")
         generated.append(candidate)

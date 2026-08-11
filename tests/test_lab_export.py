@@ -373,6 +373,26 @@ def test_force_export_does_not_follow_backslash_encoded_history_path(
     assert victim.read_text(encoding="utf-8") == "keep"
 
 
+def test_force_export_skips_all_cleanup_for_a_mixed_invalid_manifest(
+    tmp_path: Path,
+    session_with_captures: SessionPaths,
+    exporter: LabExporter,
+) -> None:
+    destination = tmp_path / "export"
+    first = exporter.export(session_with_captures, destination)
+    stale = first.evidence[1]
+    manifest = destination / ".csbox-generated-evidence.json"
+    document = json.loads(manifest.read_text(encoding="utf-8"))
+    document["files"].append("evidence/../../victim.txt")
+    manifest.write_text(json.dumps(document), encoding="utf-8")
+    assert CaptureStore(session_with_captures.captures).delete("capture-2")
+
+    result = exporter.export(session_with_captures, destination, force=True)
+
+    assert stale.exists()
+    assert any("manifest" in warning for warning in result.warnings)
+
+
 def test_export_uses_session_start_plus_capture_offset_and_warns_on_bad_metadata(
     tmp_path: Path, exporter: LabExporter
 ) -> None:
