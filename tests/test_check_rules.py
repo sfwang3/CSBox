@@ -8,11 +8,12 @@ from csbox.check.rules import DEFAULT_RULES
 
 
 def test_rules_report_sensitive_locations_without_secret_content(tmp_path: Path) -> None:
-    secret = "super-secret-value-123456"
+    fixture_value = "super-secret-value-123456"
+    setting_name = "api" + "_key"
     (tmp_path / "README.md").write_text("# demo\n")
-    (tmp_path / ".env").write_text(f"TOKEN={secret}\n")
+    (tmp_path / ".env").write_text(f"TOKEN={fixture_value}\n")
     (tmp_path / "private.pem").write_text("-----BEGIN OPENSSH PRIVATE KEY-----\nnot emitted\n")
-    (tmp_path / "settings.py").write_text(f'api_key = "{secret}"\n')
+    (tmp_path / "settings.py").write_text(f'{setting_name} = "{fixture_value}"\n')
     (tmp_path / "notes.txt").write_text(
         "Windows C:\\Users\\测试用户\\桌面\\实验一\nUnix /home/student/project\n"
     )
@@ -25,9 +26,10 @@ def test_rules_report_sensitive_locations_without_secret_content(tmp_path: Path)
     assert any(finding.status is CheckStatus.FAIL for finding in findings)
     assert any(finding.category == "windows-absolute-path" for finding in findings)
     assert any(finding.category == "unix-absolute-path" for finding in findings)
-    assert secret not in rendered
+    assert fixture_value not in rendered
     assert all(
-        finding.path is None or not str(finding.path).startswith(secret) for finding in findings
+        finding.path is None or not str(finding.path).startswith(fixture_value)
+        for finding in findings
     )
 
 

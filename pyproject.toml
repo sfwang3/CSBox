@@ -52,4 +52,6 @@ testpaths = ["tests"]
 addopts = "-ra"
 markers = [
   "pty: real pseudoterminal integration tests",
+  "windows: Windows-specific integration tests",
+  "integration: tests that exercise real platform processes or terminal resources",
 ]
