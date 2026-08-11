@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import html
+import json
 import re
 import shutil
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path, PurePosixPath
-from urllib.parse import unquote
 
 from pydantic import ValidationError
 
@@ -17,6 +17,7 @@ from csbox.lab.models import SessionMetadata, SessionPaths
 from csbox.lab.renderer import RenderTheme, TerminalEvidenceRenderer
 
 _COMPONENT_BUDGET = 240
+_EVIDENCE_MANIFEST = ".csbox-generated-evidence.json"
 
 
 class LabExportError(RuntimeError):
@@ -63,7 +64,8 @@ class LabExporter:
         markdown_path = output / "evidence.md"
         cast_path = output / "session.cast"
         commands_path = output / "commands.txt"
-        for path in (markdown_path, cast_path, commands_path):
+        manifest_path = output / _EVIDENCE_MANIFEST
+        for path in (markdown_path, cast_path, commands_path, manifest_path):
             _reject_symlink(path)
         previous_evidence, cleanup_warnings = (
             _previous_generated_evidence(output) if force else ((), ())
@@ -106,6 +108,7 @@ class LabExporter:
         for stale in previous_evidence:
             if stale not in current_evidence and stale.is_file():
                 stale.unlink()
+        _write_evidence_manifest(manifest_path, rendered, output)
 
         return LabExportResult(
             destination=output,
@@ -288,29 +291,49 @@ def _load_session_start(paths: SessionPaths) -> tuple[datetime | None, tuple[str
 def _previous_generated_evidence(
     destination: Path,
 ) -> tuple[tuple[Path, ...], tuple[str, ...]]:
-    markdown = destination / "evidence.md"
-    if not markdown.exists():
+    manifest = destination / _EVIDENCE_MANIFEST
+    if not manifest.exists():
         return (), ()
+    if manifest.is_symlink():
+        raise LabExportError(f"历史 evidence manifest 不能是符号链接：{manifest.name}")
     try:
-        content = markdown.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
-        return (), (f"旧 evidence.md 无法读取，未清理历史 evidence：{exc}",)
+        document = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return (), (f"旧 evidence manifest 无法读取，未清理历史 evidence：{exc}",)
+    if not isinstance(document, dict) or document.get("version") != 1:
+        return (), ("旧 evidence manifest 版本无效，未清理历史 evidence。",)
+    files = document.get("files")
+    if not isinstance(files, list) or any(not isinstance(item, str) for item in files):
+        return (), ("旧 evidence manifest 内容无效，未清理历史 evidence。",)
     generated: list[Path] = []
-    for encoded in re.findall(r"!\[实验记录\]\((evidence/[^)\r\n]+)\)", content):
-        decoded = unquote(encoded)
-        if "\\" in decoded:
+    evidence_directory = destination / "evidence"
+    for relative_name in files:
+        if "\\" in relative_name:
             continue
-        relative = PurePosixPath(decoded)
+        relative = PurePosixPath(relative_name)
         if (
             len(relative.parts) != 2
             or relative.parts[0] != "evidence"
             or relative.parts[1] in {"", ".", ".."}
         ):
             continue
-        candidate = destination / "evidence" / relative.parts[1]
-        if candidate.parent != destination / "evidence":
+        candidate = destination.joinpath(*relative.parts)
+        if candidate.parent != evidence_directory:
             continue
         if candidate.is_symlink():
             raise LabExportError(f"历史 evidence 不能是符号链接：{candidate.name}")
         generated.append(candidate)
     return tuple(generated), ()
+
+
+def _write_evidence_manifest(
+    manifest: Path,
+    rendered: list[Path],
+    destination: Path,
+) -> None:
+    relative_files = [path.relative_to(destination).as_posix() for path in rendered]
+    manifest.write_text(
+        json.dumps({"version": 1, "files": relative_files}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )

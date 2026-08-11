@@ -7,7 +7,12 @@ import pytest
 
 from csbox.core.events import TerminalEvent, TerminalEventType, TerminalSize
 from csbox.lab.recorder import AsciicastV3Reader
-from csbox.lab.replay import CHECKPOINT_VERSION, CheckpointStore, ReplayService
+from csbox.lab.replay import (
+    CHECKPOINT_VERSION,
+    CheckpointStore,
+    CheckpointStoreError,
+    ReplayService,
+)
 from csbox.lab.screen import TerminalEmulator, TerminalSnapshot
 
 FIXTURES = Path(__file__).parent / "fixtures" / "sessions"
@@ -330,3 +335,14 @@ def test_default_checkpoint_path_cannot_replace_a_cast_named_checkpoints_json(
     assert cast_path.read_bytes() == original
     assert service.seek(1.0).cells[0][0].character == "s"
     assert cast_path.with_name("checkpoints.checkpoints.json").is_file()
+
+
+def test_custom_checkpoint_path_cannot_replace_the_original_cast(tmp_path: Path) -> None:
+    cast_path = tmp_path / "session.cast"
+    write_cast(cast_path, [(1.0, "o", "safe")], columns=8, rows=2)
+    original = cast_path.read_bytes()
+
+    with pytest.raises(CheckpointStoreError, match="checkpoint.*cast|cast.*checkpoint"):
+        ReplayService(cast_path, checkpoint_store=CheckpointStore(cast_path))
+
+    assert cast_path.read_bytes() == original

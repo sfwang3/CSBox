@@ -60,6 +60,7 @@ class CheckpointStore:
 
     def load(self, cast_path: Path | str) -> tuple[Checkpoint, ...] | None:
         source = Path(cast_path)
+        self._ensure_distinct_from_cast(source)
         try:
             value = json.loads(self.path.read_text(encoding="utf-8"))
             if not isinstance(value, Mapping) or value.get("version") != CHECKPOINT_VERSION:
@@ -85,10 +86,12 @@ class CheckpointStore:
     def save(self, cast_path: Path | str, checkpoints: tuple[Checkpoint, ...]) -> None:
         if not checkpoints:
             raise ValueError("at least one checkpoint is required")
+        source = Path(cast_path)
+        self._ensure_distinct_from_cast(source)
         serialized_checkpoints = [_checkpoint_to_json(checkpoint) for checkpoint in checkpoints]
         document = {
             "version": CHECKPOINT_VERSION,
-            "cast": _cast_fingerprint(Path(cast_path)),
+            "cast": _cast_fingerprint(source),
             "checkpoints": serialized_checkpoints,
             "checksum": _checkpoint_checksum(serialized_checkpoints),
         }
@@ -98,6 +101,17 @@ class CheckpointStore:
             _atomic_write(self.path, payload)
         except OSError as exc:
             raise CheckpointStoreError(f"could not persist replay checkpoints: {exc}") from exc
+
+    def _ensure_distinct_from_cast(self, cast_path: Path) -> None:
+        try:
+            checkpoint_path = self.path.resolve()
+            source_path = cast_path.resolve()
+        except OSError as exc:
+            raise CheckpointStoreError(
+                "could not resolve replay checkpoint and cast paths"
+            ) from exc
+        if checkpoint_path == source_path:
+            raise CheckpointStoreError("replay checkpoint path must differ from cast path")
 
 
 class ReplayService:

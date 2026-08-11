@@ -148,6 +148,34 @@ def test_export_omits_commands_file_when_every_capture_command_is_unknown(
     assert not (result.destination / "commands.txt").exists()
 
 
+def test_export_with_empty_captures_still_copies_cast_and_writes_markdown(
+    tmp_path: Path, exporter: LabExporter
+) -> None:
+    paths = SessionPaths(tmp_path / "session")
+    paths.root.mkdir()
+    paths.cast.write_bytes(FIXTURE_CAST.read_bytes())
+
+    result = exporter.export(paths, tmp_path / "export")
+
+    assert result.evidence == ()
+    assert result.commands is None
+    assert result.cast.read_bytes() == paths.cast.read_bytes()
+    assert result.markdown.read_text(encoding="utf-8") == "## 实验记录\n"
+
+
+def test_export_propagates_png_renderer_failure(
+    tmp_path: Path, session_with_captures: SessionPaths
+) -> None:
+    class FailingRenderer:
+        def render(self, *args: object, **kwargs: object) -> Path:
+            raise RuntimeError("png renderer failed")
+
+    exporter = LabExporter(cast(Any, FailingRenderer()))
+
+    with pytest.raises(RuntimeError, match="png renderer failed"):
+        exporter.export(session_with_captures, tmp_path / "export")
+
+
 def test_export_refuses_existing_destination_without_force_and_force_is_explicit(
     tmp_path: Path,
     session_with_captures: SessionPaths,
@@ -300,6 +328,26 @@ def test_force_export_removes_only_stale_generated_evidence(
     assert user_file.read_text(encoding="utf-8") == "keep"
 
 
+def test_force_export_preserves_user_evidence_referenced_by_markdown(
+    tmp_path: Path,
+    session_with_captures: SessionPaths,
+    exporter: LabExporter,
+) -> None:
+    destination = tmp_path / "export"
+    first = exporter.export(session_with_captures, destination)
+    stale = first.evidence[1]
+    user_png = destination / "evidence" / "user-reference.png"
+    user_png.write_bytes(b"user image")
+    with (destination / "evidence.md").open("a", encoding="utf-8") as stream:
+        stream.write("\n![实验记录](evidence/user-reference.png)\n")
+    assert CaptureStore(session_with_captures.captures).delete("capture-2")
+
+    exporter.export(session_with_captures, destination, force=True)
+
+    assert not stale.exists()
+    assert user_png.read_bytes() == b"user image"
+
+
 def test_force_export_does_not_follow_backslash_encoded_history_path(
     tmp_path: Path, session_with_captures: SessionPaths, exporter: LabExporter
 ) -> None:
@@ -310,6 +358,10 @@ def test_force_export_does_not_follow_backslash_encoded_history_path(
     victim.write_text("keep", encoding="utf-8")
     (destination / "evidence.md").write_text(
         "![实验记录](evidence/..%5C..%5Cvictim.txt)\n", encoding="utf-8"
+    )
+    (destination / ".csbox-generated-evidence.json").write_text(
+        json.dumps({"version": 1, "files": ["evidence/..\\..\\victim.txt"]}),
+        encoding="utf-8",
     )
 
     generated, _ = exporter_module._previous_generated_evidence(destination)
