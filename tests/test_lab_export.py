@@ -8,6 +8,7 @@ from typing import Any, cast
 import pytest
 
 from csbox.core.events import TerminalEvent, TerminalEventType
+from csbox.lab import exporter as exporter_module
 from csbox.lab.captures import CaptureStore
 from csbox.lab.exporter import LabExporter, LabExportError
 from csbox.lab.fonts import FontResolver
@@ -297,6 +298,27 @@ def test_force_export_removes_only_stale_generated_evidence(
     assert not stale.exists()
     assert user_png.read_bytes() == b"user image"
     assert user_file.read_text(encoding="utf-8") == "keep"
+
+
+def test_force_export_does_not_follow_backslash_encoded_history_path(
+    tmp_path: Path, session_with_captures: SessionPaths, exporter: LabExporter
+) -> None:
+    destination = tmp_path / "export"
+    destination.mkdir()
+    (destination / "evidence").mkdir()
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep", encoding="utf-8")
+    (destination / "evidence.md").write_text(
+        "![实验记录](evidence/..%5C..%5Cvictim.txt)\n", encoding="utf-8"
+    )
+
+    generated, _ = exporter_module._previous_generated_evidence(destination)
+
+    assert generated == ()
+
+    exporter.export(session_with_captures, destination, force=True)
+
+    assert victim.read_text(encoding="utf-8") == "keep"
 
 
 def test_export_uses_session_start_plus_capture_offset_and_warns_on_bad_metadata(

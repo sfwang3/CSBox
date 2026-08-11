@@ -76,6 +76,7 @@ class TerminalEmulatorState:
     title: str
     icon_name: str
     use_utf8: bool
+    pending_bytes: bytes = b""
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +165,7 @@ class TerminalEmulator:
         self._stream = _CSBoxByteStream(screen)
         if snapshot.state is not None:
             self._stream.use_utf8 = snapshot.state.use_utf8
+            self._stream.restore_pending(snapshot.state.pending_bytes)
         self._relative_time = snapshot.relative_time
 
 
@@ -285,6 +287,7 @@ def _state_from_pyte(
         title=str(screen.title),
         icon_name=str(screen.icon_name),
         use_utf8=bool(stream.use_utf8),
+        pending_bytes=stream.pending_bytes,
     )
 
 
@@ -344,6 +347,8 @@ def _validate_emulator_state(
             raise ValueError("terminal savepoint is outside the terminal")
         if savepoint.charset not in {0, 1}:
             raise ValueError("terminal savepoint charset is invalid")
+    if not isinstance(state.pending_bytes, bytes):
+        raise ValueError("terminal parser pending bytes are invalid")
 
 
 def _cell_from_pyte(character: Any) -> TerminalCell:
@@ -387,10 +392,36 @@ def _row_from_pyte(screen: pyte.Screen, row: int, columns: int) -> tuple[Termina
 class _CSBoxByteStream(pyte.ByteStream):
     """Keep parser boundary checks inside the pyte adapter."""
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._pending_bytes = bytearray()
+
+    def feed(self, data: bytes) -> None:
+        for value in data:
+            self._pending_bytes.append(value)
+            super().feed(bytes((value,)))
+            if self._is_parser_safe:
+                self._pending_bytes.clear()
+
+    @property
+    def pending_bytes(self) -> bytes:
+        return bytes(self._pending_bytes)
+
+    def restore_pending(self, data: bytes) -> None:
+        if not isinstance(data, bytes):
+            raise TypeError("pending parser data must be bytes")
+        self._pending_bytes.clear()
+        self.feed(data)
+
+    @property
+    def _is_parser_safe(self) -> bool:
+        pending_bytes, _ = self.utf8_decoder.getstate()
+        return self._taking_plain_text is True and not pending_bytes
+
     @property
     def checkpoint_safe(self) -> bool:
         pending_bytes, _ = self.utf8_decoder.getstate()
-        return self._taking_plain_text is True and not pending_bytes
+        return self._is_parser_safe and not self._pending_bytes
 
 
 class _CSBoxScreen(pyte.Screen):

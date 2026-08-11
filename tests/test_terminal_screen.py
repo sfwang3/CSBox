@@ -190,3 +190,26 @@ def test_emulator_advances_timeline_for_non_screen_events_without_changing_grid(
     assert after_input.relative_time == 1.0
     assert after_mark.relative_time == 2.0
     assert after_exit.relative_time == 3.0
+
+
+@pytest.mark.parametrize(
+    ("prefix", "tail"),
+    [
+        (b"\x1b[31", b"mX"),
+        (b"\xe4", b"\xb8\xad"),
+    ],
+    ids=("split-csi", "split-utf8"),
+)
+def test_snapshot_restore_preserves_incomplete_parser_and_utf8_state(
+    prefix: bytes, tail: bytes
+) -> None:
+    continuous = TerminalEmulator(columns=8, rows=2)
+    continuous.apply(event(1, 1.0, TerminalEventType.OUTPUT, prefix))
+    checkpoint = continuous.snapshot()
+    continuous.apply(event(2, 2.0, TerminalEventType.OUTPUT, tail))
+
+    restored = TerminalEmulator(columns=1, rows=1)
+    restored.restore(checkpoint)
+    restored.apply(event(2, 2.0, TerminalEventType.OUTPUT, tail))
+
+    assert restored.snapshot() == continuous.snapshot()

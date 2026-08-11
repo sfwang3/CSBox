@@ -314,3 +314,17 @@ def test_terminal_emulator_restores_a_domain_snapshot_and_continues_streaming() 
         )
     )
     assert (restored.rows, restored.columns, restored.snapshot().relative_time) == (3, 8, 3.0)
+
+
+def test_default_checkpoint_path_cannot_replace_a_cast_named_checkpoints_json(
+    tmp_path: Path,
+) -> None:
+    cast_path = tmp_path / "checkpoints.json"
+    write_cast(cast_path, [(1.0, "o", "safe")], columns=8, rows=2)
+    original = cast_path.read_bytes()
+
+    service = ReplayService(cast_path)
+
+    assert cast_path.read_bytes() == original
+    assert service.seek(1.0).cells[0][0].character == "s"
+    assert cast_path.with_name("checkpoints.checkpoints.json").is_file()

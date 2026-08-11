@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import math
@@ -110,7 +112,7 @@ class ReplayService:
     ) -> None:
         self.cast_path = Path(cast_path)
         self.checkpoint_store = checkpoint_store or CheckpointStore(
-            self.cast_path.with_name("checkpoints.json")
+            _default_checkpoint_path(self.cast_path)
         )
         self._emulator_factory = emulator_factory
         read_result = AsciicastV3Reader(self.cast_path).read()
@@ -192,6 +194,12 @@ def _timed_events(events: tuple[CastEvent, ...]) -> tuple[_ReplayEvent, ...]:
         relative_time += event.interval
         replay_events.append(_ReplayEvent(relative_time=relative_time, cast=event))
     return tuple(replay_events)
+
+
+def _default_checkpoint_path(cast_path: Path) -> Path:
+    if cast_path.name.casefold() == "checkpoints.json":
+        return cast_path.with_name("checkpoints.checkpoints.json")
+    return cast_path.with_name("checkpoints.json")
 
 
 def _terminal_event(event_index: int, replay_event: _ReplayEvent) -> TerminalEvent | None:
@@ -433,6 +441,7 @@ def _state_to_json(state: TerminalEmulatorState) -> dict[str, Any]:
         "title": state.title,
         "iconName": state.icon_name,
         "useUtf8": state.use_utf8,
+        "pendingBytes": base64.b64encode(state.pending_bytes).decode("ascii"),
     }
 
 
@@ -475,6 +484,13 @@ def _state_from_json(
         raise ValueError("invalid terminal string state")
     if type(use_utf8) is not bool:
         raise ValueError("invalid terminal decoder state")
+    pending_value = value.get("pendingBytes", "")
+    if not isinstance(pending_value, str):
+        raise ValueError("invalid terminal parser state")
+    try:
+        pending_bytes = base64.b64decode(pending_value.encode("ascii"), validate=True)
+    except (UnicodeEncodeError, binascii.Error) as exc:
+        raise ValueError("invalid terminal parser state") from exc
     raw_savepoints = value.get("savepoints")
     if not isinstance(raw_savepoints, list):
         raise ValueError("invalid terminal savepoints")
@@ -494,6 +510,7 @@ def _state_from_json(
         title=title,
         icon_name=icon_name,
         use_utf8=use_utf8,
+        pending_bytes=pending_bytes,
     )
     # The adapter performs bounds and semantic validation against the grid.
     TerminalEmulator(columns=columns, rows=rows).restore(

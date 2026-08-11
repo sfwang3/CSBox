@@ -297,10 +297,19 @@ def _previous_generated_evidence(
         return (), (f"旧 evidence.md 无法读取，未清理历史 evidence：{exc}",)
     generated: list[Path] = []
     for encoded in re.findall(r"!\[实验记录\]\((evidence/[^)\r\n]+)\)", content):
-        relative = PurePosixPath(unquote(encoded))
-        if len(relative.parts) != 2 or relative.parts[0] != "evidence":
+        decoded = unquote(encoded)
+        if "\\" in decoded:
             continue
-        candidate = destination / "evidence" / relative.name
+        relative = PurePosixPath(decoded)
+        if (
+            len(relative.parts) != 2
+            or relative.parts[0] != "evidence"
+            or relative.parts[1] in {"", ".", ".."}
+        ):
+            continue
+        candidate = destination / "evidence" / relative.parts[1]
+        if candidate.parent != destination / "evidence":
+            continue
         if candidate.is_symlink():
             raise LabExportError(f"历史 evidence 不能是符号链接：{candidate.name}")
         generated.append(candidate)
