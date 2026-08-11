@@ -43,6 +43,19 @@ def _read_until(
     pytest.fail(f"timed out waiting for {target!r}; output={bytes(output[-500:])!r}")
 
 
+def _read_first_output(backend: WindowsConPTYBackend, *, timeout: float = 10.0) -> bytes:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        chunk = backend.read(timeout=min(0.1, max(0.0, deadline - time.monotonic())))
+        if chunk is None:
+            continue
+        if chunk == b"":
+            break
+        if chunk:
+            return chunk
+    pytest.fail("timed out waiting for the interactive Windows Shell startup output")
+
+
 def _read_to_eof(backend: WindowsConPTYBackend, *, timeout: float = 10.0) -> bytes:
     deadline = time.monotonic() + timeout
     output = bytearray()
@@ -75,11 +88,12 @@ def test_native_windows_conpty_shell_unicode_resize_and_exit(
         pytest.skip(message)
 
     backend.spawn(
-        [resolved, "-NoLogo", "-NoProfile", "-NonInteractive"],
+        [resolved, "-NoLogo", "-NoProfile"],
         cwd=tmp_path,
         size=TerminalSize(80, 24),
     )
     backend.resize(100, 30)
+    output = _read_first_output(backend)
     backend.write(
         (
             ""
@@ -89,7 +103,7 @@ def test_native_windows_conpty_shell_unicode_resize_and_exit(
         ).encode()
     )
 
-    output = _read_until(backend, b"CSBOX_SIZE_100x30")
+    output += _read_until(backend, b"CSBOX_SIZE_100x30")
     output += _read_to_eof(backend)
 
     assert b"CSBOX_SIZE_100x30" in output
