@@ -79,4 +79,4 @@ Unix PTY、Bash、中文、ANSI、resize、Ctrl+C、长输出、录制、Capture
 
 ## License
 
-CSBox is licensed under the Apache License 2.0. See [LICENSE](LICENSE) for details.
+CSBox is licensed under the Apache License 2.0 (SPDX identifier: `Apache-2.0`). See [LICENSE](LICENSE) for details.
