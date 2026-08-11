@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from csbox.core.events import TerminalSize
 from csbox.core.models import EnvironmentSnapshot
 from csbox.lab.fake_data import FakeHomeDataSource
 from csbox.lab.home_data import RealHomeDataSource
@@ -9,6 +10,7 @@ from csbox.lab.repository import SessionRepository
 from csbox.locales import load_locale
 from csbox.tui.app import CSBoxApp
 from csbox.tui.screens.home import HomeScreen
+from csbox.tui.screens.review import ReviewScreen
 
 
 def _environment() -> EnvironmentSnapshot:
@@ -95,3 +97,34 @@ async def test_runtime_home_uses_real_empty_state_without_demo_data(tmp_path: Pa
         environment_text = str(app.screen.query_one("#environment-content").renderable)
         assert "项目路径:" in environment_text
         assert str(tmp_path)[:32] in environment_text
+
+
+@pytest.mark.asyncio
+async def test_home_replay_entry_opens_latest_real_session(tmp_path: Path) -> None:
+    repository = SessionRepository.from_cwd(tmp_path)
+    paths = repository.create_running(
+        "回看实验",
+        platform="linux",
+        shell="bash",
+        shell_version="5.2",
+        size=TerminalSize(80, 24),
+        cwd=tmp_path,
+    )
+    paths.cast.write_text(
+        '{"version":3,"term":{"cols":8,"rows":2}}\n',
+        encoding="utf-8",
+    )
+    repository.finish(paths, "completed", exit_code=0)
+    app = CSBoxApp(
+        data_source=RealHomeDataSource(repository, tmp_path),
+        environment=_environment(),
+        locale=load_locale(),
+    )
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.screen.query_one("#entry-replay").focus()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert isinstance(app.screen, ReviewScreen)

@@ -26,6 +26,7 @@ class RecentExperiment(BaseModel):
     capture_count: int = Field(default=0, ge=0)
     platform: str | None = None
     cwd: Path | None = None
+    session_id: str | None = None
 
 
 class HomeSnapshot(BaseModel):

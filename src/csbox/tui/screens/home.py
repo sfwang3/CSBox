@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import Resize
@@ -7,8 +9,10 @@ from textual.screen import Screen
 from textual.widgets import Button
 
 from csbox.core.models import HomeSnapshot
+from csbox.lab.repository import SessionRepository, SessionRepositoryError
 from csbox.locales import Translator
 from csbox.tui.dialogs.unavailable import UnavailableDialog
+from csbox.tui.screens.review import ReviewController, ReviewScreen
 from csbox.tui.widgets.home import (
     ACTION_DEFINITIONS,
     ActionPanel,
@@ -57,7 +61,32 @@ class HomeScreen(Screen[None]):
         label_key = action_keys.get(action_id)
         if label_key is None:
             return
+        if action_id == "replay":
+            self._open_latest_review()
+            return
         self.app.push_screen(UnavailableDialog(title=self.locale(label_key), locale=self.locale))
+
+    def _open_latest_review(self) -> None:
+        project_dir = self.snapshot.project_dir or Path.cwd()
+        try:
+            repository = SessionRepository.from_cwd(project_dir)
+            target = repository.latest()
+            if target is None:
+                raise SessionRepositoryError("暂无可回看的 session，请先运行 csbox lab start。")
+            self.app.push_screen(
+                ReviewScreen(
+                    controller=ReviewController.from_session(target.paths),
+                    locale=self.locale,
+                )
+            )
+        except (OSError, UnicodeError, ValueError, SessionRepositoryError):
+            self.app.push_screen(
+                UnavailableDialog(
+                    title=self.locale("home.entry.replay"),
+                    locale=self.locale,
+                    message_key="home.replay.empty",
+                )
+            )
 
     def update_snapshot(self, snapshot: HomeSnapshot) -> None:
         self.snapshot = snapshot

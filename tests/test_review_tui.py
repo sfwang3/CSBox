@@ -4,11 +4,19 @@ import json
 from pathlib import Path
 
 import pytest
+from rich.console import Console
 
+from csbox.core.display_width import display_width
 from csbox.lab.models import SessionPaths
+from csbox.lab.screen import TerminalCell, TerminalCursor, TerminalSnapshot
 from csbox.locales import load_locale
 from csbox.tui.app import ReviewApp
-from csbox.tui.screens.review import ReviewController, ReviewScreen, format_progress
+from csbox.tui.screens.review import (
+    ReviewController,
+    ReviewScreen,
+    format_progress,
+    snapshot_to_text,
+)
 
 
 def make_session(tmp_path: Path) -> SessionPaths:
@@ -85,6 +93,50 @@ def test_progress_uses_terminal_cells_and_clamps_values() -> None:
     assert progress.count("=") == 9
     assert "项目" in format_progress(0.0, 0.0, width=20, label="项目")
     assert format_progress(20.0, 10.0, width=8).startswith("[")
+
+
+def test_snapshot_text_preserves_cjk_cells_and_terminal_attributes() -> None:
+    row = (
+        TerminalCell("a"),
+        TerminalCell("b", bold=True, underline=True),
+        TerminalCell("中", width=2, foreground="red", background="blue", reverse=True),
+        TerminalCell("", width=0),
+        TerminalCell("e\u0301"),
+        TerminalCell(" "),
+    )
+    snapshot = TerminalSnapshot(
+        rows=1,
+        columns=6,
+        cells=(row,),
+        cursor=TerminalCursor(),
+    )
+
+    rendered = snapshot_to_text(snapshot)
+
+    assert display_width(str(rendered)) == snapshot.columns
+    assert str(rendered) == "ab中e\u0301 "
+    console = Console()
+    assert rendered.get_style_at_offset(console, 1).bold is True
+    assert rendered.get_style_at_offset(console, 1).underline is True
+    reverse_style = rendered.get_style_at_offset(console, 2)
+    assert reverse_style.color.name == "blue"
+    assert reverse_style.bgcolor.name == "red"
+
+
+@pytest.mark.asyncio
+async def test_review_app_q_exits_instead_of_revealing_blank_base_screen(
+    tmp_path: Path,
+) -> None:
+    app = ReviewApp(
+        controller=ReviewController.from_session(make_session(tmp_path)), locale=load_locale()
+    )
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await pilot.press("q")
+        await pilot.pause()
+
+        assert app.is_running is False
 
 
 @pytest.mark.asyncio

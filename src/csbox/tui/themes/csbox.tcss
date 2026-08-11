@@ -295,3 +295,39 @@ UnavailableDialog {
     min-width: 10;
     margin-left: 1;
 }
+
+#confirm-dialog {
+    align: center middle;
+    background: rgba(0, 0, 0, 0.72);
+}
+
+#confirm-card {
+    width: 60;
+    height: auto;
+    border: round #d46b6b;
+    background: #101c29;
+    padding: 1 2;
+}
+
+#confirm-heading {
+    color: #f0bd60;
+    text-style: bold;
+    height: 1;
+    margin-bottom: 1;
+}
+
+#confirm-message {
+    color: #dbe7f2;
+    height: auto;
+    margin-bottom: 1;
+}
+
+#confirm-actions {
+    height: 3;
+    align: right middle;
+}
+
+#confirm-actions Button {
+    min-width: 10;
+    margin-left: 1;
+}

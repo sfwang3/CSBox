@@ -68,6 +68,7 @@ class ReviewApp(App[None]):
         super().__init__()
         self.controller = controller
         self.locale = locale
+        self.owns_review_screen = True
 
     def on_mount(self) -> None:
         self.push_screen(ReviewScreen(controller=self.controller, locale=self.locale))

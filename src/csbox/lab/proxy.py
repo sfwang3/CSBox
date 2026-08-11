@@ -424,7 +424,19 @@ def _read_windows_pipe(stream: object, max_bytes: int, timeout: float) -> bytes 
 
         handle = msvcrt.get_osfhandle(stream.fileno())  # type: ignore[attr-defined]
         available = wintypes.DWORD()
-        if not ctypes.windll.kernel32.PeekNamedPipe(
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.PeekNamedPipe.argtypes = [
+            wintypes.HANDLE,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+            ctypes.POINTER(wintypes.DWORD),
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        kernel32.PeekNamedPipe.restype = wintypes.BOOL
+        kernel32.GetFileType.argtypes = [wintypes.HANDLE]
+        kernel32.GetFileType.restype = wintypes.DWORD
+        if not kernel32.PeekNamedPipe(
             handle,
             None,
             0,
@@ -432,6 +444,8 @@ def _read_windows_pipe(stream: object, max_bytes: int, timeout: float) -> bytes 
             ctypes.byref(available),
             None,
         ):
+            if kernel32.GetFileType(handle) == 1:  # FILE_TYPE_DISK.
+                return os.read(stream.fileno(), max_bytes)  # type: ignore[attr-defined]
             time.sleep(max(0.0, timeout))
             return None
         if not available.value:
@@ -439,6 +453,14 @@ def _read_windows_pipe(stream: object, max_bytes: int, timeout: float) -> bytes 
             return None
         return os.read(stream.fileno(), min(max_bytes, available.value))  # type: ignore[attr-defined]
     except (AttributeError, OSError, ValueError):
+        try:
+            file_descriptor = stream.fileno()  # type: ignore[attr-defined]
+            file_type = kernel32.GetFileType(handle)
+        except (AttributeError, OSError, UnboundLocalError):
+            time.sleep(max(0.0, timeout))
+            return None
+        if file_type == 1:  # FILE_TYPE_DISK: regular redirected stdin.
+            return os.read(file_descriptor, max_bytes)
         time.sleep(max(0.0, timeout))
         return None
 
@@ -454,15 +476,23 @@ def _windows_console_handle(file_descriptor: int) -> int:
 
 def _get_windows_console_mode(handle: int) -> int:
     import ctypes
+    from ctypes import wintypes
 
     mode = ctypes.c_uint32()
-    if not ctypes.windll.kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetConsoleMode.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.GetConsoleMode.restype = wintypes.BOOL
+    if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
         raise RuntimeError("input handle is not a Windows console")
     return int(mode.value)
 
 
 def _set_windows_console_mode(handle: int, mode: int) -> None:
     import ctypes
+    from ctypes import wintypes
 
-    if not ctypes.windll.kernel32.SetConsoleMode(handle, mode):
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.SetConsoleMode.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.SetConsoleMode.restype = wintypes.BOOL
+    if not kernel32.SetConsoleMode(handle, mode):
         raise OSError("could not set Windows console mode")

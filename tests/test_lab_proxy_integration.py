@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from csbox.core.events import TerminalEvent, TerminalEventType
 from csbox.lab.dispatcher import TerminalEventDispatcher
-from csbox.lab.proxy import TerminalProxy
+from csbox.lab.proxy import TerminalProxy, _encode_windows_input
 from csbox.lab.screen import TerminalEmulator
 
 
@@ -204,3 +204,8 @@ def test_proxy_retries_short_output_writes_without_dropping_bytes() -> None:
     proxy.run()
 
     assert bytes(output.data) == "完整输出".encode()
+
+
+def test_windows_scan_codes_are_translated_to_terminal_sequences() -> None:
+    assert _encode_windows_input("\x00\x86") == b"\x1b[24~"
+    assert _encode_windows_input("\x00H") == b"\x1b[A"

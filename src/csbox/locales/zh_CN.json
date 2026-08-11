@@ -8,6 +8,7 @@
   "home.entries.title": "主要入口",
   "home.entry.start": "开始实验",
   "home.entry.replay": "实验回看",
+  "home.replay.empty": "暂无可回看的 session，请先运行 csbox lab start。",
   "home.entry.check": "项目检查",
   "home.entry.api": "API 测试",
   "home.entry.pack": "打包提交",

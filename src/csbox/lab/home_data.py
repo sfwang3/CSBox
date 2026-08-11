@@ -21,6 +21,7 @@ class RealHomeDataSource(HomeDataSource):
         experiments = [
             RecentExperiment(
                 name=summary.metadata.experiment_name,
+                session_id=summary.metadata.session_id,
                 status=summary.metadata.status,
                 duration=_duration(summary.metadata.started_at, summary.metadata.ended_at),
                 demo=False,

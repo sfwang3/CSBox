@@ -18,6 +18,7 @@ from csbox.lab.replay import ReplayService
 from csbox.lab.screen import TerminalCell, TerminalSnapshot
 from csbox.locales import Translator
 from csbox.tui.dialogs.capture_title import CaptureTitleDialog
+from csbox.tui.dialogs.confirm import ConfirmDialog
 from csbox.tui.keymap import REVIEW_BINDINGS
 from csbox.tui.widgets.review import (
     ReviewCaptureList,
@@ -321,6 +322,14 @@ class ReviewScreen(Screen[None]):
         self.controller.seek_by(1.0)
         self._refresh()
 
+    def action_seek_back_large(self) -> None:
+        self.controller.seek_by(-10.0)
+        self._refresh()
+
+    def action_seek_forward_large(self) -> None:
+        self.controller.seek_by(10.0)
+        self._refresh()
+
     def action_select_previous_capture(self) -> None:
         self.controller.select_capture(-1)
         self._refresh()
@@ -366,8 +375,23 @@ class ReviewScreen(Screen[None]):
     def action_delete_capture(self) -> None:
         captures = self.controller.captures
         if captures:
-            self.controller.delete_capture(captures[self.controller.selected_capture].capture_id)
+            capture = captures[self.controller.selected_capture]
+            self.app.push_screen(
+                ConfirmDialog(
+                    locale=self.locale,
+                    title="删除 Capture",
+                    message=f"确定删除“{capture.title or '实验记录'}”吗？此操作不可撤销。",
+                ),
+                lambda confirmed: self._delete_capture_from_dialog(capture.capture_id, confirmed),
+            )
+
+    def _delete_capture_from_dialog(self, capture_id: str, confirmed: bool) -> None:
+        if confirmed:
+            self.controller.delete_capture(capture_id)
             self._refresh()
 
     def action_go_back(self) -> None:
-        self.app.pop_screen()
+        if getattr(self.app, "owns_review_screen", False):
+            self.app.exit()
+        else:
+            self.app.pop_screen()
