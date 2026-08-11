@@ -15,7 +15,7 @@ from csbox.lab.captures import CaptureStore
 from csbox.lab.dispatcher import TerminalEventDispatcher
 from csbox.lab.exporter import LabExporter, LabExportResult
 from csbox.lab.fonts import FontResolver
-from csbox.lab.keymap import CaptureBindingProbe
+from csbox.lab.keymap import CaptureBindingAdvisory, CaptureBindingProbe
 from csbox.lab.models import SessionPaths
 from csbox.lab.proxy import (
     FileInputAdapter,
@@ -26,7 +26,7 @@ from csbox.lab.proxy import (
 )
 from csbox.lab.recorder import AsciicastV3Recorder
 from csbox.lab.renderer import RenderTheme, TerminalEvidenceRenderer
-from csbox.lab.repository import SessionRepository, SessionSummary
+from csbox.lab.repository import SessionRepository, SessionSummary, default_experiment_name
 from csbox.lab.screen import TerminalEmulator
 
 
@@ -63,6 +63,15 @@ class LabService:
     def list(self) -> tuple[SessionSummary, ...]:
         return self.repository.list_sessions()
 
+    def capture_advisory(self, adapter: object | None = None) -> CaptureBindingAdvisory:
+        """Return the host-key warning before entering the raw terminal loop."""
+
+        selected_adapter = adapter if adapter is not None else self.input_adapter_factory()
+        return CaptureBindingProbe(
+            self.config.lab.capture_key,
+            input_supported=bool(getattr(selected_adapter, "supports_capture", True)),
+        ).probe()
+
     def start(
         self,
         name: str | None = None,
@@ -80,12 +89,9 @@ class LabService:
         )
         shell_version = detect_shell_version(profile)
         adapter = self.input_adapter_factory()
-        advisory = CaptureBindingProbe(
-            self.config.lab.capture_key,
-            input_supported=bool(getattr(adapter, "supports_capture", True)),
-        ).probe()
+        advisory = self.capture_advisory(adapter)
         paths = self.repository.create_running(
-            name or "未命名实验",
+            name or default_experiment_name(),
             shell=profile.kind.value,
             shell_version=shell_version,
             size=selected_size,

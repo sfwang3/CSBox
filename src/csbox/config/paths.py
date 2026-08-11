@@ -12,9 +12,7 @@ class ConfigPaths:
     project: Path
 
     @classmethod
-    def from_cwd(
-        cls, cwd: Path, *, environ: Mapping[str, str] | None = None
-    ) -> ConfigPaths:
+    def from_cwd(cls, cwd: Path, *, environ: Mapping[str, str] | None = None) -> ConfigPaths:
         environment = os.environ if environ is None else environ
         appdata = environment.get("APPDATA")
         if appdata:

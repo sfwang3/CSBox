@@ -49,7 +49,7 @@ class SessionRepository:
         session_id: str | None = None,
         started_at: datetime | None = None,
     ) -> SessionPaths:
-        experiment_name = name.strip() or "未命名实验"
+        experiment_name = name.strip() or default_experiment_name()
         identifier = session_id or uuid.uuid4().hex
         if (
             not identifier
@@ -111,7 +111,7 @@ class SessionRepository:
             paths = SessionPaths(directory)
             try:
                 metadata = self._read_metadata(paths)
-            except (OSError, UnicodeError, ValueError):
+            except (OSError, UnicodeError, ValueError, SessionRepositoryError):
                 continue
             captures = CaptureStore(paths.captures).load()
             summaries.append(
@@ -128,11 +128,14 @@ class SessionRepository:
         normalized = identifier.strip()
         if not normalized:
             raise SessionRepositoryError("会话标识不能为空。")
+        sessions = self.list_sessions()
+        exact_matches = [
+            summary.paths for summary in sessions if summary.paths.root.name == normalized
+        ]
+        if exact_matches:
+            return exact_matches[0]
         matches = [
-            summary.paths
-            for summary in self.list_sessions()
-            if summary.paths.root.name == normalized
-            or summary.paths.root.name.startswith(normalized)
+            summary.paths for summary in sessions if summary.paths.root.name.startswith(normalized)
         ]
         if not matches:
             raise SessionRepositoryError(f"未找到会话：{identifier}")
@@ -146,6 +149,11 @@ class SessionRepository:
             return SessionMetadata.model_validate_json(paths.metadata.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, ValueError) as exc:
             raise SessionRepositoryError(f"会话 metadata 无效：{paths.metadata}") from exc
+
+
+def default_experiment_name(now: datetime | None = None) -> str:
+    timestamp = (now or datetime.now(UTC)).astimezone().strftime("%Y%m%d-%H%M%S")
+    return f"实验-{timestamp}"
 
 
 def _atomic_write_json(path: Path, value: object) -> None:

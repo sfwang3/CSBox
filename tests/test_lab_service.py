@@ -170,3 +170,55 @@ def test_session_repository_resolves_exact_and_unique_prefixes(tmp_path: Path) -
     assert repository.resolve(first.root.name).root == first.root
     assert repository.resolve(first.root.name[:8]).root == first.root
     assert repository.list_sessions()[0].metadata.status == "completed"
+
+
+def test_session_repository_prefers_exact_id_over_a_longer_prefix(tmp_path: Path) -> None:
+    repository = SessionRepository(tmp_path / "sessions")
+    for identifier in ("abc", "abcdef"):
+        paths = repository.create_running(
+            identifier,
+            platform="linux",
+            shell="bash",
+            shell_version=None,
+            size=TerminalSize(80, 24),
+            cwd=tmp_path,
+            session_id=identifier,
+        )
+        repository.finish(paths, "completed", exit_code=0)
+
+    assert repository.resolve("abc").root.name == "abc"
+
+
+def test_session_repository_skips_corrupt_metadata_when_listing(tmp_path: Path) -> None:
+    repository = SessionRepository(tmp_path / "sessions")
+    valid = repository.create_running(
+        "有效实验",
+        platform="linux",
+        shell="bash",
+        shell_version=None,
+        size=TerminalSize(80, 24),
+        cwd=tmp_path,
+        session_id="valid",
+    )
+    repository.finish(valid, "completed", exit_code=0)
+    corrupt = repository.root / "corrupt"
+    corrupt.mkdir()
+    (corrupt / "metadata.json").write_text("{", encoding="utf-8")
+
+    sessions = repository.list_sessions()
+
+    assert [item.paths.root.name for item in sessions] == ["valid"]
+
+
+def test_session_repository_generates_timestamped_name_for_blank_input(tmp_path: Path) -> None:
+    repository = SessionRepository(tmp_path / "sessions")
+    repository.create_running(
+        "",
+        platform="linux",
+        shell="bash",
+        shell_version=None,
+        size=TerminalSize(80, 24),
+        cwd=tmp_path,
+    )
+
+    assert repository.list_sessions()[0].metadata.experiment_name.startswith("实验-")

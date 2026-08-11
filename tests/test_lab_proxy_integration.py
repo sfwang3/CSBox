@@ -64,6 +64,12 @@ class MemoryOutput:
         return len(data)
 
 
+class ShortMemoryOutput(MemoryOutput):
+    def write(self, data: bytes) -> int:
+        self.data.extend(data[:1])
+        return min(1, len(data))
+
+
 class EventSink:
     def __init__(self, events: list[TerminalEvent]) -> None:
         self.events = events
@@ -180,3 +186,21 @@ def test_proxy_keeps_capture_position_when_capture_precedes_later_input() -> Non
         TerminalEventType.EXIT,
     ]
     assert backend.writes == [b"later"]
+
+
+def test_proxy_retries_short_output_writes_without_dropping_bytes() -> None:
+    backend = ScriptedBackend(["完整输出".encode(), b""])
+    output = ShortMemoryOutput()
+    proxy = TerminalProxy(
+        backend,
+        command=("bash",),
+        input_adapter=MemoryInput([b""]),
+        output_adapter=output,
+        terminal_state_factory=TerminalState,
+        dispatcher=TerminalEventDispatcher([]),
+        emulator=TerminalEmulator(columns=8, rows=2),
+    )
+
+    proxy.run()
+
+    assert bytes(output.data) == "完整输出".encode()
