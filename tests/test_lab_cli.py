@@ -50,7 +50,9 @@ def test_lab_list_json_is_stable_and_has_no_ansi(monkeypatch, tmp_path: Path) ->
     result = CliRunner().invoke(app, ["lab", "list", "--json"])
 
     assert result.exit_code == 0
-    assert json.loads(result.stdout) == []
+    payload = json.loads(result.stdout)
+    assert payload["schema_version"] == 1
+    assert payload["sessions"] == []
     assert "\x1b[" not in result.stdout
 
 
@@ -112,7 +114,7 @@ def test_lab_list_json_does_not_wrap_long_fields(monkeypatch, tmp_path: Path) ->
     result = CliRunner().invoke(app, ["lab", "list", "--json"])
 
     assert result.exit_code == 0
-    assert json.loads(result.stdout)[0]["captures"] == 2
+    assert json.loads(result.stdout)["sessions"][0]["captures"] == 2
 
 
 def test_lab_list_plain_truncates_cjk_name_and_path_by_display_cells(

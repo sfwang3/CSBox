@@ -7,9 +7,12 @@ from typing import Annotated
 import typer
 from rich.console import Console
 
+from csbox import __version__
+from csbox.api.cli import api_app
 from csbox.check.service import create_check_service
 from csbox.core.display_width import display_width, truncate_cells
 from csbox.core.environment import detect_environment
+from csbox.core.schema import with_schema_version
 from csbox.lab.service import create_lab_service
 from csbox.locales import Translator, load_locale
 from csbox.pack.service import PackServiceError, create_pack_service
@@ -24,14 +27,32 @@ app = typer.Typer(
 )
 lab_app = typer.Typer(help="实验录制、回放和证据导出。", no_args_is_help=True)
 app.add_typer(lab_app, name="lab")
+app.add_typer(api_app, name="api")
 
 
 def _yes_no(translator: Translator, value: bool) -> str:
     return translator("doctor.yes" if value else "doctor.no")
 
 
+def _version_callback(value: bool) -> bool:
+    if value:
+        typer.echo(__version__)
+        raise typer.Exit()
+    return value
+
+
 @app.callback()
-def _run_default(ctx: typer.Context) -> None:
+def _run_default(
+    ctx: typer.Context,
+    version: bool = typer.Option(
+        False,
+        "--version",
+        callback=_version_callback,
+        is_eager=True,
+        help="显示 CSBox 版本。",
+    ),
+) -> None:
+    del version
     if ctx.invoked_subcommand is not None:
         return
     from csbox.tui.app import CSBoxApp, real_home_data_source
@@ -88,7 +109,7 @@ def check_project(
         payload["status"] = report.status.value
         payload["exitCode"] = report.exit_code
         Console(markup=False, soft_wrap=True).print(
-            json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+            json.dumps(with_schema_version(payload), ensure_ascii=False, separators=(",", ":"))
         )
     elif plain:
         _print_check_plain(report)
@@ -157,7 +178,13 @@ def lab_list(
     ]
     if json_output:
         console = Console(markup=False, soft_wrap=True)
-        console.print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+        console.print(
+            json.dumps(
+                with_schema_version({"sessions": payload}),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
         return
     console = Console(markup=False)
     if not payload:
@@ -267,7 +294,11 @@ def pack_project(
         raise typer.Exit(code=1) from error
     if json_output:
         Console(markup=False, soft_wrap=True).print(
-            json.dumps(report.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":"))
+            json.dumps(
+                with_schema_version(report.model_dump(mode="json")),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
         )
         return
     console = Console(markup=False)

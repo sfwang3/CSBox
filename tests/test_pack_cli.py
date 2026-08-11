@@ -44,5 +44,7 @@ def test_pack_json_routes_to_service(monkeypatch, tmp_path: Path) -> None:
     )
 
     assert result.exit_code == 0
-    assert json.loads(result.stdout)["verified"] is True
+    payload = json.loads(result.stdout)
+    assert payload["schema_version"] == 1
+    assert payload["verified"] is True
     assert calls == [(tmp_path, True, True)]

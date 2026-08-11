@@ -18,7 +18,9 @@ def test_check_plain_and_json_are_machine_stable(tmp_path: Path) -> None:
     assert plain.exit_code == 0
     assert "README" in plain.stdout
     assert structured.exit_code == 0
-    assert json.loads(structured.stdout)["root"] == str(tmp_path)
+    payload = json.loads(structured.stdout)
+    assert payload["schema_version"] == 1
+    assert payload["root"] == str(tmp_path)
 
 
 def test_check_build_flag_is_forwarded_to_service(monkeypatch, tmp_path: Path) -> None:

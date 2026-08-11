@@ -58,7 +58,7 @@ uv run csbox pack --output ../deliverables --verify
 uv run csbox pack --output deliverable.zip --verify --force
 ```
 
-默认排除 `.git`、`.venv`、`.csbox`、`runtime`、`node_modules`、`target`、`build`、`dist`、`__pycache__`、pytest/Ruff/IDE cache 和日志；真实 `.env`、`.env.local` 等环境变体与私钥默认拒绝打包，`.env.example` 可以保留。没有 `--force` 时不会覆盖已有 ZIP。
+默认排除 `.git`、`.venv`、`.csbox`、`node_modules`、`target`、`build`、`dist`、`__pycache__`、pytest/Ruff/IDE cache 和日志；真实 `.env`、`.env.local` 等环境变体与私钥默认拒绝打包，`.env.example` 可以保留。没有 `--force` 时不会覆盖已有 ZIP。
 
 ## 支持范围与验证边界
 
@@ -75,4 +75,8 @@ Unix PTY、Bash、中文、ANSI、resize、Ctrl+C、长输出、录制、Capture
 
 `csbox.api` 仍是占位模块。本轮不实现 HTTP API testing、OpenAPI、Postman import、GraphQL、WebSocket、AI 或 plugin marketplace。
 
-项目目前仍未发布到 PyPI，也未附带 LICENSE；请按仓库许可和课程要求使用。
+项目目前仍未发布到 PyPI；请按课程要求使用。
+
+## License
+
+CSBox is licensed under the Apache License 2.0. See [LICENSE](LICENSE) for details.

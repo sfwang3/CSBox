@@ -46,4 +46,8 @@ Shell ←→ UnixPTYBackend / WindowsConPTYBackend
 
 Unix backend 使用真实 PTY，支持初始尺寸、resize、Ctrl+C、EOF 和 child reap。Windows backend 延迟导入 pywinpty，显式请求 ConPTY backend `0`，用 reader queue 将 high-level Unicode 输出转换为 UTF-8 bytes，并在 close 前尽量 drain 尾帧。PowerShell 5.1/7 的原生启动测试在 Windows CI 运行；没有 Windows runner 或 Shell 时只记录 limitation。
 
-API 目录目前保持占位，不进入本轮依赖图。
+## API 响应脱敏边界
+
+`ApiResponse` 可以作为 assertion 执行期间的瞬态内部表示，但不得直接进入 persistence、evidence、日志或 TUI。所有这些外部消费者必须先调用 `ApiResponse.redacted_copy(redactor)`，并且只保存或展示返回的副本。HTTPX transport 当前在构造返回值前已执行同一套 URL、header 和 body 脱敏；消费边界再次调用时保持幂等。
+
+`Redactor` 依据显式 policy、request-derived 精确值和敏感字段名工作。它不会假设能够推断任意未知 secret，也不会把普通 response body 全部遮蔽；无法通过 policy 或结构识别的未知内容属于调用方必须明确配置的剩余风险。

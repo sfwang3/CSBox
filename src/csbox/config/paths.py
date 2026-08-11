@@ -8,8 +8,14 @@ from pathlib import Path
 
 @dataclass(frozen=True, slots=True)
 class ConfigPaths:
-    user: Path
+    user: Path | None
     project: Path
+
+    @property
+    def api_runs(self) -> Path:
+        """Return the project-local root for persisted API runs."""
+
+        return self.project.parent / "api" / "runs"
 
     @classmethod
     def from_cwd(cls, cwd: Path, *, environ: Mapping[str, str] | None = None) -> ConfigPaths:
@@ -26,3 +32,9 @@ class ConfigPaths:
                 home = Path(home_value) if home_value else Path.home()
                 user = home / ".config" / "csbox" / "config.toml"
         return cls(user=user, project=Path(cwd) / ".csbox" / "config.toml")
+
+    @classmethod
+    def project_only(cls, cwd: Path) -> ConfigPaths:
+        """Return paths for commands that must not read user-level configuration."""
+
+        return cls(user=None, project=Path(cwd) / ".csbox" / "config.toml")

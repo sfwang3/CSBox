@@ -38,7 +38,11 @@ def _validate(data: Mapping[str, Any], path: Path) -> None:
     try:
         CSBoxConfig.model_validate(data)
     except ValidationError as error:
-        raise ConfigurationError(path, str(error)) from error
+        details = []
+        for item in error.errors(include_url=False, include_context=False):
+            location = ".".join(str(part) for part in item["loc"])
+            details.append(f"{location}: {item['type']}；请修改该字段后重试")
+        raise ConfigurationError(path, "；".join(details)) from error
 
 
 def _read_toml(path: Path) -> dict[str, Any]:
@@ -63,7 +67,8 @@ def load_config(
     resolved_paths = paths or ConfigPaths.from_cwd(cwd, environ=environ)
     config_data = CSBoxConfig().model_dump(mode="python")
     for path in (resolved_paths.user, resolved_paths.project):
-        config_data = _merge_dicts(config_data, _read_toml(path))
+        if path is not None:
+            config_data = _merge_dicts(config_data, _read_toml(path))
     if overrides:
         override_path = Path("<命令行覆盖>")
         _validate(overrides, override_path)
@@ -71,10 +76,14 @@ def load_config(
     try:
         return CSBoxConfig.model_validate(config_data)
     except ValidationError as error:
-        raise ConfigurationError(resolved_paths.project, str(error)) from error
+        details = []
+        for item in error.errors(include_url=False, include_context=False):
+            location = ".".join(str(part) for part in item["loc"])
+            details.append(f"{location}: {item['type']}；请修改该字段后重试")
+        raise ConfigurationError(resolved_paths.project, "；".join(details)) from error
 
 
-def _toml_value(value: str | int) -> str:
+def _toml_value(value: str | int | float | bool) -> str:
     if isinstance(value, str):
         return json.dumps(value, ensure_ascii=False)
     return str(value)
@@ -83,10 +92,17 @@ def _toml_value(value: str | int) -> str:
 def _serialize_config(config: CSBoxConfig) -> str:
     data = config.model_dump(mode="python", exclude_none=True)
     lines = [f"locale = {_toml_value(data['locale'])}", ""]
-    for section in ("student", "course", "lab", "render", "pack", "check"):
+    for section in ("student", "course", "lab", "render", "pack", "check", "api"):
         lines.append(f"[{section}]")
         for key, value in data[section].items():
+            if section == "api" and key == "variables":
+                continue
             lines.append(f"{key} = {_toml_value(value)}")
+        lines.append("")
+    if data["api"]["variables"]:
+        lines.append("[api.variables]")
+        for key, value in data["api"]["variables"].items():
+            lines.append(f"{json.dumps(key, ensure_ascii=False)} = {_toml_value(value)}")
         lines.append("")
     return "\n".join(lines)
 

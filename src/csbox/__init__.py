@@ -1,3 +1,10 @@
 """CSBox: 计算机实验与项目交付工具。"""
 
-__version__ = "0.1.0"
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    __version__ = version("csbox")
+except PackageNotFoundError:
+    __version__ = "0.2.0.dev0"
+
+__all__ = ["__version__"]

@@ -36,6 +36,12 @@ class CheckConfig(_ConfigModel):
     large_file_threshold_mb: int = Field(default=50, ge=1, le=4096)
 
 
+class ApiConfig(_ConfigModel):
+    variables: dict[str, str] = Field(default_factory=dict)
+    response_max_bytes: int = Field(default=262144, ge=1024, le=16 * 1024 * 1024)
+    timeout_seconds: float = Field(default=10.0, ge=0.1, le=300.0)
+
+
 class CSBoxConfig(_ConfigModel):
     locale: str = "zh_CN"
     student: StudentConfig = Field(default_factory=StudentConfig)
@@ -44,3 +50,4 @@ class CSBoxConfig(_ConfigModel):
     render: RenderConfig = Field(default_factory=RenderConfig)
     pack: PackConfig = Field(default_factory=PackConfig)
     check: CheckConfig = Field(default_factory=CheckConfig)
+    api: ApiConfig = Field(default_factory=ApiConfig)

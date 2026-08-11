@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from csbox.config import (
+    ApiConfig,
     ConfigPaths,
     ConfigurationError,
     CSBoxConfig,
@@ -28,6 +29,40 @@ def test_load_config_uses_schema_defaults(tmp_path: Path) -> None:
     assert config.render.theme == "dark"
     assert config.pack.filename == "{id}-{name}-{course}.zip"
     assert config.check.large_file_threshold_mb == 50
+    assert config.api == ApiConfig()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("response_max_bytes", 0), ("timeout_seconds", 0.0)],
+)
+def test_load_config_reports_api_field_and_repair_without_exposing_value(
+    tmp_path: Path, field: str, value: int | float
+) -> None:
+    paths = _paths(tmp_path)
+    paths.user.write_text(f"[api]\n{field} = {value}\n", encoding="utf-8")
+
+    with pytest.raises(ConfigurationError) as error:
+        load_config(tmp_path, paths=paths)
+
+    message = str(error.value)
+    assert str(paths.user) in message
+    assert field in message
+    assert "修改" in message or "设置" in message
+    assert f": {value}" not in message
+
+
+def test_api_config_is_strict_and_has_bounded_defaults() -> None:
+    config = ApiConfig(variables={"BASE_URL": "https://example.test"})
+
+    assert config.response_max_bytes == 262144
+    assert config.timeout_seconds == 10.0
+    with pytest.raises(ValueError):
+        ApiConfig(response_max_bytes=0)
+    with pytest.raises(ValueError):
+        ApiConfig(timeout_seconds=0.0)
+    with pytest.raises(ValueError):
+        ApiConfig.model_validate({"timeout_seconds": "10"})
 
 
 def test_project_config_overrides_user_config(tmp_path: Path) -> None:
@@ -153,3 +188,14 @@ def test_save_project_config_replaces_same_directory_temporary_file(
         tmp_path, paths=ConfigPaths(user=tmp_path / "user.toml", project=config_path)
     )
     assert loaded_config.lab.shell == "bash"
+
+
+def test_save_project_config_round_trips_api_settings(tmp_path: Path) -> None:
+    config = CSBoxConfig(api=ApiConfig(variables={"BASE_URL": "https://example.test"}))
+
+    config_path = save_project_config(config, tmp_path)
+    loaded = load_config(
+        tmp_path, paths=ConfigPaths(user=tmp_path / "user.toml", project=config_path)
+    )
+
+    assert loaded.api.variables == {"BASE_URL": "https://example.test"}

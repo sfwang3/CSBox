@@ -1,5 +1,6 @@
 from csbox.config.loader import ConfigurationError, load_config, save_project_config
 from csbox.config.models import (
+    ApiConfig,
     CheckConfig,
     CourseConfig,
     CSBoxConfig,
@@ -11,6 +12,7 @@ from csbox.config.models import (
 from csbox.config.paths import ConfigPaths
 
 __all__ = [
+    "ApiConfig",
     "CSBoxConfig",
     "CheckConfig",
     "ConfigurationError",
