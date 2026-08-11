@@ -11,6 +11,7 @@ from csbox.check.service import create_check_service
 from csbox.core.environment import detect_environment
 from csbox.lab.service import create_lab_service
 from csbox.locales import Translator, load_locale
+from csbox.pack.service import PackServiceError, create_pack_service
 
 _locale = load_locale()
 app = typer.Typer(
@@ -233,6 +234,39 @@ def lab_review(
     except Exception as error:
         console.print(f"打开 Review 失败：{error}")
         raise typer.Exit(code=1) from error
+
+
+@app.command("pack", help="安全检查并打包项目文件。")
+def pack_project(
+    root: Path | None = typer.Argument(None, help="待打包的项目目录。"),  # noqa: B008
+    output: Annotated[Path | None, typer.Option("--output", help="ZIP 文件或输出目录。")] = None,
+    verify: bool = typer.Option(False, "--verify", help="重新打开 ZIP 校验条目。"),
+    force: bool = typer.Option(False, "--force", help="允许覆盖已有 ZIP。"),
+    json_output: bool = typer.Option(False, "--json", help="输出稳定 JSON。"),
+) -> None:
+    project_root = root or Path(".")
+    try:
+        report = create_pack_service(project_root).pack(
+            project_root,
+            destination=output,
+            verify=verify,
+            force=force,
+        )
+    except (OSError, PackServiceError) as error:
+        Console(markup=False).print(f"项目打包失败：{error}")
+        raise typer.Exit(code=1) from error
+    if json_output:
+        Console(markup=False, soft_wrap=True).print(
+            json.dumps(report.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":"))
+        )
+        return
+    console = Console(markup=False)
+    console.print(f"打包完成：{report.destination}")
+    console.print(
+        f"文件数：{len(report.entries)}  源文件大小：{report.source_bytes}  "
+        f"ZIP 大小：{report.archive_bytes}"
+    )
+    console.print(f"排除项：{len(report.excluded)}  已校验：{'是' if report.verified else '否'}")
 
 
 def main() -> None:
