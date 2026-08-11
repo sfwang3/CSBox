@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import pty
 import shutil
 import time
 from collections.abc import Iterator
@@ -120,6 +119,8 @@ def test_spawn_reports_and_reaps_an_invalid_cwd(backend: UnixPTYBackend, tmp_pat
 def test_child_observes_initial_size_before_its_first_output(
     backend: UnixPTYBackend, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    import pty
+
     real_fork = pty.fork
 
     def delay_only_the_parent() -> tuple[int, int]:
