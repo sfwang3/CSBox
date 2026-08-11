@@ -23,7 +23,7 @@ class WindowsConPTYBackend(TerminalBackend):
         self,
         *,
         pty_process_factory: Any | None = None,
-        write_timeout: float = 0.1,
+        write_timeout: float = 1.0,
     ) -> None:
         if write_timeout <= 0:
             raise ValueError("终端写入超时时间必须是正数。")

@@ -255,6 +255,15 @@ def test_write_retries_partial_progress_without_losing_bytes(tmp_path: Path) -> 
     assert process.writes == ["abc", "bc"]
 
 
+def test_write_tolerates_transient_zero_progress_during_shell_startup(tmp_path: Path) -> None:
+    process = FakePtyProcess(write_results=[0] * 200 + [3])
+    backend = make_backend(process)
+    spawn_backend(backend, tmp_path)
+
+    assert backend.write(b"abc") == 3
+    assert process.writes[-1] == "abc"
+
+
 def test_write_zero_progress_is_bounded_and_preserves_cause(tmp_path: Path) -> None:
     process = FakePtyProcess(write_results=[0] * 100)
     backend = make_backend(process, write_timeout=0.01)
