@@ -36,7 +36,7 @@ capture_key = "ctrl-space"
 
 VS Code、Windows Terminal 等宿主可能拦截 `F12`。启动时 CSBox 会给出 advisory，不修改宿主、VS Code、Bash 或 PSReadLine 配置；如果快捷键没有到达，可以在 Review 中补 Capture。
 
-`lab export` 生成 PNG、`evidence.md` 和 `session.cast` 的副本。PNG 使用终端显示 cell 渲染，支持 ASCII/CJK 混排、ANSI 样式、dark/light theme 和字体 fallback；没有合适的 CJK 字体时会返回明确错误，不会静默生成错误证据。
+`lab export` 生成 PNG、`evidence.md` 和 `session.cast` 的副本；如果 Capture 中有可信的命令，还会生成 `commands.txt`。PNG 使用终端显示 cell 渲染，支持 ASCII/CJK 混排、ANSI 样式、dark/light theme 和字体 fallback；没有合适的 CJK 字体时会返回明确错误，不会静默生成错误证据。
 
 ## 项目检查与打包
 
@@ -58,7 +58,7 @@ uv run csbox pack --output ../deliverables --verify
 uv run csbox pack --output deliverable.zip --verify --force
 ```
 
-默认排除 `.git`、`.venv`、`node_modules`、`target`、`build`、`dist`、`__pycache__`、pytest/Ruff/IDE cache 和日志；真实 `.env` 与私钥默认拒绝打包，`.env.example` 可以保留。没有 `--force` 时不会覆盖已有 ZIP。
+默认排除 `.git`、`.venv`、`.csbox`、`runtime`、`node_modules`、`target`、`build`、`dist`、`__pycache__`、pytest/Ruff/IDE cache 和日志；真实 `.env`、`.env.local` 等环境变体与私钥默认拒绝打包，`.env.example` 可以保留。没有 `--force` 时不会覆盖已有 ZIP。
 
 ## 支持范围与验证边界
 

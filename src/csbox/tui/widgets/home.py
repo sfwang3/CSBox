@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from textual.app import ComposeResult
 from textual.containers import Vertical
+from textual.events import Resize
 from textual.widgets import Button, Static
 
 from csbox.core.display_width import truncate_cells
@@ -137,6 +138,7 @@ class RecentPanel(Vertical):
         status_key = f"home.status.{experiment.status}"
         if status_key not in self.locale.messages:
             status_key = "home.status.unknown"
+        available_width = self.size.width or 70
         context: list[str] = []
         if experiment.platform:
             context.append(experiment.platform)
@@ -144,19 +146,28 @@ class RecentPanel(Vertical):
             context.append(
                 truncate_cells(
                     str(experiment.cwd),
-                    max(24, self.size.width - 40) if self.size.width else 48,
+                    max(1, min(40, available_width // 3)),
                     ellipsis="…",
                 )
             )
-        return self.locale(
+        line = self.locale(
             "home.recent.item",
             demo=self.locale("home.demo.tag") if experiment.demo else "",
-            name=experiment.name,
+            name=truncate_cells(
+                experiment.name,
+                max(1, min(32, available_width // 3)),
+                ellipsis="…",
+            ),
             status=self.locale(status_key),
             duration=self.locale("home.duration", duration=experiment.duration),
             captures=experiment.capture_count,
             context=(" | " + " | ".join(context)) if context else "",
         )
+        return truncate_cells(line, max(1, available_width - 2), ellipsis="…")
+
+    def on_resize(self, event: Resize) -> None:
+        del event
+        self.query_one("#recent-content", Static).update(self._content())
 
     def update_snapshot(self, snapshot: HomeSnapshot) -> None:
         self.snapshot = snapshot

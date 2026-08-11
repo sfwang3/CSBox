@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typer.testing import CliRunner
 
 from csbox.cli.main import app
+from csbox.core.display_width import display_width
 from csbox.lab.models import SessionMetadata, SessionPaths
 from csbox.lab.repository import SessionSummary
 from csbox.lab.service import LabRunResult
@@ -112,3 +113,44 @@ def test_lab_list_json_does_not_wrap_long_fields(monkeypatch, tmp_path: Path) ->
 
     assert result.exit_code == 0
     assert json.loads(result.stdout)[0]["captures"] == 2
+
+
+def test_lab_list_plain_truncates_cjk_name_and_path_by_display_cells(
+    monkeypatch, tmp_path: Path
+) -> None:
+    long_name = "实验" * 120
+    long_cwd = Path("C:/Users/测试用户/桌面/实验一") / ("课程实验" * 40)
+    metadata = SessionMetadata(
+        id="long-session",
+        name=long_name,
+        status="completed",
+        startedAt=datetime.now(UTC),
+        endedAt=datetime.now(UTC),
+        platform="windows",
+        shell="powershell_51",
+        shellVersion=None,
+        initialRows=24,
+        initialColumns=80,
+        cwd=long_cwd,
+        csboxVersion="0.1.0",
+    )
+    service = FakeLabService(
+        tmp_path,
+        summaries=(
+            SessionSummary(
+                paths=SessionPaths(tmp_path / "long-session"),
+                metadata=metadata,
+                capture_count=2,
+            ),
+        ),
+    )
+    cli_module = importlib.import_module("csbox.cli.main")
+    monkeypatch.setattr(cli_module, "create_lab_service", lambda: service)
+
+    result = CliRunner().invoke(app, ["lab", "list"])
+
+    assert result.exit_code == 0
+    assert long_name not in result.stdout
+    assert str(long_cwd) not in result.stdout
+    assert "…" in result.stdout
+    assert all(display_width(line) <= 80 for line in result.stdout.splitlines())

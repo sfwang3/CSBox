@@ -69,7 +69,10 @@ def test_native_windows_conpty_shell_unicode_resize_and_exit(
     executable = "powershell.exe" if shell_kind == "powershell" else "pwsh.exe"
     resolved = shutil.which(executable)
     if resolved is None:
-        pytest.skip(f"CI limitation: {executable} is unavailable on this Windows runner.")
+        message = f"CI limitation: {executable} is unavailable on this Windows runner."
+        if os.environ.get("CSBOX_REQUIRE_NATIVE_SHELL") == "1":
+            pytest.fail(message)
+        pytest.skip(message)
 
     backend.spawn(
         [resolved, "-NoLogo", "-NoProfile", "-NonInteractive"],
@@ -78,12 +81,16 @@ def test_native_windows_conpty_shell_unicode_resize_and_exit(
     )
     backend.resize(100, 30)
     backend.write(
-        "Write-Output 'CSBOX_NATIVE_中文_OK'; Write-Output (Get-Location); exit 0\r\n".encode()
-    )
+        ""
+        "$size = $Host.UI.RawUI.WindowSize; "
+        "Write-Output ('CSBOX_SIZE_{0}x{1}' -f $size.Width, $size.Height); "
+        "Write-Output 'CSBOX_NATIVE_中文_OK'; Write-Output (Get-Location); exit 0\r\n"
+    ).encode()
 
-    output = _read_until(backend, b"CSBOX_NATIVE_")
+    output = _read_until(backend, b"CSBOX_SIZE_100x30")
     output += _read_to_eof(backend)
 
+    assert b"CSBOX_SIZE_100x30" in output
     assert "CSBOX_NATIVE_中文_OK".encode() in output
     assert str(tmp_path).encode() in output
     assert backend.wait(timeout=2.0) == 0

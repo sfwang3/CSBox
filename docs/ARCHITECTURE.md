@@ -30,7 +30,7 @@ Shell ←→ UnixPTYBackend / WindowsConPTYBackend
 
 `ReplayService` 从 asciicast v3 reader 得到带相对时间和 cast byte offset 的事件。它以 checkpoint snapshot 为起点恢复 emulator，再向前 feed 到目标时间，因此 backward seek 不需要修改原始 `session.cast`。checkpoint 是可重建派生文件，包含版本、cast fingerprint、checksum、event index、offset、时间和 snapshot；cast 改变、文件损坏或几何不一致时会丢弃并重建。
 
-`LabExporter` 从 CaptureStore 按 timestamp 顺序渲染 PNG，生成相对链接的 `evidence.md`，并复制 `session.cast`。输出路径和文件名经过安全化，禁止 traversal；已有 evidence 需要显式 `--force` 才覆盖。
+`LabExporter` 从 CaptureStore 按 timestamp 顺序渲染 PNG，生成相对链接的 `evidence.md`，并复制 `session.cast`；存在可信 Capture command 时额外生成 `commands.txt`。输出路径和文件名经过安全化，禁止 traversal；已有 evidence 需要显式 `--force` 才覆盖。
 
 ## 项目检查与打包
 

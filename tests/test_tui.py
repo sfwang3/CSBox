@@ -2,8 +2,9 @@ from pathlib import Path
 
 import pytest
 
+from csbox.core.display_width import display_width
 from csbox.core.events import TerminalSize
-from csbox.core.models import EnvironmentSnapshot
+from csbox.core.models import EnvironmentSnapshot, HomeSnapshot, RecentExperiment
 from csbox.lab.fake_data import FakeHomeDataSource
 from csbox.lab.home_data import RealHomeDataSource
 from csbox.lab.repository import SessionRepository
@@ -11,6 +12,26 @@ from csbox.locales import load_locale
 from csbox.tui.app import CSBoxApp
 from csbox.tui.screens.home import HomeScreen
 from csbox.tui.screens.review import ReviewScreen
+
+
+class LongHomeDataSource:
+    source_id = "long"
+
+    def get_home_snapshot(self, environment: EnvironmentSnapshot) -> HomeSnapshot:
+        return HomeSnapshot(
+            environment=environment,
+            recent_experiments=[
+                RecentExperiment(
+                    name="计算机网络实验一" * 30,
+                    status="completed",
+                    duration="8 min",
+                    demo=False,
+                    capture_count=2,
+                    platform="windows",
+                    cwd=Path("C:/Users/测试用户/桌面/实验一") / ("课程实验" * 30),
+                )
+            ],
+        )
 
 
 def _environment() -> EnvironmentSnapshot:
@@ -97,6 +118,25 @@ async def test_runtime_home_uses_real_empty_state_without_demo_data(tmp_path: Pa
         environment_text = str(app.screen.query_one("#environment-content").renderable)
         assert "项目路径:" in environment_text
         assert str(tmp_path)[:32] in environment_text
+
+
+@pytest.mark.asyncio
+async def test_home_recent_cjk_fields_are_truncated_for_80_columns() -> None:
+    app = CSBoxApp(
+        data_source=LongHomeDataSource(),
+        environment=_environment(),
+        locale=load_locale(),
+    )
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+
+        content = str(app.screen.query_one("#recent-content").renderable)
+        panel = app.screen.query_one("#recent-panel")
+        assert "计算机网络实验一" * 30 not in content
+        assert "C:/Users/测试用户/桌面/实验一" + ("课程实验" * 30) not in content
+        assert "…" in content
+        assert all(display_width(line) <= panel.size.width for line in content.splitlines())
 
 
 @pytest.mark.asyncio

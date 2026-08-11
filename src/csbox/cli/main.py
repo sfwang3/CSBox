@@ -8,6 +8,7 @@ import typer
 from rich.console import Console
 
 from csbox.check.service import create_check_service
+from csbox.core.display_width import display_width, truncate_cells
 from csbox.core.environment import detect_environment
 from csbox.lab.service import create_lab_service
 from csbox.locales import Translator, load_locale
@@ -163,10 +164,19 @@ def lab_list(
         console.print("暂无实验记录。")
         return
     for item in payload:
-        console.print(
-            f"{item['id']}  {item['name']}  {item['status']}  "
-            f"Capture: {item['captures']}  {item['shell']}  {item['cwd']}"
-        )
+        console.print(_format_lab_list_line(item, console.width))
+
+
+def _format_lab_list_line(item: dict[str, object], width: int) -> str:
+    prefix = f"{truncate_cells(str(item['id']), 12, ellipsis='…')}  "
+    summary = f"{item['status']}  Capture: {item['captures']}  {item['shell']}"
+    fixed_width = display_width(prefix) + 2 + display_width(summary) + 2
+    available = max(0, width - fixed_width)
+    name_width = available // 2
+    cwd_width = available - name_width
+    name = truncate_cells(str(item["name"]), name_width, ellipsis="…")
+    cwd = truncate_cells(str(item["cwd"]), cwd_width, ellipsis="…")
+    return f"{prefix}{name}  {summary}  {cwd}"
 
 
 @lab_app.command("start")

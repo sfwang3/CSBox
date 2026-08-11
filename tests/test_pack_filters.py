@@ -29,10 +29,13 @@ def test_filter_excludes_artifacts_but_keeps_source_named_build_and_target(
     assert "cache/nested/x.txt" not in names
 
 
-@pytest.mark.parametrize("name", [".env", "private.pem", "notes.txt"])
+@pytest.mark.parametrize(
+    "name",
+    [".env", ".env.local", ".env.production", "private.pem", "notes.txt"],
+)
 def test_filter_refuses_real_env_and_private_key_headers(tmp_path: Path, name: str) -> None:
     path = tmp_path / name
-    if name == ".env":
+    if name.startswith(".env"):
         path.write_text("TOKEN=secret-value")
     elif name == "private.pem":
         path.write_text("-----BEGIN PRIVATE KEY-----\nsecret\n")
@@ -41,6 +44,17 @@ def test_filter_refuses_real_env_and_private_key_headers(tmp_path: Path, name: s
 
     with pytest.raises(PackSafetyError):
         PackFilter(tmp_path).candidates()
+
+
+def test_filter_keeps_env_example_but_excludes_runtime_state(tmp_path: Path) -> None:
+    (tmp_path / ".env.example").write_text("TOKEN=change-me")
+    (tmp_path / ".csbox" / "sessions" / "session-1").mkdir(parents=True)
+    (tmp_path / ".csbox" / "sessions" / "session-1" / "session.cast").write_text("cast")
+
+    names = {candidate.relative.as_posix() for candidate in PackFilter(tmp_path).candidates()}
+
+    assert ".env.example" in names
+    assert all(not name.startswith(".csbox/") for name in names)
 
 
 def test_filter_rejects_path_traversal_patterns_and_skips_symlink_escape(tmp_path: Path) -> None:

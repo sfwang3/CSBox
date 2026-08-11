@@ -23,6 +23,7 @@ DEFAULT_EXCLUDED_DIRECTORIES = frozenset(
         ".mypy_cache",
         ".idea",
         ".vscode",
+        ".csbox",
         "cache",
         "caches",
         "log",
@@ -128,9 +129,10 @@ class PackFilter:
         return any(_matches(value, pattern) for pattern in self.exclude)
 
     def _is_sensitive(self, path: Path, relative: Path) -> bool:
-        if path.name.casefold() == ".env":
-            return True
+        del relative
         name = path.name.casefold()
+        if name == ".env" or (name.startswith(".env.") and name != ".env.example"):
+            return True
         likely_key = name.endswith((".pem", ".key", ".ppk")) or name in {
             "id_rsa",
             "id_ed25519",

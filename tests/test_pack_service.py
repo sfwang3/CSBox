@@ -87,3 +87,18 @@ def test_pack_check_failure_does_not_touch_existing_destination(tmp_path: Path) 
     with pytest.raises(PackServiceError):
         PackService(check_service=checker).pack(source, destination=destination)
     assert destination.read_bytes() == b"unchanged"
+
+
+def test_pack_service_excludes_runtime_state_from_real_archive(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "README.md").write_text("readme")
+    (source / ".csbox" / "sessions" / "session-1").mkdir(parents=True)
+    (source / ".csbox" / "sessions" / "session-1" / "session.cast").write_text("cast")
+    destination = tmp_path / "archive.zip"
+
+    report = PackService().pack(source, destination=destination, verify=True)
+
+    assert report.verified is True
+    with zipfile.ZipFile(destination) as archive:
+        assert archive.namelist() == ["README.md"]
