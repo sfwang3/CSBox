@@ -130,6 +130,12 @@ class FakePtyProcess:
             self._condition.notify_all()
 
 
+class FakePywinptyPtyProcess(FakePtyProcess):
+    """Marks the fake as pywinpty's async high-level process adapter."""
+
+    __module__ = "winpty.ptyprocess"
+
+
 @pytest.fixture(autouse=True)
 def reset_fake() -> Iterator[None]:
     FakePtyProcess.next_process = None
@@ -262,6 +268,16 @@ def test_write_tolerates_transient_zero_progress_during_shell_startup(tmp_path: 
 
     assert backend.write(b"abc") == 3
     assert process.writes[-1] == "abc"
+
+
+def test_pywinpty_async_zero_result_does_not_resend_submitted_input(tmp_path: Path) -> None:
+    process = FakePtyProcess(write_results=[0])
+    FakePywinptyPtyProcess.next_process = process
+    backend = WindowsConPTYBackend(pty_process_factory=FakePywinptyPtyProcess)
+    spawn_backend(backend, tmp_path)
+
+    assert backend.write(b"abc") == 3
+    assert process.writes == ["abc"]
 
 
 def test_write_zero_progress_is_bounded_and_preserves_cause(tmp_path: Path) -> None:

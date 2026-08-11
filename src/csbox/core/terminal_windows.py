@@ -35,6 +35,7 @@ class WindowsConPTYBackend(TerminalBackend):
         self._reader_done = False
         self._reader_error: Exception | None = None
         self._input_buffer = b""
+        self._pywinpty_async_write = False
         self._exit_code: int | None = None
         self._closed = False
         self._closing = False
@@ -56,6 +57,7 @@ class WindowsConPTYBackend(TerminalBackend):
             if self._process is not None:
                 raise RuntimeError("终端进程已经启动。")
             factory = self._load_factory()
+            self._pywinpty_async_write = getattr(factory, "__module__", "") == "winpty.ptyprocess"
             child_env = os.environ.copy()
             if env is not None:
                 child_env.update(env)
@@ -242,6 +244,10 @@ class WindowsConPTYBackend(TerminalBackend):
                 self._output_ready.notify_all()
 
     def _flush_complete_input(self, process: Any) -> None:
+        if self._pywinpty_async_write:
+            self._flush_pywinpty_input(process)
+            return
+
         deadline = time.monotonic() + self._write_timeout
         while True:
             complete_length = self._complete_utf8_length(self._input_buffer)
@@ -274,6 +280,33 @@ class WindowsConPTYBackend(TerminalBackend):
                     "Windows ConPTY 在 UTF-8 字符中间报告了部分写入，无法安全续写。", cause
                 ) from cause
             self._input_buffer = self._input_buffer[written:]
+
+    def _flush_pywinpty_input(self, process: Any) -> None:
+        """Submit complete UTF-8 input without misreading pywinpty's async count.
+
+        pywinpty's ConPTY implementation uses an overlapped input pipe. Its
+        high-level ``write`` returns the number of bytes completed from a
+        previous call, so the first successful submission commonly returns
+        zero even though the current input is already queued. The Rust layer
+        submits every chunk or raises; consuming the current buffer after a
+        successful call avoids resending it.
+        """
+        while True:
+            complete_length = self._complete_utf8_length(self._input_buffer)
+            if complete_length == 0:
+                return
+            complete_bytes = self._input_buffer[:complete_length]
+            text = complete_bytes.decode("utf-8")
+            try:
+                written = process.write(text)
+            except Exception as cause:
+                raise TerminalBackendError("写入 Windows ConPTY 失败。", cause) from cause
+            if type(written) is not int or written < 0:
+                cause = ValueError(f"invalid PtyProcess.write result: {written!r}")
+                raise TerminalBackendError(
+                    "Windows ConPTY 返回了无效的写入字节数。", cause
+                ) from cause
+            self._input_buffer = self._input_buffer[complete_length:]
 
     @staticmethod
     def _complete_utf8_length(data: bytes) -> int:
