@@ -4,6 +4,7 @@ from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.widgets import Button, Static
 
+from csbox.core.display_width import truncate_cells
 from csbox.core.models import HomeSnapshot, RecentExperiment
 from csbox.locales import Translator
 
@@ -45,6 +46,7 @@ class EnvironmentPanel(Vertical):
         yield Static(self._content(), id="environment-content", markup=False)
 
     def _content(self) -> str:
+        project_dir = self.snapshot.project_dir
         environment = self.snapshot.environment
         values = (
             ("environment.os", f"{environment.os_name} {environment.os_version}"),
@@ -61,8 +63,16 @@ class EnvironmentPanel(Vertical):
                 "environment.terminal",
                 f"{environment.terminal_columns}×{environment.terminal_rows}",
             ),
+            (
+                "environment.project",
+                truncate_cells(
+                    str(project_dir) if project_dir else self.locale("common.unknown"),
+                    max(24, self.size.width - 18) if self.size.width else 60,
+                    ellipsis="…",
+                ),
+            ),
         )
-        return "  ·  ".join(
+        return "\n".join(
             self.locale("home.environment.item", label=self.locale(key), value=value)
             for key, value in values
         )
@@ -100,36 +110,58 @@ class RecentPanel(Vertical):
 
     def compose(self) -> ComposeResult:
         yield Static(self.locale("home.recent.title"), classes="panel-title", markup=False)
-        yield Static(self.locale("home.demo.note"), id="demo-note", markup=False)
-        yield Static(
-            self.locale("home.demo.count", count=len(self.snapshot.recent_experiments)),
-            id="demo-count",
-            markup=False,
-        )
+        yield Static(self._note(), id="demo-note", markup=False)
+        yield Static(self._count(), id="demo-count", markup=False)
         yield Static(self._content(), id="recent-content", markup=False)
 
     def _content(self) -> str:
+        if not self.snapshot.recent_experiments:
+            return self.locale("home.recent.empty")
         return "\n".join(
             self._experiment_line(experiment) for experiment in self.snapshot.recent_experiments
+        )
+
+    def _uses_demo(self) -> bool:
+        return any(item.demo for item in self.snapshot.recent_experiments)
+
+    def _note(self) -> str:
+        return self.locale("home.demo.note" if self._uses_demo() else "home.recent.real.note")
+
+    def _count(self) -> str:
+        return self.locale(
+            "home.demo.count" if self._uses_demo() else "home.recent.count",
+            count=len(self.snapshot.recent_experiments),
         )
 
     def _experiment_line(self, experiment: RecentExperiment) -> str:
         status_key = f"home.status.{experiment.status}"
         if status_key not in self.locale.messages:
             status_key = "home.status.unknown"
+        context: list[str] = []
+        if experiment.platform:
+            context.append(experiment.platform)
+        if experiment.cwd:
+            context.append(
+                truncate_cells(
+                    str(experiment.cwd),
+                    max(24, self.size.width - 40) if self.size.width else 48,
+                    ellipsis="…",
+                )
+            )
         return self.locale(
             "home.recent.item",
             demo=self.locale("home.demo.tag") if experiment.demo else "",
             name=experiment.name,
             status=self.locale(status_key),
             duration=self.locale("home.duration", duration=experiment.duration),
+            captures=experiment.capture_count,
+            context=(" | " + " | ".join(context)) if context else "",
         )
 
     def update_snapshot(self, snapshot: HomeSnapshot) -> None:
         self.snapshot = snapshot
-        self.query_one("#demo-count", Static).update(
-            self.locale("home.demo.count", count=len(snapshot.recent_experiments))
-        )
+        self.query_one("#demo-note", Static).update(self._note())
+        self.query_one("#demo-count", Static).update(self._count())
         self.query_one("#recent-content", Static).update(self._content())
 
 

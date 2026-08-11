@@ -5,10 +5,13 @@ from pathlib import Path
 from textual.app import App
 
 from csbox.core.models import EnvironmentSnapshot
+from csbox.lab.home_data import RealHomeDataSource
 from csbox.lab.ports import HomeDataSource
+from csbox.lab.repository import SessionRepository
 from csbox.locales import Translator
 from csbox.tui.dialogs.unavailable import UnavailableDialog
 from csbox.tui.screens.home import HomeScreen
+from csbox.tui.screens.review import ReviewController, ReviewScreen
 
 
 class CSBoxApp(App[None]):
@@ -53,3 +56,27 @@ class CSBoxApp(App[None]):
 
     def action_quit_app(self) -> None:
         self.exit()
+
+
+class ReviewApp(App[None]):
+    """Minimal app shell for the service-owned Review screen."""
+
+    TITLE = "CSBox Review"
+    CSS_PATH = Path(__file__).parent / "themes" / "csbox.tcss"
+
+    def __init__(self, *, controller: ReviewController, locale: Translator) -> None:
+        super().__init__()
+        self.controller = controller
+        self.locale = locale
+
+    def on_mount(self) -> None:
+        self.push_screen(ReviewScreen(controller=self.controller, locale=self.locale))
+
+    def action_quit(self) -> None:
+        self.exit()
+
+
+def real_home_data_source(project_dir: Path) -> HomeDataSource:
+    """Construct the runtime Home source without retaining demo state."""
+
+    return RealHomeDataSource(SessionRepository.from_cwd(project_dir), project_dir)

@@ -2,24 +2,30 @@ from __future__ import annotations
 
 import importlib
 import json
+from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 from typer.testing import CliRunner
 
 from csbox.cli.main import app
-from csbox.lab.models import SessionPaths
+from csbox.lab.models import SessionMetadata, SessionPaths
 from csbox.lab.repository import SessionSummary
 from csbox.lab.service import LabRunResult
 
 
 class FakeLabService:
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, summaries: tuple[SessionSummary, ...] = ()) -> None:
         self.root = root
         self.started: list[tuple[object, ...]] = []
         self.exported: list[tuple[object, ...]] = []
+        self.summaries = summaries
 
     def list(self) -> tuple[SessionSummary, ...]:
-        return ()
+        return self.summaries
+
+    def capture_advisory(self) -> SimpleNamespace:
+        return SimpleNamespace(message="启动前提示：Capture")
 
     def start(self, *args, **kwargs) -> LabRunResult:
         self.started.append((args, kwargs))
@@ -72,3 +78,37 @@ def test_lab_start_and_export_are_service_commands(monkeypatch, tmp_path: Path) 
     assert service.started[0][1]["shell"] == "bash"
     assert exported.exit_code == 0
     assert service.exported == [("session-1", tmp_path / "导出", "light", True)]
+
+
+def test_lab_list_json_does_not_wrap_long_fields(monkeypatch, tmp_path: Path) -> None:
+    metadata = SessionMetadata(
+        id="long-session",
+        name="实验" * 120,
+        status="completed",
+        startedAt=datetime.now(UTC),
+        endedAt=datetime.now(UTC),
+        platform="linux",
+        shell="bash",
+        shellVersion=None,
+        initialRows=24,
+        initialColumns=80,
+        cwd=Path("/tmp") / ("课程" * 120),
+        csboxVersion="0.1.0",
+    )
+    service = FakeLabService(
+        tmp_path,
+        summaries=(
+            SessionSummary(
+                paths=SessionPaths(tmp_path / "long-session"),
+                metadata=metadata,
+                capture_count=2,
+            ),
+        ),
+    )
+    cli_module = importlib.import_module("csbox.cli.main")
+    monkeypatch.setattr(cli_module, "create_lab_service", lambda: service)
+
+    result = CliRunner().invoke(app, ["lab", "list", "--json"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)[0]["captures"] == 2

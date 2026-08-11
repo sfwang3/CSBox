@@ -23,11 +23,15 @@ class RecentExperiment(BaseModel):
     status: str
     duration: str
     demo: bool = True
+    capture_count: int = Field(default=0, ge=0)
+    platform: str | None = None
+    cwd: Path | None = None
 
 
 class HomeSnapshot(BaseModel):
     environment: EnvironmentSnapshot
     recent_experiments: list[RecentExperiment] = Field(default_factory=list)
+    project_dir: Path | None = None
 
 
 class Evidence(BaseModel):

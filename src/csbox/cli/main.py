@@ -31,11 +31,10 @@ def _yes_no(translator: Translator, value: bool) -> str:
 def _run_default(ctx: typer.Context) -> None:
     if ctx.invoked_subcommand is not None:
         return
-    from csbox.lab.fake_data import HOME_DATA_SOURCES
-    from csbox.tui.app import CSBoxApp
+    from csbox.tui.app import CSBoxApp, real_home_data_source
 
     environment = detect_environment()
-    data_source = HOME_DATA_SOURCES.get("fake")
+    data_source = real_home_data_source(Path.cwd())
     CSBoxApp(data_source=data_source, environment=environment, locale=_locale).run()
 
 
@@ -83,10 +82,11 @@ def lab_list(
         }
         for summary in sessions
     ]
-    console = Console(markup=False)
     if json_output:
+        console = Console(markup=False, soft_wrap=True)
         console.print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
         return
+    console = Console(markup=False)
     if not payload:
         console.print("暂无实验记录。")
         return
@@ -105,14 +105,20 @@ def lab_start(
 ) -> None:
     service = create_lab_service()
     console = Console(markup=False)
+    advisory_printed = False
     try:
+        capture_advisory = getattr(service, "capture_advisory", None)
+        if callable(capture_advisory):
+            console.print(capture_advisory().message)
+            advisory_printed = True
         result = service.start(name, shell=shell)
     except Exception as error:
         console.print(f"实验启动失败：{error}")
         if verbose and error.__cause__ is not None:
             console.print(f"底层错误：{error.__cause__}")
         raise typer.Exit(code=1) from error
-    console.print(result.advisory)
+    if not advisory_printed:
+        console.print(result.advisory)
     status_label = "完成" if result.status == "completed" else result.status
     console.print(f"实验已{status_label}：{result.session.root}")
 
@@ -133,6 +139,29 @@ def lab_export(
         console.print(f"实验导出失败：{error}")
         raise typer.Exit(code=1) from error
     console.print(f"实验证据已导出：{result.destination}")
+
+
+@lab_app.command("review")
+def lab_review(
+    session: str | None = typer.Argument(None, help="会话 ID 或唯一前缀；省略则打开最近会话。"),
+) -> None:
+    from csbox.tui.app import ReviewApp
+    from csbox.tui.screens.review import ReviewController
+
+    service = create_lab_service()
+    console = Console(markup=False)
+    try:
+        if session:
+            paths = service.repository.resolve(session)
+        else:
+            latest = service.repository.latest()
+            if latest is None:
+                raise ValueError("暂无可回看的 session，请先运行 csbox lab start。")
+            paths = latest.paths
+        ReviewApp(controller=ReviewController.from_session(paths), locale=_locale).run()
+    except Exception as error:
+        console.print(f"打开 Review 失败：{error}")
+        raise typer.Exit(code=1) from error
 
 
 def main() -> None:

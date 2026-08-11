@@ -185,3 +185,113 @@ UnavailableDialog {
     height: 1fr;
     margin-bottom: 0;
 }
+
+#review-layout {
+    height: 100%;
+    padding: 1 2 0 2;
+}
+
+#review-title {
+    color: #9da4ff;
+    text-style: bold;
+    height: 1;
+    border-bottom: solid #25384b;
+    margin-bottom: 1;
+}
+
+#review-body {
+    height: 1fr;
+    layout: horizontal;
+}
+
+#review-terminal,
+#review-narrow {
+    background: #050b11;
+    border: round #29455f;
+    color: #dbe7f2;
+    padding: 1;
+    overflow: hidden;
+}
+
+#review-terminal {
+    width: 1fr;
+}
+
+#review-sidebar {
+    width: 36;
+    margin-left: 1;
+}
+
+#review-timeline,
+#review-captures {
+    background: #0e1a26;
+    border: round #29455f;
+    color: #bcd0e0;
+    padding: 1;
+    height: auto;
+    min-height: 7;
+}
+
+#review-captures {
+    height: 1fr;
+    margin-top: 1;
+}
+
+#review-footer {
+    height: 1;
+    color: #a5bacd;
+    background: #101e2b;
+    padding: 0 1;
+    margin-top: 1;
+}
+
+#review-narrow {
+    display: none;
+    height: 1fr;
+}
+
+.narrow #review-body {
+    display: none;
+}
+
+.narrow #review-narrow {
+    display: block;
+}
+
+.wide #review-narrow {
+    display: none;
+}
+
+#capture-title-dialog {
+    align: center middle;
+    background: rgba(0, 0, 0, 0.72);
+}
+
+#capture-title-card {
+    width: 60;
+    height: auto;
+    border: round #6d79e8;
+    background: #101c29;
+    padding: 1 2;
+}
+
+#capture-title-heading {
+    color: #9da4ff;
+    text-style: bold;
+    height: 1;
+    margin-bottom: 1;
+}
+
+#capture-title-input {
+    margin-bottom: 1;
+}
+
+#capture-title-actions {
+    height: 3;
+    align: right middle;
+}
+
+#capture-title-actions Button {
+    min-width: 10;
+    margin-left: 1;
+}
