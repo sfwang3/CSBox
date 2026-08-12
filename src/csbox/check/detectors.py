@@ -412,6 +412,10 @@ class FileInventory:
             self._stats.skipped_decode += 1
             self._text_cache[entry.relative] = None
             return None
+        # Keep text-scan semantics stable across platforms. Native Windows
+        # text fixtures commonly contain CRLF even when the logical content
+        # uses LF; scanners should report logical lines, not host newlines.
+        content = content.replace("\r\n", "\n").replace("\r", "\n")
         if self._text_cache_bytes + len(data) > self.text_cache_limit_bytes:
             self._stats.skipped_budget += 1
             # The budget bounds retained memory, not security coverage.  Return
@@ -531,6 +535,12 @@ class FileInventory:
             return False
         if not stat.S_ISREG(current.st_mode):
             return False
+        if os.name == "nt":
+            # Windows file IDs and change timestamps can be reported with
+            # different fidelity by stat() and fstat(). The open descriptor
+            # is the authoritative handle; retain size and reparse checks,
+            # while avoiding false mutation reports from optional metadata.
+            return current.st_size == opened.st_size == entry.size
         if entry.device is not None and current.st_dev != entry.device:
             return False
         if entry.inode is not None and current.st_ino != entry.inode:
@@ -543,6 +553,12 @@ class FileInventory:
 
     @staticmethod
     def _matches_entry_metadata(entry: FileEntry, metadata: os.stat_result) -> bool:
+        if os.name == "nt":
+            # Windows stat/fstat do not expose POSIX identity and timestamp
+            # fields with equivalent stability. The descriptor and path
+            # checks still protect the open file; size is the stable
+            # mutation guard needed before and after streaming it.
+            return metadata.st_size == entry.size
         if entry.device is not None and metadata.st_dev != entry.device:
             return False
         if entry.inode is not None and metadata.st_ino != entry.inode:

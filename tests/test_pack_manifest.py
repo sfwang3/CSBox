@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import os
 import zipfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -417,6 +418,7 @@ def test_manifest_root_directory_conflict_rejects_pack(tmp_path: Path) -> None:
     assert "manifest.json/part.txt:path-conflict" in plan.rejected
 
 
+@pytest.mark.skipif(os.name == "nt", reason="casefold-conflict fixture needs case-sensitive paths")
 def test_plan_rejects_casefolded_ancestor_path_conflict_without_verify(
     tmp_path: Path,
 ) -> None:
@@ -435,6 +437,18 @@ def test_plan_rejects_casefolded_ancestor_path_conflict_without_verify(
     assert "docs/index.txt" not in plan.included
     with pytest.raises(PackServiceError):
         PackService().pack(source, destination=tmp_path / "archive.zip")
+
+
+def test_casefolded_ancestor_path_conflict_is_detected_without_filesystem_aliases() -> None:
+    from csbox.pack.filters import PackCandidate
+    from csbox.pack.service import _conflicting_candidate_indices
+
+    candidates = [
+        PackCandidate(Path("Docs"), Path("Docs"), 1),
+        PackCandidate(Path("docs/index.txt"), Path("docs/index.txt"), 1),
+    ]
+
+    assert _conflicting_candidate_indices(candidates) == {0, 1}
 
 
 def test_pack_plan_rejects_same_size_source_change_after_confirmation_preview(

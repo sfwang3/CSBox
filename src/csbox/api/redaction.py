@@ -44,7 +44,7 @@ _SENSITIVE_ASSIGNMENT_PREFIX_PATTERN = re.compile(
         |
         %(?:3[Dd]|3[Aa])(?:%20)*
     )
-    (?=["']|[^\s,;&/}\]"'])
+    (?=["']|[^\s,;&}\]"'])
     """,
     re.VERBOSE,
 )
@@ -203,7 +203,9 @@ class Redactor:
                 position = match.end()
                 continue
 
-            value_end, quote, has_closing_quote = _assignment_value_end(value, match.end())
+            value_end, quote, has_closing_quote = _assignment_value_end(
+                value, match.end(), self._secret_fields
+            )
             if quote is None:
                 redacted.append(REDACTION_MARKER)
             else:
@@ -264,13 +266,19 @@ class Redactor:
         return f"{username}{password}@{host}"
 
 
-def _assignment_value_end(value: str, start: int) -> tuple[int, str | None, bool]:
+def _assignment_value_end(
+    value: str, start: int, secret_fields: frozenset[str]
+) -> tuple[int, str | None, bool]:
     if start < len(value) and value[start] in "[{":
         return _composite_value_end(value, start), None, False
     quote_character = value[start] if value[start] in {'"', "'"} else None
     if quote_character is None:
         position = start
-        while position < len(value) and value[position] not in " \t\r\n,;&/}]\"'":
+        while position < len(value) and value[position] not in " \t\r\n,;&}]\"'":
+            if value[position] == "/" and _is_sensitive_assignment_start(
+                value, position + 1, secret_fields
+            ):
+                return position, None, False
             position += 1
         return position, None, False
 
@@ -285,6 +293,19 @@ def _assignment_value_end(value: str, start: int) -> tuple[int, str | None, bool
             return position + 1, quote_character, True
         position += 1
     return position, quote_character, False
+
+
+def _is_sensitive_assignment_start(
+    value: str, position: int, secret_fields: frozenset[str]
+) -> bool:
+    match = _SENSITIVE_ASSIGNMENT_PREFIX_PATTERN.match(value, position)
+    if match is None:
+        return False
+    key = match.group("double_key", "single_key", "bare_key")
+    key_text = next(candidate for candidate in key if candidate is not None)
+    if match.group("bare_key") is None:
+        key_text = _decode_quoted_key(key_text)
+    return _normalize_field_name(key_text) in secret_fields
 
 
 def _composite_value_end(value: str, start: int) -> int:

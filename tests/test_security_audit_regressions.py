@@ -323,6 +323,7 @@ def test_capture_validation_warnings_never_echo_invalid_secret_values(tmp_path: 
     assert SECRET not in repr(loaded.warnings)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows cannot create reserved path fixtures")
 @pytest.mark.parametrize("name", ["CON", "report.", "file:stream"])
 def test_pack_rejects_zip_paths_that_are_unsafe_on_windows(tmp_path: Path, name: str) -> None:
     source = tmp_path / "project"
@@ -337,6 +338,11 @@ def test_pack_rejects_zip_paths_that_are_unsafe_on_windows(tmp_path: Path, name:
     assert any(item.startswith(f"{name}:") for item in plan.rejected)
     with pytest.raises(PackServiceError, match="不安全|拒绝"):
         service.pack(source, destination=destination)
+
+
+@pytest.mark.parametrize("name", ["CON", "report.", "file:stream"])
+def test_portable_zip_path_rejects_native_windows_reserved_components(name: str) -> None:
+    assert not pack_service_module._is_portable_zip_path(name)
 
 
 def test_pack_verification_streams_each_entry_without_testzip_or_full_reads(

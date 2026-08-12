@@ -406,7 +406,11 @@ def read_regular_text(
 ) -> str:
     """Read bounded text from a regular file without following filesystem links."""
 
-    return read_regular_bytes(path, max_bytes=max_bytes).decode(encoding)
+    text = read_regular_bytes(path, max_bytes=max_bytes).decode(encoding)
+    # Structured project files should have the same logical text on every host;
+    # do not let native Windows newline translation leak into parsers and CLI
+    # diagnostics.
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def ensure_private_directory(directory: Path | str) -> None:

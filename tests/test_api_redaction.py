@@ -310,6 +310,29 @@ def test_redactor_text_masks_response_only_sensitive_assignments(text: str, expe
     assert SECRET not in redacted
 
 
+def test_redactor_text_masks_unquoted_sensitive_values_containing_slashes() -> None:
+    secret = "CSBOX_SECRET_SENTINEL_task18_redactor_slash_41"
+    text = f"password=https://{secret}/remaining"
+
+    redacted = Redactor(RedactionPolicy.default()).text(text)
+
+    assert redacted == "password=••••••••"
+    assert secret not in redacted
+
+
+@pytest.mark.parametrize("content_type", ["text/plain", "application/json"])
+def test_redactor_response_body_masks_slash_prefixed_sensitive_values(
+    content_type: str,
+) -> None:
+    secret = "CSBOX_SECRET_SENTINEL_task18_redactor_root_slash_42"
+    body = f"password=/{secret}"
+
+    redacted = Redactor(RedactionPolicy.default()).response_body(body, content_type)
+
+    assert redacted == f"password={MASK}"
+    assert secret not in redacted
+
+
 @pytest.mark.parametrize(
     ("text", "expected"),
     [

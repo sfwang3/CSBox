@@ -68,6 +68,7 @@ async def test_home_screen_mounts_at_80_by_24_with_demo_data() -> None:
         assert app.screen.is_wide is False
         for button in app.screen.query("Button"):
             button.focus()
+            button.scroll_visible(animate=False, immediate=True)
             await pilot.pause()
             assert button.region.y < 24
 

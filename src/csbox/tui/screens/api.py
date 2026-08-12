@@ -37,6 +37,7 @@ from csbox.api.scenario import ScenarioLoader
 from csbox.api.variables import resolve_variables
 from csbox.config import ConfigPaths, ConfigurationError, load_config
 from csbox.core.display_width import display_width, truncate_cells
+from csbox.core.fonts import FontResolutionError
 from csbox.core.text_layout import wrap_cells
 from csbox.locales import Translator
 from csbox.tui.widgets.api import ApiDetail, ApiFooter, ApiRunList, ApiScenarioList
@@ -603,7 +604,7 @@ class ApiScreen(Screen[None]):
             self._show_inline_error(self.locale("api.error.repository"))
         except ApiDomainError:
             self._show_inline_error(self.locale("api.error.export"))
-        except (OSError, UnicodeError, TypeError, ValueError):
+        except (FontResolutionError, OSError, UnicodeError, TypeError, ValueError):
             self._show_inline_error(self.locale("api.error.export"))
 
     def _show_inline_error(self, message: str) -> None:

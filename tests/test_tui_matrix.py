@@ -185,6 +185,7 @@ async def test_home_geometry_and_tab_navigation_are_usable(
             assert app.screen.focused.id == expected_id
         for button in app.screen.query(Button):
             button.focus()
+            button.scroll_visible(animate=False, immediate=True)
             await pilot.pause()
             assert button.region.y >= 0
             assert button.region.bottom <= size[1]

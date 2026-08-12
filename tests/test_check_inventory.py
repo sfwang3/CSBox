@@ -29,6 +29,15 @@ def test_text_cache_reads_one_file_once_and_reports_a_cache_hit(tmp_path: Path) 
     assert stats.cached_bytes == len("中文 note\n".encode())
 
 
+def test_text_scan_normalizes_native_crlf_and_cr_newlines(tmp_path: Path) -> None:
+    source = tmp_path / "notes.txt"
+    source.write_bytes("中文 note\r\nsecond\rthird\n".encode())
+
+    inventory = FileInventory.build(tmp_path)
+
+    assert inventory.text(inventory.files[0]) == "中文 note\nsecond\nthird\n"
+
+
 def test_large_file_is_skipped_without_reading_and_without_cache_content(tmp_path: Path) -> None:
     large = tmp_path / "large.txt"
     large.write_bytes(b"x" * 17)
@@ -186,6 +195,10 @@ def test_inventory_opens_text_nonblocking_before_regular_file_check(
         assert observed_flags[0] & os.O_NONBLOCK
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="directory-descriptor replacement race is a POSIX-specific contract",
+)
 def test_inventory_does_not_follow_directory_replaced_by_a_symlink(
     tmp_path: Path, monkeypatch
 ) -> None:

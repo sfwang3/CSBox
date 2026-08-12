@@ -189,7 +189,7 @@ def test_python_requirements_only_project_is_skipped(tmp_path: Path) -> None:
     (tmp_path / "requirements.txt").write_text("pytest\n")
     runner = RecordingRunner()
 
-    outcome = PythonBuildAdapter(runner=runner).build(
+    outcome = PythonBuildAdapter(runner=runner, platform_name="linux").build(
         project(tmp_path, "python", "requirements.txt"), tmp_path / "out"
     )
 
@@ -202,7 +202,7 @@ def test_python_build_uses_detected_package_manager(tmp_path: Path, manager: str
     (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n")
     runner = RecordingRunner()
 
-    outcome = PythonBuildAdapter(runner=runner).build(
+    outcome = PythonBuildAdapter(runner=runner, platform_name="linux").build(
         project(tmp_path, "python", "pyproject.toml", manager), tmp_path / "out"
     )
 

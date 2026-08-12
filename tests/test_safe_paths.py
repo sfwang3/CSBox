@@ -191,7 +191,7 @@ def test_safe_rename_path_fallback_does_not_require_posix_directory_flags(
     source.write_text("safe", encoding="utf-8")
     destination = tmp_path / "destination.txt"
     monkeypatch.setattr(safe_paths, "_HAS_POSIX_DIRECTORY_FDS", False)
-    monkeypatch.delattr(safe_paths.os, "O_DIRECTORY")
+    monkeypatch.delattr(safe_paths.os, "O_DIRECTORY", raising=False)
 
     safe_rename(source, destination, replace_existing=False)
 
@@ -202,17 +202,18 @@ def test_safe_rename_windows_fallback_can_restore_an_existing_regular_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from pathlib import PosixPath
-
     import csbox.core.safe_paths as safe_paths
 
-    source = PosixPath(tmp_path) / "backup.txt"
+    source = tmp_path / "backup.txt"
     source.write_text("original", encoding="utf-8")
-    destination = PosixPath(tmp_path) / "published.txt"
+    destination = tmp_path / "published.txt"
     destination.write_text("partial", encoding="utf-8")
     monkeypatch.setattr(safe_paths, "_HAS_POSIX_DIRECTORY_FDS", False)
-    monkeypatch.setattr(safe_paths.os, "name", "nt")
-    monkeypatch.setattr(safe_paths, "Path", PosixPath)
+    if os.name != "nt":
+        from pathlib import PosixPath
+
+        monkeypatch.setattr(safe_paths.os, "name", "nt")
+        monkeypatch.setattr(safe_paths, "Path", PosixPath)
 
     def windows_rename(source_path: object, destination_path: object) -> None:
         del source_path, destination_path
@@ -254,13 +255,22 @@ def test_atomic_copy_path_fallback_does_not_replace_a_raced_destination(
     source = tmp_path / "source.zip"
     source.write_bytes(b"new archive")
     destination = tmp_path / "output.zip"
-    original_link = safe_paths.os.link
+    if os.name == "nt":
+        original_rename = safe_paths.os.rename
 
-    def race_destination(*args: object, **kwargs: object) -> None:
-        destination.write_bytes(b"raced archive")
-        original_link(*args, **kwargs)
+        def race_destination(source_path: object, destination_path: object) -> None:
+            destination.write_bytes(b"raced archive")
+            original_rename(source_path, destination_path)
 
-    monkeypatch.setattr(safe_paths.os, "link", race_destination)
+        monkeypatch.setattr(safe_paths.os, "rename", race_destination)
+    else:
+        original_link = safe_paths.os.link
+
+        def race_destination(*args: object, **kwargs: object) -> None:
+            destination.write_bytes(b"raced archive")
+            original_link(*args, **kwargs)
+
+        monkeypatch.setattr(safe_paths.os, "link", race_destination)
 
     with pytest.raises(FileExistsError):
         atomic_copy_file(source, destination, replace_existing=False)
@@ -271,16 +281,20 @@ def test_atomic_copy_path_fallback_does_not_replace_a_raced_destination(
 def test_atomic_copy_path_fallback_uses_windows_no_replace_rename(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from pathlib import PosixPath
-
     import csbox.core.safe_paths as safe_paths
 
     monkeypatch.setattr(safe_paths, "_HAS_POSIX_DIRECTORY_FDS", False)
-    monkeypatch.setattr(safe_paths.os, "name", "nt")
-    monkeypatch.setattr(safe_paths, "Path", PosixPath)
-    source = PosixPath(tmp_path) / "source.zip"
+    if os.name != "nt":
+        from pathlib import PosixPath
+
+        monkeypatch.setattr(safe_paths.os, "name", "nt")
+        monkeypatch.setattr(safe_paths, "Path", PosixPath)
+        path_type = PosixPath
+    else:
+        path_type = Path
+    source = path_type(tmp_path) / "source.zip"
     source.write_bytes(b"archive")
-    destination = PosixPath(tmp_path) / "output.zip"
+    destination = path_type(tmp_path) / "output.zip"
     rename_calls: list[tuple[object, object]] = []
     original_rename = safe_paths.os.rename
 

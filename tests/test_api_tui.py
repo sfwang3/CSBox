@@ -24,6 +24,7 @@ from csbox.api.repository import ApiRunRepository
 from csbox.api.scenario import ScenarioLoader
 from csbox.check.models import CheckReport
 from csbox.core.display_width import display_width
+from csbox.core.fonts import FontResolutionError
 from csbox.core.models import EnvironmentSnapshot
 from csbox.lab.fake_data import FakeHomeDataSource
 from csbox.lab.home_data import RealHomeDataSource
@@ -166,6 +167,11 @@ class _FailingExporter:
 
     def export(self, *_args: object, **_kwargs: object) -> None:
         raise OSError(self.message)
+
+
+class _MissingFontExporter:
+    def export(self, *_args: object, **_kwargs: object) -> None:
+        raise FontResolutionError("找不到支持中文的字体")
 
 
 @pytest.mark.asyncio
@@ -312,6 +318,23 @@ async def test_api_export_success_and_failure_are_safe_user_actions(tmp_path: Pa
         assert "发生了什么" in text
         assert "在哪里" in text
         assert "怎么处理" in text
+        assert SECRET not in text
+
+    missing_font = ApiApp(
+        repository,
+        ScenarioLoader(),
+        lambda: FakeRunner(loaded),
+        load_locale(),
+        exporter_factory=lambda: _MissingFontExporter(),
+    )
+    async with missing_font.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        missing_font.screen.select_run(0)
+        await pilot.press("e")
+        await pilot.pause()
+        text = _screen_text(missing_font.screen)
+        assert "导出失败" in text
+        assert "发生了什么" in text
         assert SECRET not in text
 
 
