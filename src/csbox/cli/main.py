@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Annotated
 
@@ -537,4 +538,21 @@ def _print_pack_plan(plan: object, root: Path) -> None:
 
 
 def main() -> None:
+    _configure_utf8_stdio()
     app()
+
+
+def _configure_utf8_stdio() -> None:
+    """Keep localized CLI output writable on Windows legacy code pages."""
+
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if not callable(reconfigure):
+            continue
+        encoding = (getattr(stream, "encoding", "") or "").lower().replace("-", "")
+        if encoding == "utf8":
+            continue
+        try:
+            reconfigure(encoding="utf-8")
+        except (OSError, ValueError):
+            continue
