@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from csbox.check.detectors import FileInventory
 from csbox.check.models import CheckContext, CheckStatus
-from csbox.check.rules import DEFAULT_RULES
+from csbox.check.rules import DEFAULT_RULES, PrivateKeyRule
 
 
 def test_rules_report_sensitive_locations_without_secret_content(tmp_path: Path) -> None:
@@ -45,3 +47,26 @@ def test_rules_return_pass_or_skip_when_project_is_clean(tmp_path: Path) -> None
 
     assert findings
     assert all(finding.status in {CheckStatus.PASS, CheckStatus.SKIP} for finding in findings)
+
+
+def test_private_key_rule_uses_inventory_cache_instead_of_opening_the_file_directly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    private_key = tmp_path / "private.pem"
+    private_key.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\nnot emitted\n", encoding="utf-8")
+    inventory = FileInventory.build(tmp_path)
+    context = CheckContext(root=tmp_path, inventory=inventory)
+
+    original_open = Path.open
+
+    def reject_direct_open(self: Path, *args, **kwargs):
+        if self == private_key:
+            raise AssertionError("private-key rule must use inventory")
+        return original_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", reject_direct_open)
+
+    findings = PrivateKeyRule().evaluate(context)
+
+    assert findings[0].status is CheckStatus.FAIL
+    assert inventory.text_scan_stats.read_count == 1

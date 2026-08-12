@@ -7,6 +7,8 @@ name = "csbox"
 version = "0.2.0"
 description = "计算机实验与项目交付工具"
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
   "Pillow>=10,<13",
@@ -38,6 +40,22 @@ default-groups = ["dev"]
 [tool.hatch.build.targets.wheel]
 packages = ["src/csbox"]
 
+[tool.hatch.build.targets.sdist]
+include = [
+  "CHANGELOG.md",
+  "LICENSE",
+  "README.md",
+  "docs/API_EVIDENCE.md",
+  "docs/ARCHITECTURE.md",
+  "docs/SECURITY.md",
+  "docs/SESSION_FORMAT.md",
+  "docs/TERMINAL_BACKENDS.md",
+  "docs/TUI_DESIGN.md",
+  "pyproject.toml",
+  "src/csbox/**",
+  "uv.lock",
+]
+
 [tool.ruff]
 target-version = "py311"
 line-length = 100
@@ -57,4 +75,5 @@ markers = [
   "pty: real pseudoterminal integration tests",
   "windows: Windows-specific integration tests",
   "integration: tests that exercise real platform processes or terminal resources",
+  "stress: bounded long-running session reliability tests",
 ]

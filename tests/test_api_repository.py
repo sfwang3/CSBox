@@ -10,6 +10,7 @@ from threading import Barrier
 import pytest
 from typer.testing import CliRunner
 
+import csbox.api.repository as repository_module
 from csbox.api.errors import ApiPersistenceError
 from csbox.api.models import (
     ApiAssertion,
@@ -411,6 +412,61 @@ def test_repository_reports_corrupt_result_as_unavailable_without_harming_neighb
     assert loaded_healthy.scenario.variables == {}
     assert loaded_healthy.scenario.steps[0].request.body is None
     assert corrupt_paths.result.read_text(encoding="utf-8") == "{"
+
+
+def test_repository_maps_pathologically_deep_json_to_a_safe_persistence_error(
+    tmp_path: Path,
+) -> None:
+    repository = _repository(tmp_path)
+    paths = repository.save(_run("20260811T080000-deepjsonsafe"))
+    paths.result.write_text("[" * 10_000 + "0" + "]" * 10_000, encoding="utf-8")
+
+    with pytest.raises(ApiPersistenceError, match="运行记录") as caught:
+        repository.load(paths.root.name)
+
+    assert "Recursion" not in str(caught.value)
+
+
+def test_repository_maps_json_recursion_to_a_safe_persistence_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = _repository(tmp_path)
+    paths = repository.save(_run("20260811T080000-recursionsafe"))
+    real_loads = repository_module.json.loads
+
+    def recurse_on_result(value: str, **kwargs: object) -> object:
+        if '"results"' in value:
+            raise RecursionError("too deep")
+        return real_loads(value, **kwargs)
+
+    monkeypatch.setattr(repository_module.json, "loads", recurse_on_result)
+
+    with pytest.raises(ApiPersistenceError, match="运行记录") as caught:
+        repository.load(paths.root.name)
+
+    assert "Recursion" not in str(caught.value)
+
+
+def test_repository_reads_documents_through_the_bounded_regular_file_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = _repository(tmp_path)
+    paths = repository.save(_run("20260811T080000-boundedreader"))
+    observed: list[tuple[Path, int]] = []
+    from csbox.core.safe_paths import read_regular_text as real_read_regular_text
+
+    def observed_read(path: Path, *, max_bytes: int, encoding: str = "utf-8") -> str:
+        observed.append((Path(path), max_bytes))
+        return real_read_regular_text(path, max_bytes=max_bytes, encoding=encoding)
+
+    monkeypatch.setattr(repository_module, "read_regular_text", observed_read, raising=False)
+
+    repository.load(paths.root.name)
+
+    assert {path.name for path, _limit in observed} == {"metadata.json", "result.json"}
+    assert all(limit > 0 for _path, limit in observed)
 
 
 @pytest.mark.parametrize(

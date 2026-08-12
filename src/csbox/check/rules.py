@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Protocol
 
 from csbox.check.detectors import PRUNED_DIRECTORIES
 from csbox.check.models import CheckContext, CheckFinding, CheckStatus
+from csbox.core.subprocess_env import minimal_subprocess_environment
+
+_MAX_GIT_STATUS_BYTES = 4 * 1024 * 1024
 
 
 class CheckRule(Protocol):
@@ -94,21 +99,10 @@ class PrivateKeyRule:
 
     def evaluate(self, context: CheckContext) -> tuple[CheckFinding, ...]:
         findings: list[CheckFinding] = []
+        markers = tuple(marker.decode("ascii") for marker in PRIVATE_KEY_MARKERS)
         for entry in context.inventory.files:
-            name = entry.relative.name.casefold()
-            likely_name = name.endswith((".pem", ".key", ".ppk")) or name in {
-                "id_rsa",
-                "id_ed25519",
-                "id_ecdsa",
-            }
-            try:
-                with entry.absolute.open("rb") as stream:
-                    header = stream.read(512)
-            except OSError:
-                header = b""
-            if (likely_name or header.startswith(b"-----BEGIN")) and any(
-                marker in header for marker in PRIVATE_KEY_MARKERS
-            ):
+            has_marker = context.inventory.contains_markers(entry, markers)
+            if has_marker:
                 findings.append(
                     _finding(
                         self.rule_id,
@@ -193,10 +187,64 @@ class LargeFileRule:
 
 WINDOWS_ABSOLUTE_PATH = re.compile(r"(?<![A-Za-z0-9_])[A-Za-z]:\\")
 UNIX_ABSOLUTE_PATH = re.compile(r"(?<![A-Za-z0-9_])/(?:home|Users|tmp|mnt|workspace|opt|var)/")
+_WINDOWS_ABSOLUTE_PATH_BYTES = re.compile(rb"(?<![A-Za-z0-9_])[A-Za-z]:\\")
+_UNIX_ABSOLUTE_PATH_BYTES = re.compile(
+    rb"(?<![A-Za-z0-9_])/(?:home|Users|tmp|mnt|workspace|opt|var)/"
+)
 SECRET_ASSIGNMENT = re.compile(
     r"(?i)\b(?:api[_-]?key|access[_-]?key|token|secret|password|passwd)\b"
-    r"\s*[:=]\s*(['\"])(?P<value>[^'\"]{8,})\1"
+    r"[^\S\r\n]*[:=][^\S\r\n]*['\"][^'\"\r\n]{8}"
 )
+_SECRET_ASSIGNMENT_BYTES = re.compile(
+    rb"(?i)\b(?:api[_-]?key|access[_-]?key|token|secret|password|passwd)\b"
+    rb"[^\S\r\n]*[:=][^\S\r\n]*['\"][^'\"\r\n]{8}"
+)
+_STREAM_SCAN_CHUNK_BYTES = 1024 * 1024
+_STREAM_SCAN_OVERLAP_BYTES = 512
+_HORIZONTAL_WHITESPACE_BYTES = frozenset(b" \t\v\f")
+
+
+def _stream_pattern_lines(
+    context: CheckContext,
+    entry,
+    patterns: tuple[re.Pattern[bytes], ...],
+    *,
+    collapse_horizontal_whitespace: bool = False,
+) -> tuple[tuple[int, int], ...]:
+    """Return pattern indexes and line numbers using bounded-memory reads."""
+    matches: set[tuple[int, int]] = set()
+    overlap = b""
+    newlines_before_overlap = 0
+    in_horizontal_whitespace = False
+    try:
+        with context.inventory.open_entry(entry) as stream:
+            while chunk := stream.read(_STREAM_SCAN_CHUNK_BYTES):
+                if collapse_horizontal_whitespace:
+                    normalized = bytearray()
+                    for value in chunk:
+                        if value in _HORIZONTAL_WHITESPACE_BYTES:
+                            if not in_horizontal_whitespace:
+                                normalized.append(ord(" "))
+                            in_horizontal_whitespace = True
+                        else:
+                            normalized.append(value)
+                            in_horizontal_whitespace = False
+                    chunk = bytes(normalized)
+                data = overlap + chunk
+                for pattern_index, pattern in enumerate(patterns):
+                    line = 1 + newlines_before_overlap
+                    cursor = 0
+                    for match in pattern.finditer(data):
+                        line += data[cursor : match.start()].count(b"\n")
+                        cursor = match.start()
+                        matches.add((pattern_index, line))
+                retained = min(len(data), _STREAM_SCAN_OVERLAP_BYTES)
+                discarded = data[:-retained] if retained else data
+                newlines_before_overlap += discarded.count(b"\n")
+                overlap = data[-retained:] if retained else b""
+    except (OSError, ValueError):
+        return ()
+    return tuple(sorted(matches, key=lambda item: (item[1], item[0])))
 
 
 class AbsolutePathRule:
@@ -204,9 +252,27 @@ class AbsolutePathRule:
 
     def evaluate(self, context: CheckContext) -> tuple[CheckFinding, ...]:
         findings: list[CheckFinding] = []
-        for entry, content in context.inventory.text_files():
-            for line_number, line in enumerate(content.splitlines(), start=1):
-                if WINDOWS_ABSOLUTE_PATH.search(line):
+        for entry in context.inventory.files:
+            content = context.inventory.text(entry)
+            if content is not None:
+                matches = []
+                for line_number, line in enumerate(content.splitlines(), start=1):
+                    if WINDOWS_ABSOLUTE_PATH.search(line):
+                        matches.append((0, line_number))
+                    if UNIX_ABSOLUTE_PATH.search(line):
+                        matches.append((1, line_number))
+            elif entry.size > context.inventory.scan_limit_bytes:
+                matches = list(
+                    _stream_pattern_lines(
+                        context,
+                        entry,
+                        (_WINDOWS_ABSOLUTE_PATH_BYTES, _UNIX_ABSOLUTE_PATH_BYTES),
+                    )
+                )
+            else:
+                matches = []
+            for pattern_index, line_number in matches:
+                if pattern_index == 0:
                     findings.append(
                         _finding(
                             self.rule_id,
@@ -217,7 +283,7 @@ class AbsolutePathRule:
                             category="windows-absolute-path",
                         )
                     )
-                if UNIX_ABSOLUTE_PATH.search(line):
+                else:
                     findings.append(
                         _finding(
                             self.rule_id,
@@ -240,19 +306,35 @@ class HardCodedSecretRule:
 
     def evaluate(self, context: CheckContext) -> tuple[CheckFinding, ...]:
         findings: list[CheckFinding] = []
-        for entry, content in context.inventory.text_files():
-            for line_number, line in enumerate(content.splitlines(), start=1):
-                if SECRET_ASSIGNMENT.search(line):
-                    findings.append(
-                        _finding(
-                            self.rule_id,
-                            CheckStatus.FAIL,
-                            "发现疑似硬编码 secret；仅报告位置，不输出匹配内容。",
-                            path=entry.relative,
-                            line=line_number,
-                            category="hard-coded-secret",
-                        )
+        for entry in context.inventory.files:
+            content = context.inventory.text(entry)
+            if content is not None:
+                lines = (
+                    line_number
+                    for line_number, line in enumerate(content.splitlines(), start=1)
+                    if SECRET_ASSIGNMENT.search(line)
+                )
+            else:
+                lines = (
+                    line_number
+                    for _, line_number in _stream_pattern_lines(
+                        context,
+                        entry,
+                        (_SECRET_ASSIGNMENT_BYTES,),
+                        collapse_horizontal_whitespace=True,
                     )
+                )
+            for line_number in lines:
+                findings.append(
+                    _finding(
+                        self.rule_id,
+                        CheckStatus.FAIL,
+                        "发现疑似硬编码 secret；仅报告位置，不输出匹配内容。",
+                        path=entry.relative,
+                        line=line_number,
+                        category="hard-coded-secret",
+                    )
+                )
         return tuple(findings) or (
             _finding(
                 self.rule_id,
@@ -268,20 +350,27 @@ class GitStatusRule:
 
     def evaluate(self, context: CheckContext) -> tuple[CheckFinding, ...]:
         try:
-            result = subprocess.run(
-                [
-                    "git",
-                    "-C",
-                    str(context.root),
-                    "status",
-                    "--porcelain=v1",
-                    "--untracked-files=all",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=2.0,
-                check=False,
-            )
+            with tempfile.TemporaryFile() as status_output:
+                result = subprocess.run(
+                    [
+                        "git",
+                        "-c",
+                        "core.fsmonitor=false",
+                        "-C",
+                        str(context.root),
+                        "status",
+                        "--porcelain=v1",
+                        "--untracked-files=all",
+                    ],
+                    stdout=status_output,
+                    stderr=subprocess.DEVNULL,
+                    env=minimal_subprocess_environment(),
+                    timeout=2.0,
+                    check=False,
+                    shell=False,
+                )
+                status_output.seek(0)
+                raw_status = status_output.read(_MAX_GIT_STATUS_BYTES + 1)
         except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
             return (
                 _finding(self.rule_id, CheckStatus.SKIP, "无法读取 Git 状态。", category="git"),
@@ -290,7 +379,16 @@ class GitStatusRule:
             return (
                 _finding(self.rule_id, CheckStatus.SKIP, "当前目录不是 Git 仓库。", category="git"),
             )
-        lines = [line for line in result.stdout.splitlines() if line]
+        if len(raw_status) > _MAX_GIT_STATUS_BYTES:
+            return (
+                _finding(
+                    self.rule_id,
+                    CheckStatus.WARN,
+                    "Git 状态输出过大，无法可靠判断工作区状态。",
+                    category="git",
+                ),
+            )
+        lines = [line for line in raw_status.decode("utf-8", errors="replace").splitlines() if line]
         findings: list[CheckFinding] = []
         if any(not line.startswith("??") for line in lines):
             findings.append(
@@ -310,6 +408,77 @@ class GitStatusRule:
         return tuple(findings) or (
             _finding(self.rule_id, CheckStatus.PASS, "Git 工作区干净。", category="git"),
         )
+
+
+def run_deep_secret_scan(root: Path) -> CheckFinding:
+    """Run gitleaks without retaining or displaying its output."""
+    tool = shutil.which("gitleaks")
+    if not tool:
+        return _finding(
+            "deep-secret-scan",
+            CheckStatus.SKIP,
+            "未找到 gitleaks，未执行深度 secret 扫描；请先安装 gitleaks。",
+            category="deep-secret-scan",
+        )
+
+    resolved_root = Path(root).resolve()
+    command = [
+        tool,
+        "detect",
+        "--source",
+        str(resolved_root),
+        "--no-banner",
+        "--redact",
+        "--exit-code",
+        "1",
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            cwd=resolved_root,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=minimal_subprocess_environment(),
+            timeout=60.0,
+            check=False,
+            shell=False,
+        )
+    except FileNotFoundError:
+        return _finding(
+            "deep-secret-scan",
+            CheckStatus.SKIP,
+            "未找到 gitleaks，未执行深度 secret 扫描；请先安装 gitleaks。",
+            category="deep-secret-scan",
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return _finding(
+            "deep-secret-scan",
+            CheckStatus.WARN,
+            "gitleaks 深度扫描未完成，工具无法可靠执行。",
+            category="deep-secret-scan",
+        )
+
+    if result.returncode == 0:
+        return _finding(
+            "deep-secret-scan",
+            CheckStatus.PASS,
+            "gitleaks 深度扫描未发现 secret。",
+            category="deep-secret-scan",
+        )
+    if result.returncode == 1:
+        return _finding(
+            "deep-secret-scan",
+            CheckStatus.FAIL,
+            "gitleaks 深度扫描发现疑似 secret；请根据工具报告清理后重试。",
+            category="deep-secret-scan",
+        )
+    return _finding(
+        "deep-secret-scan",
+        CheckStatus.WARN,
+        "gitleaks 深度扫描未完成，工具返回错误。",
+        category="deep-secret-scan",
+    )
 
 
 DEFAULT_RULES: tuple[CheckRule, ...] = (
@@ -334,4 +503,5 @@ __all__ = [
     "LargeFileRule",
     "PrivateKeyRule",
     "ReadmeRule",
+    "run_deep_secret_scan",
 ]

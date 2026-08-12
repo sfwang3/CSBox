@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from rich.console import Console
 
+import csbox.tui.screens.review as review_module
 from csbox.core.display_width import display_width
 from csbox.lab.models import SessionPaths
 from csbox.lab.screen import TerminalCell, TerminalCursor, TerminalSnapshot
@@ -85,6 +86,31 @@ def test_review_controller_supports_play_seek_backward_and_capture_edit_delete(
     assert controller.jump_to_capture(0) == pytest.approx(3.0)
     assert controller.delete_capture(capture.capture_id) is True
     assert len(controller.captures) == 1
+
+
+def test_review_controller_uses_the_lab_metadata_repository_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = make_session(tmp_path)
+    from csbox.lab.repository import load_session_metadata as real_load_session_metadata
+
+    loaded: list[SessionPaths] = []
+
+    def observed_load(session: SessionPaths):
+        loaded.append(session)
+        return real_load_session_metadata(session)
+
+    monkeypatch.setattr(
+        review_module,
+        "load_session_metadata",
+        observed_load,
+        raising=False,
+    )
+
+    ReviewController.from_session(paths)
+
+    assert loaded == [paths]
 
 
 def test_progress_uses_terminal_cells_and_clamps_values() -> None:

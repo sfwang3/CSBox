@@ -192,17 +192,26 @@ def test_version_probe_uses_argument_arrays_and_a_short_timeout(
     profile: object,
     expected_arguments: list[str],
 ) -> None:
-    calls: list[tuple[list[str], float]] = []
+    calls: list[tuple[list[str], dict[str, object]]] = []
+    secret = "CSBOX_SECRET_SENTINEL_task17_shell_version_env"
+    monkeypatch.setenv("CSBOX_VAR_SHELL_SECRET", secret)
 
-    def fake_run(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        calls.append((arguments, kwargs["timeout"]))  # type: ignore[arg-type]
-        return subprocess.CompletedProcess(arguments, 0, stdout="7.4.6\n", stderr="")
+    def fake_run(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        calls.append((arguments, kwargs))
+        output = kwargs["stdout"]
+        assert hasattr(output, "write")
+        output.write(b"7.4.6\n")  # type: ignore[union-attr]
+        return subprocess.CompletedProcess(arguments, 0)
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     assert detect_shell_version(profile) == "7.4.6"  # type: ignore[arg-type]
     assert calls[0][0][: len(expected_arguments)] == expected_arguments
-    assert calls[0][1] <= 2.0
+    assert calls[0][1]["timeout"] <= 2.0  # type: ignore[operator]
+    child_env = calls[0][1]["env"]
+    assert isinstance(child_env, dict)
+    assert "CSBOX_VAR_SHELL_SECRET" not in child_env
+    assert secret not in child_env.values()
 
 
 def test_version_probe_failure_is_non_fatal(monkeypatch: pytest.MonkeyPatch) -> None:

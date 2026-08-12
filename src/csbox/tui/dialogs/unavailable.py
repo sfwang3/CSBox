@@ -18,18 +18,24 @@ class UnavailableDialog(ModalScreen[None]):
         locale: Translator,
         message_key: str = "home.entry.unavailable.body",
         close_key: str = "home.entry.close",
+        message: str | None = None,
     ) -> None:
         super().__init__()
         self.title = title
         self.locale = locale
         self.message_key = message_key
         self.close_key = close_key
+        self.message = message
 
     def compose(self) -> ComposeResult:
         yield Container(
             Vertical(
                 Static(self.title, id="dialog-title", markup=False),
-                Static(self.locale(self.message_key), id="dialog-message", markup=False),
+                Static(
+                    self.message if self.message is not None else self.locale(self.message_key),
+                    id="dialog-message",
+                    markup=False,
+                ),
                 Button(
                     self.locale(self.close_key),
                     id="dialog-close",

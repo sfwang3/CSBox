@@ -30,3 +30,7 @@ checkpoint 不是原始 cast 的一部分。它保存 version、cast fingerprint
 导出目录包含按 Capture 时间顺序命名的 PNG、`evidence.md` 和复制的 `session.cast`；当 Capture 中存在可信 command 时还会有 `commands.txt`。Markdown 使用相对路径，标题经过安全文件名处理，Windows 非法字符、斜杠、反斜杠和 path traversal 都不会直接进入文件名。默认不覆盖已有输出；`--force` 才允许覆盖。PNG 尺寸来自 snapshot 的 rows/columns 与字体 cell advance，不使用跨平台整图 golden 作为契约。
 
 session 与 evidence 是项目本地运行产物，默认在 `.gitignore` 中排除；不要将包含真实凭据的文件或私钥放进 session、evidence 或 pack 输入。
+
+## 安装与版本
+
+`metadata.json` 和 Pack manifest 中的 CSBox version 来自运行时 distribution metadata。通过源码环境、wheel 或 `uv tool install` 启动时，`csbox --version`、session metadata、manifest 和 wheel metadata 保持一致；安装态不依赖仓库中的 `tests/` 或文档资源。

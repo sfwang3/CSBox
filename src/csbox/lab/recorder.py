@@ -3,15 +3,17 @@ from __future__ import annotations
 import codecs
 import json
 import math
+import os
 import queue
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
 from csbox.core.events import TerminalEvent, TerminalEventType, TerminalSize
+from csbox.core.safe_paths import open_private_text_append, open_regular_binary
 
 
 class RecorderError(RuntimeError):
@@ -40,6 +42,10 @@ class CastReadResult:
 
 _STOP: Final = object()
 _CAST_CODES: Final = frozenset({"o", "i", "r", "m", "x"})
+MAX_CAST_LINE_BYTES: Final = 1024 * 1024
+# Bound the screen allocation as a whole so normal wide terminal geometries are
+# not rejected solely because one axis exceeds an arbitrary threshold.
+MAX_CAST_SCREEN_CELLS: Final = 1_000_000
 
 
 class AsciicastV3Recorder:
@@ -164,9 +170,8 @@ class AsciicastV3Recorder:
 
     def _writer_main(self) -> None:
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            is_empty = not self.path.exists() or self.path.stat().st_size == 0
-            with self.path.open("a", encoding="utf-8", newline="\n") as stream:
+            with open_private_text_append(self.path) as stream:
+                is_empty = os.fstat(stream.fileno()).st_size == 0
                 if is_empty:
                     self._write_json_line(stream, self._header)
                 self._ready.set()
@@ -242,8 +247,29 @@ class AsciicastV3Reader:
     def __init__(self, path: Path | str) -> None:
         self.path = Path(path)
 
+    def read_header(self) -> dict[str, Any]:
+        """Validate and return only the header without scanning event data."""
+
+        with open_regular_binary(self.path) as stream:
+            for line_number, raw_line, _line_size, _complete_line in _iter_bounded_lines(stream):
+                if raw_line is None:
+                    raise RecorderError(f"invalid asciicast v3 header on line {line_number}")
+                stripped = raw_line.strip()
+                if not stripped or stripped.startswith(b"#"):
+                    continue
+                try:
+                    value = json.loads(stripped)
+                except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+                    raise RecorderError(
+                        f"invalid asciicast v3 header on line {line_number}"
+                    ) from exc
+                if not _is_valid_v3_header(value):
+                    raise RecorderError(f"invalid asciicast v3 header on line {line_number}")
+                assert isinstance(value, dict)
+                return value
+        raise RecorderError("asciicast v3 header is missing")
+
     def read(self) -> CastReadResult:
-        raw_lines = self.path.read_bytes().splitlines(keepends=True)
         warnings: list[str] = []
         header: dict[str, Any] | None = None
         events: list[CastEvent] = []
@@ -251,50 +277,62 @@ class AsciicastV3Reader:
         cast_offset = 0
         data_offset = 0
 
-        for line_number, raw_line in enumerate(raw_lines, start=1):
-            cast_offset += len(raw_line)
-            complete_line = raw_line.endswith((b"\n", b"\r"))
-            stripped = raw_line.strip()
-            if not stripped or stripped.startswith(b"#"):
-                continue
-            try:
-                value = json.loads(stripped)
-            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        with open_regular_binary(self.path) as stream:
+            for line_number, raw_line, line_size, complete_line in _iter_bounded_lines(stream):
+                cast_offset += line_size
+                if raw_line is None:
+                    if header is None:
+                        raise RecorderError(f"invalid asciicast v3 header on line {line_number}")
+                    warnings.append(f"oversized cast line {line_number} ignored")
+                    continue
+
+                stripped = raw_line.strip()
+                if not stripped or stripped.startswith(b"#"):
+                    continue
+                try:
+                    value = json.loads(stripped)
+                except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+                    if header is None:
+                        raise RecorderError(
+                            f"invalid asciicast v3 header on line {line_number}"
+                        ) from exc
+                    if not complete_line:
+                        warnings.append(f"truncated cast line {line_number} ignored")
+                    else:
+                        warnings.append(f"corrupt cast line {line_number} ignored")
+                    continue
+
                 if header is None:
-                    raise RecorderError(
-                        f"invalid asciicast v3 header on line {line_number}"
-                    ) from exc
-                if line_number == len(raw_lines) and not complete_line:
-                    warnings.append(f"truncated cast line {line_number} ignored")
-                else:
-                    warnings.append(f"corrupt cast line {line_number} ignored")
-                continue
+                    if not _is_valid_v3_header(value):
+                        raise RecorderError(f"invalid asciicast v3 header on line {line_number}")
+                    assert isinstance(value, dict)
+                    header = value
+                    data_offset = cast_offset
+                    continue
 
-            if header is None:
-                if not _is_valid_v3_header(value):
-                    raise RecorderError(f"invalid asciicast v3 header on line {line_number}")
-                assert isinstance(value, dict)
-                header = value
-                data_offset = cast_offset
-                continue
-
-            parsed = _parse_cast_event(value)
-            if parsed is None:
-                warnings.append(f"invalid cast event on line {line_number} ignored")
-                continue
-            if parsed.code not in _CAST_CODES:
-                warnings.append(f"unknown event code {parsed.code!r} on line {line_number} ignored")
-                pending_unknown_interval += parsed.interval
-                continue
-            events.append(
-                CastEvent(
-                    interval=parsed.interval + pending_unknown_interval,
-                    code=parsed.code,
-                    data=parsed.data,
-                    cast_offset=cast_offset,
+                parsed = _parse_cast_event(value)
+                if parsed is None:
+                    warnings.append(f"invalid cast event on line {line_number} ignored")
+                    continue
+                if parsed.code == "r" and _parse_resize_data(parsed.data) is None:
+                    warnings.append(f"invalid resize on line {line_number} ignored")
+                    pending_unknown_interval += parsed.interval
+                    continue
+                if parsed.code not in _CAST_CODES:
+                    warnings.append(
+                        f"unknown event code {parsed.code!r} on line {line_number} ignored"
+                    )
+                    pending_unknown_interval += parsed.interval
+                    continue
+                events.append(
+                    CastEvent(
+                        interval=parsed.interval + pending_unknown_interval,
+                        code=parsed.code,
+                        data=parsed.data,
+                        cast_offset=cast_offset,
+                    )
                 )
-            )
-            pending_unknown_interval = 0.0
+                pending_unknown_interval = 0.0
 
         if header is None:
             raise RecorderError("asciicast v3 header is missing")
@@ -307,20 +345,79 @@ class AsciicastV3Reader:
         )
 
 
+def _iter_bounded_lines(stream: Any) -> Iterator[tuple[int, bytes | None, int, bool]]:
+    """Yield complete cast lines without retaining an unbounded input line."""
+
+    line_number = 0
+    line = bytearray()
+    line_size = 0
+    oversized = False
+    pending_cr = False
+
+    def append_byte(value: int) -> None:
+        nonlocal line_size, oversized
+        line_size += 1
+        if oversized:
+            return
+        if len(line) < MAX_CAST_LINE_BYTES:
+            line.append(value)
+        else:
+            oversized = True
+            line.clear()
+
+    def emit(complete_line: bool) -> tuple[int, bytes | None, int, bool]:
+        nonlocal line_number
+        line_number += 1
+        return line_number, None if oversized else bytes(line), line_size, complete_line
+
+    def reset() -> None:
+        nonlocal line_size, oversized, pending_cr
+        line.clear()
+        line_size = 0
+        oversized = False
+        pending_cr = False
+
+    while chunk := stream.read(64 * 1024):
+        for value in chunk:
+            if pending_cr:
+                if value == 0x0A:
+                    append_byte(value)
+                    yield emit(True)
+                    reset()
+                    continue
+                yield emit(True)
+                reset()
+            append_byte(value)
+            if value == 0x0D:
+                pending_cr = True
+            elif value == 0x0A:
+                yield emit(True)
+                reset()
+
+    if line_size:
+        yield emit(pending_cr)
+
+
 def _parse_cast_event(value: object) -> CastEvent | None:
     if not isinstance(value, list) or len(value) != 3:
         return None
     interval, code, data = value
-    if (
-        isinstance(interval, bool)
-        or not isinstance(interval, int | float)
-        or not math.isfinite(interval)
-        or interval < 0
-    ):
+    if isinstance(interval, bool) or not isinstance(interval, int | float):
         return None
+    if isinstance(interval, int):
+        if interval < 0:
+            return None
+        try:
+            normalized_interval = float(interval)
+        except OverflowError:
+            return None
+    else:
+        if not math.isfinite(interval) or interval < 0:
+            return None
+        normalized_interval = interval
     if not isinstance(code, str) or not isinstance(data, str):
         return None
-    return CastEvent(interval=float(interval), code=code, data=data)
+    return CastEvent(interval=normalized_interval, code=code, data=data)
 
 
 def _is_valid_v3_header(value: object) -> bool:
@@ -335,4 +432,28 @@ def _is_valid_v3_header(value: object) -> bool:
         size = term.get(dimension)
         if type(size) is not int or size <= 0:
             return False
+    if not _valid_dimensions(term["cols"], term["rows"]):
+        return False
     return "type" not in term or isinstance(term["type"], str)
+
+
+def _parse_resize_data(data: str) -> tuple[int, int] | None:
+    dimensions = data.lower().split("x", maxsplit=1)
+    if len(dimensions) != 2:
+        return None
+    try:
+        columns = int(dimensions[0])
+        rows = int(dimensions[1])
+    except ValueError:
+        return None
+    if not _valid_dimensions(columns, rows):
+        return None
+    return columns, rows
+
+
+def _valid_dimensions(columns: object, rows: object) -> bool:
+    if type(columns) is not int or type(rows) is not int:
+        return False
+    if columns <= 0 or rows <= 0:
+        return False
+    return columns <= MAX_CAST_SCREEN_CELLS // rows

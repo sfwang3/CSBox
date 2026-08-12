@@ -11,10 +11,12 @@ from textual.events import Resize
 from textual.screen import Screen
 from textual.widgets import Static
 
+from csbox.api.redaction import Redactor
 from csbox.core.display_width import display_width, truncate_cells
 from csbox.lab.captures import CaptureStore
-from csbox.lab.models import CaptureRecord, SessionMetadata, SessionPaths
+from csbox.lab.models import CaptureRecord, SessionPaths
 from csbox.lab.replay import ReplayService
+from csbox.lab.repository import SessionRepositoryError, load_session_metadata
 from csbox.lab.screen import TerminalCell, TerminalSnapshot
 from csbox.locales import Translator
 from csbox.tui.dialogs.capture_title import CaptureTitleDialog
@@ -26,6 +28,8 @@ from csbox.tui.widgets.review import (
     ReviewTerminal,
     ReviewTimeline,
 )
+
+_REVIEW_REDACTOR = Redactor.with_configured_values(())
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,10 +65,8 @@ class ReviewController:
     def from_session(cls, session: SessionPaths) -> ReviewController:
         cwd = session.root
         if session.metadata.is_file():
-            with suppress(OSError, UnicodeError, ValueError):
-                cwd = SessionMetadata.model_validate_json(
-                    session.metadata.read_text(encoding="utf-8")
-                ).cwd
+            with suppress(SessionRepositoryError):
+                cwd = load_session_metadata(session).cwd
         return cls(
             session,
             ReplayService(session.cast),
@@ -261,7 +263,8 @@ class ReviewScreen(Screen[None]):
         view = self.controller.view()
         self.query_one("#review-terminal", ReviewTerminal).update(snapshot_to_text(view.snapshot))
         self.query_one("#review-timeline", ReviewTimeline).update(self._timeline(view))
-        self.query_one("#review-captures", ReviewCaptureList).update(self._captures(view))
+        captures = self.query_one("#review-captures", ReviewCaptureList)
+        captures.update(self._captures(view, self._content_width(captures)))
         self.query_one("#review-footer", ReviewFooter).update(self._footer(view))
         narrow = self.query_one("#review-narrow", Static)
         if self.active_pane == "terminal":
@@ -269,7 +272,7 @@ class ReviewScreen(Screen[None]):
         elif self.active_pane == "timeline":
             narrow.update(self._timeline(view))
         else:
-            narrow.update(self._captures(view))
+            narrow.update(self._captures(view, self._content_width(narrow)))
 
     def _title(self) -> str:
         available_width = self.size.width - 16 if self.size.width else 64
@@ -284,26 +287,28 @@ class ReviewScreen(Screen[None]):
             f"{view.current_time:05.1f}s / {view.duration:05.1f}s  {state}"
         )
 
-    def _captures(self, view: ReviewView) -> str:
+    def _captures(self, view: ReviewView, width: int) -> str:
         lines = ["CAPTURES"]
         if not view.captures:
             lines.append("暂无 Capture；按 C 创建。")
         for index, capture in enumerate(view.captures):
             marker = ">" if index == view.selected_capture else " "
-            title = truncate_cells(
-                capture.title or f"实验记录 {index + 1}",
-                max(8, self.size.width - (50 if self.is_wide else 8)),
-                ellipsis="…",
-            )
-            lines.append(f"{marker} {index + 1:02d}  {title}  {capture.timestamp:.1f}s")
+            title = _safe_capture_title(capture.title) or f"实验记录 {index + 1}"
+            line = f"{marker} {index + 1:02d}  {title}  {capture.timestamp:.1f}s"
+            lines.append(truncate_cells(line, width, ellipsis="…"))
         return "\n".join(lines)
+
+    def _content_width(self, widget: Static) -> int:
+        return max(2, widget.content_region.width or self.size.width - 6)
 
     def _footer(self, view: ReviewView) -> str:
         footer = (
             f"{format_progress(view.current_time, view.duration, width=24)}  "
             "Space 播放/暂停  ←→ seek  ↑↓ Capture  C 创建  E 标题  Delete 删除  Tab 切换  Q 返回"
         )
-        return truncate_cells(footer, max(1, self.size.width - 2), ellipsis="…")
+        footer_widget = self.query_one("#review-footer", ReviewFooter)
+        width = footer_widget.content_region.width or max(1, self.size.width - 6)
+        return truncate_cells(footer, width, ellipsis="…")
 
     def action_cycle_pane(self) -> None:
         panes = ("terminal", "timeline", "captures")
@@ -358,29 +363,48 @@ class ReviewScreen(Screen[None]):
         captures = self.controller.captures
         if captures:
             capture = captures[self.controller.selected_capture]
+            displayed_title = _safe_capture_title(capture.title)
             self.app.push_screen(
                 CaptureTitleDialog(
                     locale=self.locale,
-                    title=capture.title,
+                    title=displayed_title,
                     heading="编辑 Capture 标题",
                 ),
-                lambda title: self._edit_capture_from_dialog(capture.capture_id, title),
+                lambda title: self._edit_capture_from_dialog(
+                    capture.capture_id,
+                    title,
+                    original_title=capture.title,
+                    displayed_title=displayed_title,
+                ),
             )
 
-    def _edit_capture_from_dialog(self, capture_id: str, title: str | None) -> None:
+    def _edit_capture_from_dialog(
+        self,
+        capture_id: str,
+        title: str | None,
+        *,
+        original_title: str | None = None,
+        displayed_title: str | None = None,
+    ) -> None:
         if title is not None:
-            self.controller.edit_capture_title(capture_id, title)
+            edited_title = (
+                original_title
+                if displayed_title is not None and title == displayed_title
+                else title
+            )
+            self.controller.edit_capture_title(capture_id, edited_title)
             self._refresh()
 
     def action_delete_capture(self) -> None:
         captures = self.controller.captures
         if captures:
             capture = captures[self.controller.selected_capture]
+            displayed_title = _safe_capture_title(capture.title or "实验记录")
             self.app.push_screen(
                 ConfirmDialog(
                     locale=self.locale,
                     title="删除 Capture",
-                    message=f"确定删除“{capture.title or '实验记录'}”吗？此操作不可撤销。",
+                    message=f"确定删除“{displayed_title}”吗？此操作不可撤销。",
                 ),
                 lambda confirmed: self._delete_capture_from_dialog(capture.capture_id, confirmed),
             )
@@ -395,3 +419,7 @@ class ReviewScreen(Screen[None]):
             self.app.exit()
         else:
             self.app.pop_screen()
+
+
+def _safe_capture_title(title: str) -> str:
+    return _REVIEW_REDACTOR.text(title)

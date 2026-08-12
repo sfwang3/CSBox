@@ -17,6 +17,10 @@ def test_filter_excludes_artifacts_but_keeps_source_named_build_and_target(
     (tmp_path / "node_modules" / "pkg" / "index.js").write_text("ignored")
     (tmp_path / "cache" / "nested").mkdir(parents=True)
     (tmp_path / "cache" / "nested" / "x.txt").write_text("ignored")
+    (tmp_path / ".cache" / "nested").mkdir(parents=True)
+    (tmp_path / ".cache" / "nested" / "x.txt").write_text("ignored")
+    (tmp_path / ".vscode").mkdir()
+    (tmp_path / ".vscode" / "settings.json").write_text("ignored")
     (tmp_path / ".env.example").write_text("TOKEN=change-me")
 
     candidates = PackFilter(tmp_path).candidates()
@@ -27,6 +31,8 @@ def test_filter_excludes_artifacts_but_keeps_source_named_build_and_target(
     assert ".env.example" in names
     assert "node_modules/pkg/index.js" not in names
     assert "cache/nested/x.txt" not in names
+    assert ".cache/nested/x.txt" not in names
+    assert ".vscode/settings.json" not in names
 
 
 @pytest.mark.parametrize(
@@ -55,6 +61,15 @@ def test_filter_keeps_env_example_but_excludes_runtime_state(tmp_path: Path) -> 
 
     assert ".env.example" in names
     assert all(not name.startswith(".csbox/") for name in names)
+
+
+def test_filter_excludes_old_archives_before_sensitive_content_scan(tmp_path: Path) -> None:
+    (tmp_path / "old.zip").write_bytes(b"-----BEGIN PRIVATE KEY-----\narchive\n")
+
+    selection = PackFilter(tmp_path).select()
+
+    assert "old.zip:archive" in selection.excluded
+    assert selection.rejected == ()
 
 
 def test_filter_rejects_path_traversal_patterns_and_skips_symlink_escape(tmp_path: Path) -> None:

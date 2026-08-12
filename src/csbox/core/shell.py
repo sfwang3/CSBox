@@ -4,12 +4,16 @@ import os
 import platform
 import shutil
 import subprocess
+import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import PurePath
 
 from csbox.core.registry import Registry
+from csbox.core.subprocess_env import minimal_subprocess_environment
+
+_MAX_SHELL_VERSION_BYTES = 4096
 
 
 class ShellKind(StrEnum):
@@ -217,14 +221,21 @@ def detect_shell_version(profile: ShellProfile) -> str | None:
     if not profile.version_command:
         return None
     try:
-        completed = subprocess.run(
-            list(profile.version_command),
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=1.0,
-        )
+        with tempfile.TemporaryFile() as output_file:
+            subprocess.run(
+                list(profile.version_command),
+                stdout=output_file,
+                stderr=subprocess.STDOUT,
+                env=minimal_subprocess_environment(),
+                check=True,
+                timeout=1.0,
+                shell=False,
+            )
+            output_file.seek(0)
+            raw_output = output_file.read(_MAX_SHELL_VERSION_BYTES + 1)
     except (OSError, subprocess.SubprocessError):
         return None
-    output = completed.stdout.strip() or completed.stderr.strip()
+    if len(raw_output) > _MAX_SHELL_VERSION_BYTES:
+        return None
+    output = raw_output.decode("utf-8", errors="replace").strip()
     return output.splitlines()[0] if output else None

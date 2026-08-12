@@ -29,3 +29,7 @@ Review 支持 play/pause、前后 seek、PageUp/PageDown 大步移动、跳到 C
 ## 分层
 
 TUI 依赖领域 snapshot、`ReviewController`、`CheckService` 和 `LabService`。它不依赖 pyte 类型、不调用 subprocess、不直接读取或覆盖 session 文件。真实 Home 数据源读取 `SessionRepository` 与当前环境；Fake Data 仅保留为测试 fixture，不再作为首页数据。
+
+## 安装态资源
+
+Home、Review、API 和 Check app 共用 package 内的 `csbox.tcss`。locale JSON 和 TCSS 随 wheel 一起安装；TUI 启动不要求当前工作目录是源码 checkout。安装态 smoke 会从仓库外的临时中文路径启动 console entrypoint、加载中文 locale、启动 headless Textual app，并验证 CJK renderer 生成可解析的 PNG。

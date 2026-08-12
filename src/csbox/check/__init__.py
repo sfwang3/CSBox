@@ -1,5 +1,6 @@
 """Project check and build boundaries."""
 
+from csbox.check.detectors import FileEntry, FileInventory, TextScanStats
 from csbox.check.models import (
     BuildOutcome,
     CheckFinding,
@@ -20,5 +21,8 @@ __all__ = [
     "CheckServiceError",
     "CheckStatus",
     "DetectedProject",
+    "FileEntry",
+    "FileInventory",
+    "TextScanStats",
     "create_check_service",
 ]

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import re
 import secrets
 import shutil
@@ -21,7 +20,18 @@ from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
 
 from csbox.api.errors import ApiConfigError
 from csbox.api.models import ApiRequest, ApiScenario, ApiStep
-from csbox.core.safe_paths import atomic_write_text, mkdir_exclusive, safe_relative_path
+from csbox.core.safe_paths import (
+    atomic_write_text,
+    mkdir_exclusive,
+    read_regular_text,
+    restore_backup_or_preserve,
+    safe_relative_path,
+    safe_rename,
+)
+
+MAX_OPENAPI_BYTES = 16 * 1024 * 1024
+_MAX_OPENAPI_DEPTH = 64
+_MAX_OPENAPI_NODES = 100_000
 
 _METHODS = frozenset({"get", "post", "put", "patch", "delete", "head", "options"})
 _PARAMETER_LOCATIONS = frozenset({"path", "query", "header"})
@@ -222,18 +232,18 @@ class OpenApiImporter:
 
     def _read(self, source: Path) -> Any:
         try:
-            text = source.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as error:
+            text = read_regular_text(source, max_bytes=MAX_OPENAPI_BYTES)
+        except (OSError, UnicodeDecodeError, ValueError) as error:
             raise self._error(source, "OpenAPI 文件无法读取") from error
         try:
             if source.suffix.casefold() == ".json":
                 value = json.loads(text, object_pairs_hook=_reject_duplicate_json_keys)
-                _validate_json_value(value, set())
+                _validate_json_value(value)
                 return value
             if source.suffix.casefold() in {".yaml", ".yml"}:
                 _reject_duplicate_yaml_keys(text)
                 value = yaml.safe_load(text)
-                _validate_json_value(value, set())
+                _validate_json_value(value)
                 return value
         except (
             json.JSONDecodeError,
@@ -491,15 +501,13 @@ def write_scenario_templates(
         for filename, text in zip(filenames, rendered, strict=True):
             atomic_write_text(staging / filename, text)
         _validate_staged_templates(staging, filenames)
+        if output_directory.exists():
+            _publish_to_existing_directory(staging, output_directory, filenames, existing)
+        else:
+            safe_rename(staging, output_directory, replace_existing=False)
     except BaseException:
         _cleanup_unpublished_staging(staging)
         raise
-    if output_directory.exists():
-        _publish_to_existing_directory(staging, output_directory, filenames, existing)
-    else:
-        if output_directory.is_symlink() or output_directory.exists():
-            raise FileExistsError("OpenAPI template directory appeared during publishing")
-        os.rename(staging, output_directory)
     return paths
 
 
@@ -507,6 +515,8 @@ def _cleanup_unpublished_staging(staging: Path) -> None:
     """Remove only a private staging tree before it has entered publication."""
 
     if staging.is_symlink() or not staging.is_dir():
+        return
+    if any(staging.glob(".backup-*")):
         return
     shutil.rmtree(staging, ignore_errors=True)
 
@@ -590,33 +600,37 @@ def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _validate_json_value(value: Any, ancestors: set[int]) -> None:
+def _validate_json_value(value: Any) -> None:
     """Reject non-JSON OpenAPI values before structure-specific traversal."""
 
-    if value is None or isinstance(value, (str, bool, int)):
-        return
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise ValueError("OpenAPI values must not contain non-finite numbers")
-        return
-    if isinstance(value, (Mapping, list)):
-        value_id = id(value)
-        if value_id in ancestors:
-            raise ValueError("OpenAPI values must not be recursive")
-        ancestors.add(value_id)
-        try:
-            if isinstance(value, Mapping):
-                for key, nested_value in value.items():
+    stack: list[tuple[Any, int]] = [(value, 0)]
+    nodes = 0
+    seen_containers: set[int] = set()
+    while stack:
+        item, depth = stack.pop()
+        nodes += 1
+        if nodes > _MAX_OPENAPI_NODES or depth > _MAX_OPENAPI_DEPTH:
+            raise ValueError("OpenAPI structure exceeds the safe budget")
+        if item is None or isinstance(item, (str, bool, int)):
+            continue
+        if isinstance(item, float):
+            if not math.isfinite(item):
+                raise ValueError("OpenAPI values must not contain non-finite numbers")
+            continue
+        if isinstance(item, (Mapping, list)):
+            identity = id(item)
+            if identity in seen_containers:
+                raise ValueError("OpenAPI aliases are not supported")
+            seen_containers.add(identity)
+            if isinstance(item, Mapping):
+                for key, nested_value in item.items():
                     if not isinstance(key, str):
                         raise ValueError("OpenAPI object keys must be strings")
-                    _validate_json_value(nested_value, ancestors)
+                    stack.append((nested_value, depth + 1))
             else:
-                for nested_value in value:
-                    _validate_json_value(nested_value, ancestors)
-        finally:
-            ancestors.remove(value_id)
-        return
-    raise ValueError("OpenAPI values must be JSON-compatible")
+                stack.extend((nested_value, depth + 1) for nested_value in item)
+            continue
+        raise ValueError("OpenAPI values must be JSON-compatible")
 
 
 def _contains_schema_reference(value: Any) -> bool:
@@ -632,35 +646,31 @@ def _reject_duplicate_yaml_keys(text: str) -> None:
 
     root = yaml.compose(text)
     if root is not None:
-        _walk_yaml_node(root, set())
-
-
-def _walk_yaml_node(node: Node, ancestors: set[int]) -> None:
-    node_id = id(node)
-    if node_id in ancestors:
-        raise ValueError("cyclic YAML alias")
-    ancestors.add(node_id)
-    try:
-        _walk_yaml_node_contents(node, ancestors)
-    finally:
-        ancestors.remove(node_id)
-
-
-def _walk_yaml_node_contents(node: Node, ancestors: set[int]) -> None:
-    if isinstance(node, MappingNode):
-        seen: set[tuple[str, str]] = set()
-        for key, value in node.value:
-            if not isinstance(key, ScalarNode):
-                raise ValueError("YAML mapping keys must be scalars")
-            identity = (key.tag, key.value)
-            if identity in seen:
-                raise ValueError("duplicate YAML mapping key")
-            seen.add(identity)
-            _walk_yaml_node(key, ancestors)
-            _walk_yaml_node(value, ancestors)
-    elif isinstance(node, SequenceNode):
-        for item in node.value:
-            _walk_yaml_node(item, ancestors)
+        stack: list[tuple[Node, int]] = [(root, 0)]
+        seen_nodes: set[int] = set()
+        nodes = 0
+        while stack:
+            node, depth = stack.pop()
+            nodes += 1
+            if nodes > _MAX_OPENAPI_NODES or depth > _MAX_OPENAPI_DEPTH:
+                raise ValueError("YAML structure exceeds the safe budget")
+            node_id = id(node)
+            if node_id in seen_nodes:
+                raise ValueError("YAML aliases are not supported")
+            seen_nodes.add(node_id)
+            if isinstance(node, MappingNode):
+                keys: set[tuple[str, str]] = set()
+                for key, nested in node.value:
+                    if not isinstance(key, ScalarNode):
+                        raise ValueError("YAML mapping keys must be scalars")
+                    identity = (key.tag, key.value)
+                    if identity in keys:
+                        raise ValueError("duplicate YAML mapping key")
+                    keys.add(identity)
+                    stack.append((key, depth + 1))
+                    stack.append((nested, depth + 1))
+            elif isinstance(node, SequenceNode):
+                stack.extend((nested, depth + 1) for nested in node.value)
 
 
 def _todo(name: str) -> str:
@@ -775,26 +785,18 @@ def _publish_to_existing_directory(
     """Publish staged files with rollback so a failed publish preserves existing files."""
 
     backups: dict[Path, Path] = {}
-    published: list[Path] = []
     try:
         for index, filename in enumerate(filenames, start=1):
             destination = output_directory / filename
             if existing[destination]:
                 backup = staging / f".backup-{index}"
-                os.replace(destination, backup)
+                safe_rename(destination, backup, replace_existing=False)
                 backups[destination] = backup
-            os.replace(staging / filename, destination)
-            published.append(destination)
+            safe_rename(staging / filename, destination, replace_existing=False)
     except BaseException:
-        for destination in reversed(published):
-            backup = backups.get(destination)
-            if backup is not None:
-                os.replace(backup, destination)
-            elif destination.exists() and destination.is_file() and not destination.is_symlink():
-                destination.unlink()
-        for destination, backup in backups.items():
+        for destination, backup in reversed(tuple(backups.items())):
             if backup.exists():
-                os.replace(backup, destination)
+                restore_backup_or_preserve(backup, destination)
         raise
     shutil.rmtree(staging, ignore_errors=True)
 

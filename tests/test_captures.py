@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import csbox.lab.captures as captures_module
 from csbox.core.events import TerminalEvent, TerminalEventType
 from csbox.lab.captures import CaptureStore, CaptureStoreError
 from csbox.lab.dispatcher import DispatchError, TerminalEventDispatcher
@@ -74,22 +75,20 @@ def test_capture_store_atomic_replace_failure_keeps_previous_primary(
     store = make_store(captures_path)
     store.create_capture(snapshot("first", 1.0), timestamp=1.0, cwd=tmp_path)
     previous = captures_path.read_bytes()
-    real_replace = __import__("os").replace
-    temp_parents: list[Path] = []
+    real_write = captures_module.atomic_write_bytes
 
-    def fail_primary_replace(source: str | Path, destination: str | Path) -> None:
-        temp_parents.append(Path(source).parent)
+    def fail_primary_write(destination: Path, data: bytes) -> None:
         if Path(destination) == captures_path:
             raise OSError("disk failure")
-        real_replace(source, destination)
+        real_write(destination, data)
 
-    monkeypatch.setattr("csbox.lab.captures.os.replace", fail_primary_replace)
+    monkeypatch.setattr(captures_module, "atomic_write_bytes", fail_primary_write)
 
     with pytest.raises(CaptureStoreError, match="persist"):
         store.create_capture(snapshot("second", 2.0), timestamp=2.0, cwd=tmp_path)
 
     assert captures_path.read_bytes() == previous
-    assert temp_parents and all(parent == captures_path.parent for parent in temp_parents)
+    assert not list(captures_path.parent.glob(".*.tmp"))
 
 
 def test_capture_store_recovers_backup_and_isolates_one_invalid_capture(tmp_path: Path) -> None:
@@ -114,6 +113,34 @@ def test_capture_store_recovers_backup_and_isolates_one_invalid_capture(tmp_path
     assert any("capture 2" in warning for warning in isolated.warnings)
 
 
+def test_capture_store_maps_pathologically_deep_json_to_a_safe_warning(tmp_path: Path) -> None:
+    captures_path = tmp_path / "captures.json"
+    captures_path.write_text("[" * 10_000 + "0" + "]" * 10_000, encoding="utf-8")
+
+    result = CaptureStore(captures_path).load()
+
+    assert result.captures == ()
+    assert result.warnings == ("primary captures file is invalid",)
+
+
+def test_capture_store_maps_json_recursion_to_a_safe_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captures_path = tmp_path / "captures.json"
+    captures_path.write_text('{"version":1,"captures":[]}', encoding="utf-8")
+    monkeypatch.setattr(
+        captures_module.json,
+        "loads",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RecursionError("too deep")),
+    )
+
+    result = CaptureStore(captures_path).load()
+
+    assert result.captures == ()
+    assert result.warnings == ("primary captures file is invalid",)
+
+
 def test_capture_store_isolates_snapshot_dimension_mismatch(tmp_path: Path) -> None:
     captures_path = tmp_path / "captures.json"
     store = make_store(captures_path)
@@ -126,6 +153,28 @@ def test_capture_store_isolates_snapshot_dimension_mismatch(tmp_path: Path) -> N
 
     assert result.captures == ()
     assert any("invalid capture 1" in warning for warning in result.warnings)
+
+
+def test_capture_store_reads_sidecars_through_a_bounded_regular_file_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captures_path = tmp_path / "captures.json"
+    store = make_store(captures_path)
+    store.create_capture(snapshot("safe", 1.0), timestamp=1.0, cwd=tmp_path)
+    observed: list[tuple[Path, int]] = []
+    from csbox.core.safe_paths import read_regular_text as real_read_regular_text
+
+    def observed_read(path: Path, *, max_bytes: int, encoding: str = "utf-8") -> str:
+        observed.append((Path(path), max_bytes))
+        return real_read_regular_text(path, max_bytes=max_bytes, encoding=encoding)
+
+    monkeypatch.setattr(captures_module, "read_regular_text", observed_read, raising=False)
+
+    store.load()
+
+    assert observed == [(captures_path, observed[0][1])]
+    assert observed[0][1] > 0
 
 
 def test_capture_store_edits_title_and_deletes_by_id(tmp_path: Path) -> None:

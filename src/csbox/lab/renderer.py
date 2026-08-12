@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 import math
-import os
-import tempfile
-from contextlib import suppress
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 from typing import Final
 
 from PIL import Image, ImageDraw, ImageFont
 
+from csbox.core.safe_paths import atomic_write_bytes
 from csbox.lab.fonts import (
     FontResolutionError,
     FontResolver,
@@ -19,6 +18,8 @@ from csbox.lab.fonts import (
 from csbox.lab.screen import TerminalCell, TerminalSnapshot
 
 RGB = tuple[int, int, int]
+MAX_RENDER_PIXELS: Final = 32_000_000
+_MAX_FONT_CACHE_ENTRIES: Final = 1024
 
 _DARK_PALETTE: Final[dict[str, RGB]] = {
     "black": (0, 0, 0),
@@ -114,11 +115,12 @@ class TerminalEvidenceRenderer:
             raise TypeError("snapshot must be a TerminalSnapshot")
         selected_theme = theme or RenderTheme.dark()
         path = Path(destination)
-        path.parent.mkdir(parents=True, exist_ok=True)
         size = (
             snapshot.columns * self.cell_width + self.padding * 2,
             snapshot.rows * self.cell_height + self.padding * 2,
         )
+        if size[0] * size[1] > MAX_RENDER_PIXELS:
+            raise ValueError("终端证据图片像素尺寸过大，请缩小终端后重试。")
         image = Image.new("RGB", size, selected_theme.background)
         draw = ImageDraw.Draw(image)
         for row_index, row in enumerate(snapshot.cells):
@@ -170,6 +172,8 @@ class TerminalEvidenceRenderer:
             preferred = (self._ascii_font, self._cjk_font, *self._fallback_fonts)
         for font in preferred:
             if font_supports_text(font, text):
+                if len(self._font_cache) >= _MAX_FONT_CACHE_ENTRIES:
+                    self._font_cache.clear()
                 self._font_cache[text] = font
                 return font
         codepoints = " ".join(f"U+{ord(character):04X}" for character in text)
@@ -179,33 +183,6 @@ class TerminalEvidenceRenderer:
 
 
 def _save_png_atomic(image: Image.Image, destination: Path) -> None:
-    descriptor, temporary_name = tempfile.mkstemp(
-        dir=destination.parent,
-        prefix=f".{destination.name}.",
-        suffix=".tmp",
-    )
-    os.close(descriptor)
-    temporary = Path(temporary_name)
-    try:
-        image.save(temporary, format="PNG")
-        with temporary.open("r+b") as stream:
-            os.fsync(stream.fileno())
-        os.replace(temporary, destination)
-        _fsync_directory(destination.parent)
-    except BaseException:
-        with suppress(OSError):
-            temporary.unlink(missing_ok=True)
-        raise
-
-
-def _fsync_directory(directory: Path) -> None:
-    try:
-        descriptor = os.open(directory, os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        os.fsync(descriptor)
-    except OSError:
-        pass
-    finally:
-        os.close(descriptor)
+    stream = BytesIO()
+    image.save(stream, format="PNG")
+    atomic_write_bytes(destination, stream.getvalue())

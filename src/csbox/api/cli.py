@@ -13,6 +13,8 @@ from typing import Annotated, Any
 import typer
 
 from csbox.api.errors import ApiConfigError, ApiDomainError, ApiPersistenceError, ApiTransportError
+from csbox.api.evidence import ApiEvidenceBuilder
+from csbox.api.exporter import ApiEvidenceExporter, ApiExportResult
 from csbox.api.httpx_transport import HttpxTransport
 from csbox.api.models import ApiRequest, ApiResponse, ApiRun, ApiRunResult
 from csbox.api.openapi import OpenApiImporter, write_scenario_templates
@@ -26,10 +28,12 @@ from csbox.config import ConfigPaths, ConfigurationError, load_config
 from csbox.config.models import ApiConfig
 from csbox.core.display_width import truncate_cells
 from csbox.core.schema import with_schema_version
+from csbox.locales import load_locale
 
 api_app = typer.Typer(
     help="接口测试场景、运行记录和证据导出。",
-    no_args_is_help=True,
+    invoke_without_command=True,
+    no_args_is_help=False,
 )
 
 _PLACEHOLDER_RE = re.compile(r"{{([A-Za-z_][A-Za-z0-9_]*)}}")
@@ -41,6 +45,23 @@ _EXIT_CODES = {
     "CONFIG_ERROR": 2,
     "RUNTIME_ERROR": 3,
 }
+
+
+@api_app.callback()
+def _api_default(ctx: typer.Context) -> None:
+    """Open the API TUI when no API subcommand was selected."""
+
+    if ctx.invoked_subcommand is not None:
+        return
+    from csbox.tui.app import ApiApp
+
+    cwd = Path.cwd()
+    ApiApp(
+        repository=ApiRunRepository.from_cwd(cwd),
+        scenario_loader=ScenarioLoader(),
+        runner_factory=create_api_runner_factory(cwd),
+        locale=load_locale(),
+    ).run()
 
 
 @api_app.command("list", help="列出当前项目已保存的接口测试运行记录。")
@@ -131,6 +152,7 @@ def import_openapi(
     force: Annotated[bool, typer.Option("--force", help="覆盖已有的普通 TOML 模板文件。")] = False,
     plain: Annotated[bool, typer.Option("--plain", help="输出中文纯文本结果。")] = False,
     json_output: Annotated[bool, typer.Option("--json", help="输出稳定 JSON 结果。")] = False,
+    verbose: Annotated[bool, typer.Option("--verbose", help="显示受控调试原因。")] = False,
 ) -> None:
     """Import static request structure without executing or resolving source content."""
 
@@ -145,7 +167,7 @@ def import_openapi(
         scenario = importer.to_scenario(importer.load(openapi_path), openapi_path.stem)
         written = write_scenario_templates(scenario, output, force=force)
     except ApiConfigError as error:
-        _emit_error(error, code=2, json_output=json_output, verbose=False)
+        _emit_error(error, code=2, json_output=json_output, verbose=verbose)
         raise typer.Exit(code=2) from None
     except FileExistsError:
         _emit_error(
@@ -156,7 +178,7 @@ def import_openapi(
             ),
             code=2,
             json_output=json_output,
-            verbose=False,
+            verbose=verbose,
         )
         raise typer.Exit(code=2) from None
     except (OSError, ValueError):
@@ -164,11 +186,25 @@ def import_openapi(
             ApiConfigError(
                 "发生了什么：无法安全写入 OpenAPI 场景模板。"
                 "在哪里：OpenAPI 导出目录。"
-                "怎么处理：检查目录、符号链接和写入权限后重试。"
+                "怎么处理：检查目录、符号链接和写入权限后重试；"
+                "并发冲突文件会保留为同目录 .csbox-recovery-*.bak。"
             ),
             code=2,
             json_output=json_output,
-            verbose=False,
+            verbose=verbose,
+        )
+        raise typer.Exit(code=2) from None
+    except Exception as error:
+        _emit_error(
+            ApiConfigError(
+                "发生了什么：无法安全生成 OpenAPI 场景模板。"
+                "在哪里：OpenAPI 文件或场景输出目录。"
+                "怎么处理：检查文件格式、目录和权限后重试。",
+                debug_message=type(error).__name__,
+            ),
+            code=2,
+            json_output=json_output,
+            verbose=verbose,
         )
         raise typer.Exit(code=2) from None
 
@@ -198,6 +234,64 @@ def api_import_json_payload(files: Iterable[Path]) -> dict[str, object]:
     """Return the stable public schema for ``csbox api import --json``."""
 
     return with_schema_version({"files": [path.as_posix() for path in files]})
+
+
+@api_app.command("export", help="导出已保存 API 运行的 PNG、Markdown 和 JSON 证据。")
+def export_evidence(
+    run: Annotated[str, typer.Argument(help="运行 ID 或唯一前缀。")],
+    output: Annotated[Path, typer.Option("--output", help="证据输出目录。")] = Path("evidence"),
+    theme: Annotated[
+        str, typer.Option("--theme", help="dark 或 light，作为报告卡片主题。")
+    ] = "dark",
+    force: Annotated[
+        bool, typer.Option("--force", help="允许更新已有生成文件，保留其他文件。")
+    ] = False,
+    plain: Annotated[bool, typer.Option("--plain", help="输出中文纯文本结果。")] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="输出稳定 JSON 结果。")] = False,
+    verbose: Annotated[bool, typer.Option("--verbose", help="显示受控调试原因。")] = False,
+) -> None:
+    """Export only the already-persisted, redacted run view."""
+
+    try:
+        if plain and json_output:
+            raise ApiConfigError(
+                "发生了什么：--plain 与 --json 不能同时使用。"
+                "在哪里：命令行输出选项。"
+                "怎么处理：仅选择一种输出格式后重试。"
+            )
+        if theme not in {"dark", "light"}:
+            raise ApiConfigError(
+                "发生了什么：证据主题无效。在哪里：--theme。怎么处理：使用 dark 或 light 后重试。"
+            )
+        loaded = ApiRunRepository.from_cwd(Path.cwd()).load(run)
+        exported = ApiEvidenceExporter().export(loaded, output, theme=theme, force=force)
+    except ApiConfigError as error:
+        _emit_error(error, code=2, json_output=json_output, verbose=verbose)
+        raise typer.Exit(code=2) from None
+    except ApiPersistenceError as error:
+        _emit_error(error, code=3, json_output=json_output, verbose=verbose)
+        raise typer.Exit(code=3) from None
+    except Exception:
+        error = ApiPersistenceError(
+            "发生了什么：API Evidence 导出失败。"
+            "在哪里：PNG、Markdown 或 JSON 输出。"
+            "怎么处理：检查输出目录、字体和写入权限后重试；"
+            "并发冲突文件会保留为同目录 .csbox-recovery-*.bak。"
+        )
+        _emit_error(error, code=3, json_output=json_output, verbose=verbose)
+        raise typer.Exit(code=3) from None
+
+    if json_output:
+        typer.echo(
+            json.dumps(
+                api_export_json_payload(loaded, exported),
+                ensure_ascii=False,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        )
+    else:
+        typer.echo(render_export_plain(exported))
 
 
 @api_app.command("run", help="运行一个 TOML 接口测试场景。")
@@ -337,6 +431,34 @@ def _load_api_config() -> ApiConfig:
         ) from error
 
 
+def create_api_runner_factory(cwd: Path | str) -> Any:
+    """Build the UI adapter's runner lazily from project-only API config."""
+
+    project_dir = Path(cwd)
+
+    def factory(*_args: object) -> ApiRunner:
+        try:
+            config = load_config(
+                project_dir,
+                paths=ConfigPaths.project_only(project_dir),
+            ).api
+        except ConfigurationError as error:
+            raise ApiConfigError(
+                "发生了什么：API 配置无效。"
+                "在哪里：项目配置。"
+                "怎么处理：检查 [api] 与 [api.variables] 配置后重试。"
+            ) from error
+        return ApiRunner(
+            HttpxTransport(
+                response_max_bytes=config.response_max_bytes,
+                timeout_seconds=config.timeout_seconds,
+            ),
+            Redactor.with_configured_values([]),
+        )
+
+    return factory
+
+
 def _parse_cli_variables(values: Iterable[str]) -> dict[str, str]:
     parsed: dict[str, str] = {}
     for value in values:
@@ -448,9 +570,38 @@ def _format_elapsed(elapsed_ms: float) -> str:
     return f"{elapsed_ms:.1f} ms"
 
 
+def render_export_plain(result: ApiExportResult) -> str:
+    """Render only safe relative artifact names, never the user output root."""
+
+    files = tuple(path.relative_to(result.destination).as_posix() for path in result.files)
+    return "已导出 API 证据：\n" + "\n".join(f"- {path}" for path in files)
+
+
+def api_export_json_payload(run: ApiRun, result: ApiExportResult) -> dict[str, object]:
+    """Return a schema-versioned export summary with relative safe paths only."""
+
+    items = ApiEvidenceBuilder.from_run(run)
+    safe_id = (
+        items[0].run_id
+        if items
+        else Redactor.with_configured_values(
+            value for value in run.scenario.variables.values() if isinstance(value, str) and value
+        ).text(run.id)
+    )
+    return with_schema_version(
+        {
+            "id": safe_id,
+            "status": run.status,
+            "files": [path.relative_to(result.destination).as_posix() for path in result.files],
+        }
+    )
+
+
 __all__ = [
     "api_app",
+    "api_export_json_payload",
     "api_list_json_payload",
+    "render_export_plain",
     "render_list_plain",
     "render_run_plain",
     "run_json_payload",

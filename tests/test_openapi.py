@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+import csbox.api.openapi as openapi_module
 from csbox.api.errors import ApiConfigError
 from csbox.api.openapi import OpenApiImporter, write_scenario_templates
 from csbox.api.scenario import ScenarioLoader
@@ -150,6 +151,190 @@ paths:
     for path in (invalid_path, unsafe_path, list_path):
         with pytest.raises(ApiConfigError):
             importer.load(path)
+
+
+def test_importer_rejects_oversized_deep_and_aliased_yaml_with_bounded_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(openapi_module, "MAX_OPENAPI_BYTES", 256, raising=False)
+    oversized = tmp_path / "oversized.yaml"
+    oversized.write_text(
+        "openapi: 3.1.0\npaths: {}\n# " + ("x" * 512),
+        encoding="utf-8",
+    )
+    with pytest.raises(ApiConfigError, match="读取|解析|大小|上限"):
+        OpenApiImporter().load(oversized)
+
+    monkeypatch.setattr(openapi_module, "MAX_OPENAPI_BYTES", 64 * 1024, raising=False)
+    aliased = tmp_path / "aliased.yaml"
+    aliased.write_text(
+        """openapi: 3.1.0
+paths:
+  /health:
+    get:
+      responses: &responses
+        '200': {description: ok}
+      x-copy: *responses
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ApiConfigError, match="安全解析"):
+        OpenApiImporter().load(aliased)
+
+    deep = tmp_path / "deep.json"
+    value: object = "leaf"
+    for _ in range(80):
+        value = {"child": value}
+    deep.write_text(
+        json.dumps(
+            {
+                "openapi": "3.1.0",
+                "paths": {
+                    "/health": {
+                        "get": {
+                            "responses": {"200": {"description": "ok"}},
+                            "x-deep": value,
+                        }
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ApiConfigError, match="安全解析"):
+        OpenApiImporter().load(deep)
+
+
+def test_template_publish_does_not_replace_a_destination_created_after_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "pets.json"
+    _write_json_spec(source)
+    importer = OpenApiImporter()
+    scenario = importer.to_scenario(importer.load(source), "pets")
+    destination = tmp_path / "scenarios"
+    destination.mkdir()
+    raced = destination / "getPet.toml"
+    called = False
+
+    from csbox.core.safe_paths import safe_rename as real_safe_rename
+
+    def race_publish(
+        source_path: Path, destination_path: Path, *, replace_existing: bool = True
+    ) -> None:
+        nonlocal called
+        if destination_path == raced and not called:
+            called = True
+            raced.write_text("user-raced", encoding="utf-8")
+        real_safe_rename(
+            source_path,
+            destination_path,
+            replace_existing=replace_existing,
+        )
+
+    monkeypatch.setattr(openapi_module, "safe_rename", race_publish, raising=False)
+
+    with pytest.raises(FileExistsError):
+        write_scenario_templates(scenario, destination)
+
+    assert called
+    assert raced.read_text(encoding="utf-8") == "user-raced"
+
+
+def test_force_template_rollback_preserves_concurrent_destination_and_old_backup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "pets.json"
+    _write_json_spec(source)
+    importer = OpenApiImporter()
+    scenario = importer.to_scenario(importer.load(source), "pets")
+    destination = tmp_path / "scenarios"
+    first = write_scenario_templates(scenario, destination)
+    protected = first[0]
+    old_generated = protected.read_text(encoding="utf-8")
+    concurrent = "concurrent-user-data"
+    real_safe_rename = openapi_module.safe_rename
+    raced = False
+
+    def race_after_backup(
+        source_path: Path, destination_path: Path, *, replace_existing: bool = True
+    ) -> None:
+        nonlocal raced
+        if destination_path == protected and source_path.name == protected.name and not raced:
+            raced = True
+            assert not destination_path.exists()
+            destination_path.write_text(concurrent, encoding="utf-8")
+        real_safe_rename(
+            source_path,
+            destination_path,
+            replace_existing=replace_existing,
+        )
+
+    monkeypatch.setattr(openapi_module, "safe_rename", race_after_backup)
+
+    with pytest.raises(FileExistsError):
+        write_scenario_templates(scenario, destination, force=True)
+
+    assert raced
+    assert protected.read_text(encoding="utf-8") == old_generated
+    recovery = tuple(destination.glob(".csbox-recovery-*.bak"))
+    assert len(recovery) == 1
+    assert recovery[0].read_text(encoding="utf-8") == concurrent
+    assert not tuple(tmp_path.glob(".scenarios-*.partial"))
+
+
+def test_force_template_restores_the_old_set_when_a_later_publish_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "pets.json"
+    _write_json_spec(source)
+    importer = OpenApiImporter()
+    scenario = importer.to_scenario(importer.load(source), "pets")
+    destination = tmp_path / "scenarios"
+    generated = write_scenario_templates(scenario, destination)
+    old_contents = {path: path.read_bytes() for path in generated}
+    first_step, *remaining_steps = scenario.steps
+    updated_request = first_step.request.model_copy(
+        update={"url": "https://api.example.test/v2/pets/{{TODO_petId}}"}
+    )
+    updated = scenario.model_copy(
+        update={
+            "steps": (
+                first_step.model_copy(update={"request": updated_request}),
+                *remaining_steps,
+            )
+        }
+    )
+    real_safe_rename = openapi_module.safe_rename
+    publish_calls = 0
+
+    def fail_second_publish(
+        source_path: Path, destination_path: Path, *, replace_existing: bool = True
+    ) -> None:
+        nonlocal publish_calls
+        if destination_path in old_contents and source_path.name == destination_path.name:
+            publish_calls += 1
+            if publish_calls == 2:
+                raise OSError("simulated later publication failure")
+        real_safe_rename(
+            source_path,
+            destination_path,
+            replace_existing=replace_existing,
+        )
+
+    monkeypatch.setattr(openapi_module, "safe_rename", fail_second_publish)
+
+    with pytest.raises(OSError, match="later publication failure"):
+        write_scenario_templates(updated, destination, force=True)
+
+    assert publish_calls == 2
+    assert {path: path.read_bytes() for path in generated} == old_contents
+    assert tuple(destination.glob(".csbox-recovery-*.bak"))
+    assert not tuple(tmp_path.glob(".scenarios-*.partial"))
 
 
 def test_importer_rejects_duplicate_yaml_keys_and_nested_unsupported_schema(

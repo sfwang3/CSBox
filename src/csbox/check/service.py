@@ -7,7 +7,7 @@ from pathlib import Path
 from csbox.check.build import DEFAULT_BUILD_ADAPTERS, BuildAdapter, CommandRunner
 from csbox.check.detectors import DEFAULT_DETECTORS, FileInventory, ProjectDetector, detect_projects
 from csbox.check.models import BuildOutcome, CheckContext, CheckFinding, CheckReport
-from csbox.check.rules import DEFAULT_RULES, CheckRule
+from csbox.check.rules import DEFAULT_RULES, CheckRule, run_deep_secret_scan
 from csbox.config.loader import load_config
 from csbox.config.models import CSBoxConfig
 
@@ -34,35 +34,47 @@ class CheckService:
         self.adapters = adapters
         self.platform_name = platform_name or platform.system()
 
-    def run(self, root: Path | str, *, build: bool = False) -> CheckReport:
-        project_root = Path(root).resolve()
+    def run(
+        self,
+        root: Path | str,
+        *,
+        build: bool = False,
+        deep: bool = False,
+        inventory: FileInventory | None = None,
+    ) -> CheckReport:
         try:
-            inventory = FileInventory.build(
+            project_root = Path(root).resolve()
+            current_inventory = inventory or FileInventory.build(
                 project_root,
                 scan_limit_bytes=256 * 1024,
             )
-        except (OSError, RuntimeError, ValueError) as error:
-            raise CheckServiceError(f"无法检查项目目录：{project_root}") from error
+            if current_inventory.root != project_root:
+                raise ValueError("inventory root does not match project root")
+        except (OSError, RuntimeError, ValueError):
+            raise CheckServiceError("无法安全检查项目目录。") from None
         context = CheckContext(
             root=project_root,
-            inventory=inventory,
+            inventory=current_inventory,
             large_file_threshold_bytes=self.config.check.large_file_threshold_mb * 1024 * 1024,
         )
         findings: list[CheckFinding] = []
         for rule in self.rules:
             findings.extend(rule.evaluate(context))
-        projects = detect_projects(project_root, self.detectors)
+        projects = detect_projects(project_root, self.detectors, inventory=current_inventory)
         builds: list[BuildOutcome] = []
         if build and projects:
-            builds.extend(self._build_projects(projects))
+            builds.extend(self._build_projects(projects, current_inventory))
+        deep_scan = run_deep_secret_scan(project_root) if deep else None
         return CheckReport(
             root=project_root,
             projects=projects,
             findings=tuple(findings),
             builds=tuple(builds),
+            deep_scan=deep_scan,
+            text_scan_stats=current_inventory.text_scan_stats.as_dict(),
         )
 
-    def _build_projects(self, projects) -> list[BuildOutcome]:
+    def _build_projects(self, projects, inventory: FileInventory) -> list[BuildOutcome]:
         outcomes: list[BuildOutcome] = []
         with tempfile.TemporaryDirectory(prefix="csbox-check-build-") as temporary:
             output_dir = Path(temporary)
@@ -74,7 +86,7 @@ class CheckService:
                     runner=self.command_runner,
                     platform_name=self.platform_name,
                 )
-                outcomes.append(adapter.build(project, output_dir))
+                outcomes.append(adapter.build(project, output_dir, inventory=inventory))
         return outcomes
 
 

@@ -68,7 +68,7 @@ Screen {
 
 #main-scroll {
     height: 1fr;
-    margin-top: 1;
+    margin-top: 0;
     padding-bottom: 1;
     scrollbar-size: 1 1;
 }
@@ -178,6 +178,7 @@ UnavailableDialog {
     height: 1fr;
     margin-right: 1;
     margin-bottom: 0;
+    overflow-y: auto;
 }
 
 .wide #recent-panel {
@@ -194,7 +195,7 @@ UnavailableDialog {
 #review-title {
     color: #9da4ff;
     text-style: bold;
-    height: 1;
+    height: 2;
     border-bottom: solid #25384b;
     margin-bottom: 1;
 }
@@ -392,4 +393,142 @@ UnavailableDialog {
 
 .wide #check-narrow {
     display: none;
+}
+
+#recent-api-content,
+#home-check-status {
+    color: #9fb6c8;
+    height: auto;
+    margin-top: 1;
+}
+
+#api-layout,
+#pack-layout {
+    height: 100%;
+    padding: 1 2 0 2;
+}
+
+#api-title,
+#pack-title {
+    color: #9da4ff;
+    text-style: bold;
+    height: 2;
+    border-bottom: solid #25384b;
+    margin-bottom: 1;
+}
+
+#api-status {
+    color: #f0bd60;
+    height: 1;
+    margin-bottom: 1;
+}
+
+#pack-status {
+    color: #f0bd60;
+    height: auto;
+    min-height: 1;
+    margin-bottom: 1;
+}
+
+#api-body {
+    height: 1fr;
+    layout: horizontal;
+}
+
+#api-scenarios,
+#api-runs,
+#api-detail,
+#pack-summary,
+#pack-items {
+    background: #0e1a26;
+    border: round #29455f;
+    color: #c1d4e4;
+    padding: 1;
+    overflow-y: auto;
+}
+
+#api-scenarios {
+    width: 30;
+}
+
+#api-runs {
+    width: 34;
+    margin-left: 1;
+}
+
+#api-detail {
+    width: 1fr;
+    margin-left: 1;
+}
+
+.api-row {
+    width: 100%;
+    height: 3;
+    margin-top: 1;
+    border: round #326fa2;
+    background: #122335;
+    color: #dbeeff;
+}
+
+.api-row:hover {
+    background: #19344c;
+    color: #ffffff;
+}
+
+.api-row:focus {
+    border: tall #969dff;
+    text-style: bold;
+}
+
+#api-footer,
+#pack-footer {
+    height: 1;
+    color: #a5bacd;
+    background: #101e2b;
+    padding: 0 1;
+    margin-top: 1;
+}
+
+#pack-summary {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#pack-items {
+    height: 1fr;
+}
+
+#pack-actions {
+    height: 3;
+    align: right middle;
+    margin-top: 1;
+}
+
+#pack-actions Button {
+    min-width: 12;
+    margin-left: 1;
+}
+
+#pack-confirm:focus,
+#pack-cancel:focus {
+    border: tall #f0bd60;
+}
+
+.narrow #api-body {
+    layout: vertical;
+}
+
+.narrow #api-scenarios,
+.narrow #api-runs,
+.narrow #api-detail {
+    display: none;
+    width: 1fr;
+    height: 1fr;
+    margin-left: 0;
+}
+
+.narrow.show-scenarios #api-scenarios,
+.narrow.show-runs #api-runs,
+.narrow.show-detail #api-detail {
+    display: block;
 }

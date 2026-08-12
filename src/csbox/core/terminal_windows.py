@@ -4,6 +4,7 @@ import codecs
 import os
 import threading
 import time
+from collections import deque
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -24,14 +25,20 @@ class WindowsConPTYBackend(TerminalBackend):
         *,
         pty_process_factory: Any | None = None,
         write_timeout: float = 1.0,
+        max_output_buffer_bytes: int = 1024 * 1024,
     ) -> None:
         if write_timeout <= 0:
             raise ValueError("终端写入超时时间必须是正数。")
+        if type(max_output_buffer_bytes) is not int or max_output_buffer_bytes <= 0:
+            raise ValueError("终端输出缓冲区上限必须是正整数。")
         self._pty_process_factory = pty_process_factory
         self._write_timeout = write_timeout
+        self._max_output_buffer_bytes = max_output_buffer_bytes
         self._process: Any | None = None
         self._reader_thread: threading.Thread | None = None
-        self._output = bytearray()
+        self._output: deque[bytes] = deque()
+        self._output_head_offset = 0
+        self._buffered_output_bytes = 0
         self._reader_done = False
         self._reader_error: Exception | None = None
         self._input_buffer = b""
@@ -96,8 +103,8 @@ class WindowsConPTYBackend(TerminalBackend):
         with self._output_ready:
             while True:
                 if self._output:
-                    data = bytes(self._output[:max_bytes])
-                    del self._output[:max_bytes]
+                    data = self._drain_output(max_bytes)
+                    self._output_ready.notify_all()
                     return data
                 if self._reader_error is not None:
                     cause = self._reader_error
@@ -183,6 +190,8 @@ class WindowsConPTYBackend(TerminalBackend):
 
             with self._state_lock:
                 self._closing = True
+                with self._output_ready:
+                    self._output_ready.notify_all()
                 try:
                     process.close(force=force)
                 except Exception as cause:
@@ -229,9 +238,22 @@ class WindowsConPTYBackend(TerminalBackend):
                 if not isinstance(text, str):
                     raise TypeError(f"PtyProcess.read returned {type(text).__name__}")
                 encoded = text.encode("utf-8")
-                with self._output_ready:
-                    self._output.extend(encoded)
-                    self._output_ready.notify_all()
+                offset = 0
+                while offset < len(encoded):
+                    with self._output_ready:
+                        while (
+                            self._buffered_output_bytes >= self._max_output_buffer_bytes
+                            and not self._closing
+                        ):
+                            self._output_ready.wait()
+                        if self._closing:
+                            return
+                        available = self._max_output_buffer_bytes - self._buffered_output_bytes
+                        chunk = encoded[offset : offset + available]
+                        self._output.append(chunk)
+                        self._buffered_output_bytes += len(chunk)
+                        offset += len(chunk)
+                        self._output_ready.notify_all()
         except EOFError:
             pass
         except Exception as cause:
@@ -242,6 +264,23 @@ class WindowsConPTYBackend(TerminalBackend):
                 self._reader_error = reader_error
                 self._reader_done = True
                 self._output_ready.notify_all()
+
+    def _drain_output(self, max_bytes: int) -> bytes:
+        remaining = min(max_bytes, self._buffered_output_bytes)
+        parts: list[bytes] = []
+        while remaining and self._output:
+            head = self._output[0]
+            available = len(head) - self._output_head_offset
+            take = min(remaining, available)
+            start = self._output_head_offset
+            parts.append(head[start : start + take])
+            self._output_head_offset += take
+            self._buffered_output_bytes -= take
+            remaining -= take
+            if self._output_head_offset == len(head):
+                self._output.popleft()
+                self._output_head_offset = 0
+        return b"".join(parts)
 
     def _flush_complete_input(self, process: Any) -> None:
         if self._pywinpty_async_write:

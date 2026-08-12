@@ -51,3 +51,9 @@ Unix backend 使用真实 PTY，支持初始尺寸、resize、Ctrl+C、EOF 和 c
 `ApiResponse` 可以作为 assertion 执行期间的瞬态内部表示，但不得直接进入 persistence、evidence、日志或 TUI。所有这些外部消费者必须先调用 `ApiResponse.redacted_copy(redactor)`，并且只保存或展示返回的副本。HTTPX transport 当前在构造返回值前已执行同一套 URL、header 和 body 脱敏；消费边界再次调用时保持幂等。
 
 `Redactor` 依据显式 policy、request-derived 精确值和敏感字段名工作。它不会假设能够推断任意未知 secret，也不会把普通 response body 全部遮蔽；无法通过 policy 或结构识别的未知内容属于调用方必须明确配置的剩余风险。
+
+## Distribution 与安装态
+
+项目使用 Hatchling 的 `src/csbox` package layout。wheel 只包含运行时 Python package、locale JSON、Textual TCSS 和 distribution metadata；sdist 只保留公开 README、许可证、用户文档、`src/csbox` 与构建所需配置，不包含测试、参考图片或内部开发资料。版本由 distribution metadata 提供给运行时，`csbox --version`、session/manifest 字段和 wheel metadata 使用同一个 `0.2.0` 版本。
+
+安装后的入口是 `csbox` console script。用户可以用普通 venv 或 `uv tool install <wheel>` 安装，再从项目目录之外运行 `csbox --help`、`doctor`、`check` 和 `pack`；locale、TCSS 与 renderer 通过 package/resource 或系统字体查找，不依赖当前 Git checkout。

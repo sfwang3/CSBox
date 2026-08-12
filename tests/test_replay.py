@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import csbox.lab.replay as replay_module
 from csbox.core.events import TerminalEvent, TerminalEventType, TerminalSize
 from csbox.lab.recorder import AsciicastV3Reader
 from csbox.lab.replay import (
@@ -271,27 +272,130 @@ def test_invalid_or_stale_checkpoint_index_is_rebuilt_without_touching_cast(
     assert refreshed["cast"]["size"] == len(changed_cast)
 
 
-def test_checkpoint_store_uses_same_directory_atomic_replace(
+def test_pathologically_deep_checkpoint_json_is_rebuilt_without_escaping_error_boundary(
+    tmp_path: Path,
+) -> None:
+    cast_path = tmp_path / "session.cast"
+    write_cast(cast_path, [(1.0, "o", "safe")], columns=8, rows=2)
+    checkpoint_path = tmp_path / "checkpoints.json"
+    checkpoint_path.write_text("[" * 10_000 + "0" + "]" * 10_000, encoding="utf-8")
+
+    service = ReplayService(cast_path, checkpoint_store=CheckpointStore(checkpoint_path))
+
+    assert service.seek(1.0).cells[0][0].character == "s"
+    assert json.loads(checkpoint_path.read_text(encoding="utf-8"))["version"] == CHECKPOINT_VERSION
+
+
+def test_checkpoint_json_recursion_is_rebuilt_without_escaping_error_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cast_path = tmp_path / "session.cast"
+    write_cast(cast_path, [(1.0, "o", "safe")], columns=8, rows=2)
+    checkpoint_path = tmp_path / "checkpoints.json"
+    checkpoint_path.write_text('{"version":2}', encoding="utf-8")
+
+    class RecursiveJson:
+        JSONDecodeError = json.JSONDecodeError
+        dumps = staticmethod(json.dumps)
+
+        @staticmethod
+        def loads(*_args: object, **_kwargs: object) -> object:
+            raise RecursionError("too deep")
+
+    monkeypatch.setattr(
+        replay_module,
+        "json",
+        RecursiveJson,
+    )
+
+    service = ReplayService(cast_path, checkpoint_store=CheckpointStore(checkpoint_path))
+
+    assert service.seek(1.0).cells[0][0].character == "s"
+
+
+def test_checkpoint_store_uses_the_shared_atomic_writer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     cast_path = tmp_path / "session.cast"
     cast_path.write_bytes((FIXTURES / "mixed.cast").read_bytes())
     checkpoint_path = tmp_path / "state" / "checkpoints.json"
-    replaced: list[tuple[Path, Path]] = []
-    real_replace = __import__("os").replace
+    written: list[Path] = []
+    real_write = replay_module.atomic_write_bytes
 
-    def observe_replace(source: str | Path, destination: str | Path) -> None:
-        replaced.append((Path(source), Path(destination)))
-        real_replace(source, destination)
+    def observe_write(destination: Path, data: bytes) -> None:
+        written.append(Path(destination))
+        real_write(destination, data)
 
-    monkeypatch.setattr("csbox.lab.replay.os.replace", observe_replace)
+    monkeypatch.setattr(replay_module, "atomic_write_bytes", observe_write)
 
     ReplayService(cast_path, checkpoint_store=CheckpointStore(checkpoint_path)).seek(6.0)
 
-    assert replaced
-    assert replaced[-1][0].parent == checkpoint_path.parent
-    assert replaced[-1][1] == checkpoint_path
+    assert written == [checkpoint_path]
     assert not list(checkpoint_path.parent.glob("*.tmp"))
+
+
+def test_replay_reads_checkpoint_with_a_bound_and_hashes_cast_incrementally(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cast_path = tmp_path / "session.cast"
+    write_cast(cast_path, [(1.0, "o", "safe")], columns=8, rows=2)
+    checkpoint_path = tmp_path / "checkpoints.json"
+    ReplayService(cast_path, checkpoint_store=CheckpointStore(checkpoint_path))
+    observed: list[tuple[Path, int]] = []
+    from csbox.core.safe_paths import read_regular_text as real_read_regular_text
+
+    def observed_read(path: Path, *, max_bytes: int, encoding: str = "utf-8") -> str:
+        observed.append((Path(path), max_bytes))
+        return real_read_regular_text(path, max_bytes=max_bytes, encoding=encoding)
+
+    original_read_bytes = Path.read_bytes
+
+    def reject_cast_read_bytes(path: Path) -> bytes:
+        if path == cast_path:
+            raise AssertionError("cast fingerprint must be streamed")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(replay_module, "read_regular_text", observed_read, raising=False)
+    monkeypatch.setattr(Path, "read_bytes", reject_cast_read_bytes)
+
+    service = ReplayService(cast_path, checkpoint_store=CheckpointStore(checkpoint_path))
+
+    assert service.seek(1.0).cells[0][0].character == "s"
+    assert observed == [(checkpoint_path, observed[0][1])]
+    assert observed[0][1] > 0
+
+
+def test_oversized_checkpoint_index_is_sampled_to_its_own_read_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cast_path = tmp_path / "long.cast"
+    write_cast(
+        cast_path,
+        [(0.001, "o", ".") for _ in range(1_501)],
+        columns=8,
+        rows=2,
+    )
+    checkpoint_path = tmp_path / "long.checkpoints.json"
+    budget = 16 * 1024
+    monkeypatch.setattr(replay_module, "MAX_CHECKPOINT_DOCUMENT_BYTES", budget)
+
+    first = ReplayService(cast_path, checkpoint_store=CheckpointStore(checkpoint_path))
+    persisted = json.loads(checkpoint_path.read_text(encoding="utf-8"))["checkpoints"]
+
+    assert checkpoint_path.stat().st_size <= budget
+    assert 1 <= len(persisted) < len(first.checkpoints)
+
+    def unexpected_rebuild(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise AssertionError("a bounded persisted checkpoint index should be reusable")
+
+    monkeypatch.setattr(ReplayService, "_build_checkpoints", unexpected_rebuild)
+    second = ReplayService(cast_path, checkpoint_store=CheckpointStore(checkpoint_path))
+
+    assert second.seek(second.duration) == first.seek(first.duration)
 
 
 def test_terminal_emulator_restores_a_domain_snapshot_and_continues_streaming() -> None:

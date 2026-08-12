@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import tomllib
 from collections.abc import Mapping
@@ -12,6 +13,11 @@ from pydantic import ValidationError
 from csbox.api.errors import ApiConfigError
 from csbox.api.models import ApiAssertion, ApiMultipartPart, ApiRequest, ApiScenario, ApiStep
 from csbox.api.variables import validate_placeholders
+from csbox.core.safe_paths import read_regular_text
+
+MAX_SCENARIO_BYTES = 4 * 1024 * 1024
+_MAX_SCENARIO_DEPTH = 64
+_MAX_SCENARIO_NODES = 100_000
 
 _ROOT_KEYS = frozenset({"name", "variables", "steps"})
 _STEP_KEYS = frozenset(
@@ -60,8 +66,15 @@ class ScenarioLoader:
 
     def _read(self, path: Path) -> dict[str, Any]:
         try:
-            data = tomllib.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+            data = tomllib.loads(read_regular_text(path, max_bytes=MAX_SCENARIO_BYTES))
+            _validate_structure_budget(data)
+        except (
+            OSError,
+            UnicodeDecodeError,
+            tomllib.TOMLDecodeError,
+            ValueError,
+            RecursionError,
+        ) as error:
             location = _TOML_LOCATION_RE.search(str(error))
             detail = "TOML 场景文件无法解析"
             if location is not None:
@@ -243,6 +256,22 @@ class ScenarioLoader:
             f"发生了什么：{what}。在哪里：{where}。"
             "怎么处理：检查 TOML 键、类型和静态 {{identifier}} 占位符后重试。"
         )
+
+
+def _validate_structure_budget(root: object) -> None:
+    stack: list[tuple[object, int]] = [(root, 0)]
+    nodes = 0
+    while stack:
+        value, depth = stack.pop()
+        nodes += 1
+        if nodes > _MAX_SCENARIO_NODES or depth > _MAX_SCENARIO_DEPTH:
+            raise ValueError("TOML structure exceeds the safe budget")
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError("TOML values must be finite")
+        if isinstance(value, Mapping):
+            stack.extend((item, depth + 1) for item in value.values())
+        elif isinstance(value, list):
+            stack.extend((item, depth + 1) for item in value)
 
 
 __all__ = ["ScenarioLoader"]

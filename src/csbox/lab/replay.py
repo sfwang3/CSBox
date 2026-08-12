@@ -5,15 +5,19 @@ import binascii
 import hashlib
 import json
 import math
-import os
-import tempfile
+from bisect import bisect_right
 from collections.abc import Callable, Mapping
-from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Final
 
 from csbox.core.events import TerminalEvent, TerminalEventType, TerminalSize
+from csbox.core.safe_paths import (
+    atomic_write_bytes,
+    ensure_private_directory,
+    open_regular_binary,
+    read_regular_text,
+)
 from csbox.lab.recorder import AsciicastV3Reader, CastEvent, CastReadResult
 from csbox.lab.screen import (
     TerminalAttributes,
@@ -28,6 +32,7 @@ from csbox.lab.screen import (
 CHECKPOINT_VERSION: Final = 2
 CHECKPOINT_SECONDS: Final = 5.0
 CHECKPOINT_EVENTS: Final = 500
+MAX_CHECKPOINT_DOCUMENT_BYTES: Final = 32 * 1024 * 1024
 
 EmulatorFactory = Callable[..., TerminalEmulator]
 
@@ -62,7 +67,9 @@ class CheckpointStore:
         source = Path(cast_path)
         self._ensure_distinct_from_cast(source)
         try:
-            value = json.loads(self.path.read_text(encoding="utf-8"))
+            value = json.loads(
+                read_regular_text(self.path, max_bytes=MAX_CHECKPOINT_DOCUMENT_BYTES)
+            )
             if not isinstance(value, Mapping) or value.get("version") != CHECKPOINT_VERSION:
                 return None
             if value.get("cast") != _cast_fingerprint(source):
@@ -80,7 +87,14 @@ class CheckpointStore:
             if not checkpoints:
                 return None
             return checkpoints
-        except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+        except (
+            OSError,
+            UnicodeError,
+            json.JSONDecodeError,
+            TypeError,
+            ValueError,
+            RecursionError,
+        ):
             return None
 
     def save(self, cast_path: Path | str, checkpoints: tuple[Checkpoint, ...]) -> None:
@@ -88,19 +102,14 @@ class CheckpointStore:
             raise ValueError("at least one checkpoint is required")
         source = Path(cast_path)
         self._ensure_distinct_from_cast(source)
-        serialized_checkpoints = [_checkpoint_to_json(checkpoint) for checkpoint in checkpoints]
-        document = {
-            "version": CHECKPOINT_VERSION,
-            "cast": _cast_fingerprint(source),
-            "checkpoints": serialized_checkpoints,
-            "checksum": _checkpoint_checksum(serialized_checkpoints),
-        }
-        payload = (json.dumps(document, ensure_ascii=False, indent=2) + "\n").encode()
+        payload = _bounded_checkpoint_payload(_cast_fingerprint(source), checkpoints)
+        if payload is None:
+            return
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
+            ensure_private_directory(self.path.parent)
             _atomic_write(self.path, payload)
-        except OSError as exc:
-            raise CheckpointStoreError(f"could not persist replay checkpoints: {exc}") from exc
+        except (OSError, ValueError) as exc:
+            raise CheckpointStoreError("could not persist replay checkpoints") from exc
 
     def _ensure_distinct_from_cast(self, cast_path: Path) -> None:
         try:
@@ -141,6 +150,9 @@ class ReplayService:
             self.checkpoint_store.save(self.cast_path, checkpoints)
         assert checkpoints is not None
         self.checkpoints = checkpoints
+        self._checkpoint_keys = tuple(
+            (checkpoint.relative_time, checkpoint.event_index) for checkpoint in checkpoints
+        )
 
     def seek(self, relative_time: float) -> TerminalSnapshot:
         if isinstance(relative_time, bool) or not isinstance(relative_time, int | float):
@@ -148,19 +160,21 @@ class ReplayService:
         if not math.isfinite(relative_time):
             raise ValueError("relative_time must be finite")
         target = min(max(0.0, float(relative_time)), self.duration)
-        checkpoint = max(
-            (item for item in self.checkpoints if item.relative_time <= target),
-            key=lambda item: (item.relative_time, item.event_index),
+        checkpoint_index = (
+            bisect_right(
+                self._checkpoint_keys,
+                (target, len(self._events) + 1),
+            )
+            - 1
         )
+        checkpoint = self.checkpoints[checkpoint_index]
         emulator = self._emulator_factory(
             columns=checkpoint.snapshot.columns,
             rows=checkpoint.snapshot.rows,
         )
         emulator.restore(checkpoint.snapshot)
-        for event_index, replay_event in enumerate(
-            self._events[checkpoint.event_index :],
-            start=checkpoint.event_index,
-        ):
+        for event_index in range(checkpoint.event_index, len(self._events)):
+            replay_event = self._events[event_index]
             if replay_event.relative_time > target:
                 break
             event = _terminal_event(event_index, replay_event)
@@ -306,8 +320,13 @@ def _checkpoints_match(
 
 
 def _cast_fingerprint(path: Path) -> dict[str, int | str]:
-    data = path.read_bytes()
-    return {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+    digest = hashlib.sha256()
+    size = 0
+    with open_regular_binary(path) as stream:
+        while chunk := stream.read(1024 * 1024):
+            size += len(chunk)
+            digest.update(chunk)
+    return {"size": size, "sha256": digest.hexdigest()}
 
 
 def _checkpoint_checksum(checkpoints: list[object]) -> str:
@@ -318,6 +337,51 @@ def _checkpoint_checksum(checkpoints: list[object]) -> str:
         separators=(",", ":"),
     ).encode()
     return hashlib.sha256(canonical).hexdigest()
+
+
+def _bounded_checkpoint_payload(
+    cast_fingerprint: Mapping[str, int | str],
+    checkpoints: tuple[Checkpoint, ...],
+) -> bytes | None:
+    largest = max(
+        checkpoints,
+        key=lambda checkpoint: checkpoint.snapshot.rows * checkpoint.snapshot.columns,
+    )
+    representative_size = len(
+        json.dumps(_checkpoint_to_json(largest), ensure_ascii=False, indent=2).encode("utf-8")
+    )
+    available = max(1, MAX_CHECKPOINT_DOCUMENT_BYTES - 4096)
+    maximum_count = max(1, min(len(checkpoints), available // max(1, representative_size)))
+
+    while True:
+        selected = _sample_checkpoints(checkpoints, maximum_count)
+        serialized = [_checkpoint_to_json(checkpoint) for checkpoint in selected]
+        document = {
+            "version": CHECKPOINT_VERSION,
+            "cast": dict(cast_fingerprint),
+            "checkpoints": serialized,
+            "checksum": _checkpoint_checksum(serialized),
+        }
+        payload = (json.dumps(document, ensure_ascii=False, indent=2) + "\n").encode()
+        if len(payload) <= MAX_CHECKPOINT_DOCUMENT_BYTES:
+            return payload
+        if maximum_count == 1:
+            return None
+        maximum_count = max(1, maximum_count // 2)
+
+
+def _sample_checkpoints(
+    checkpoints: tuple[Checkpoint, ...], maximum_count: int
+) -> tuple[Checkpoint, ...]:
+    if maximum_count >= len(checkpoints):
+        return checkpoints
+    if maximum_count <= 1:
+        return (checkpoints[0],)
+    last_index = len(checkpoints) - 1
+    indices = tuple(
+        (sample_index * last_index) // (maximum_count - 1) for sample_index in range(maximum_count)
+    )
+    return tuple(checkpoints[index] for index in indices)
 
 
 def _checkpoint_to_json(checkpoint: Checkpoint) -> dict[str, Any]:
@@ -679,33 +743,4 @@ def _cell_from_json(value: object) -> TerminalCell:
 
 
 def _atomic_write(path: Path, data: bytes) -> None:
-    descriptor, temporary_name = tempfile.mkstemp(
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-    )
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-        _fsync_directory(path.parent)
-    except BaseException:
-        with suppress(OSError):
-            temporary.unlink(missing_ok=True)
-        raise
-
-
-def _fsync_directory(directory: Path) -> None:
-    try:
-        descriptor = os.open(directory, os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        os.fsync(descriptor)
-    except OSError:
-        pass
-    finally:
-        os.close(descriptor)
+    atomic_write_bytes(path, data)

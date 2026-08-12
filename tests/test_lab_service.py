@@ -85,6 +85,13 @@ class TerminalState:
         self.restored = True
 
 
+def write_empty_cast(paths: SessionPaths) -> None:
+    paths.cast.write_text(
+        '{"version":3,"term":{"cols":80,"rows":24,"type":"xterm-256color"}}\n',
+        encoding="utf-8",
+    )
+
+
 def make_service(tmp_path: Path, backend: ScriptedBackend, input_chunks: list[bytes | None]):
     repository = SessionRepository(tmp_path / "sessions")
     output = MemoryOutput()
@@ -165,6 +172,7 @@ def test_session_repository_resolves_exact_and_unique_prefixes(tmp_path: Path) -
         size=TerminalSize(80, 24),
         cwd=tmp_path,
     )
+    write_empty_cast(first)
     repository.finish(first, "completed", exit_code=0)
 
     assert repository.resolve(first.root.name).root == first.root
@@ -184,6 +192,7 @@ def test_session_repository_prefers_exact_id_over_a_longer_prefix(tmp_path: Path
             cwd=tmp_path,
             session_id=identifier,
         )
+        write_empty_cast(paths)
         repository.finish(paths, "completed", exit_code=0)
 
     assert repository.resolve("abc").root.name == "abc"
@@ -200,6 +209,7 @@ def test_session_repository_skips_corrupt_metadata_when_listing(tmp_path: Path) 
         cwd=tmp_path,
         session_id="valid",
     )
+    write_empty_cast(valid)
     repository.finish(valid, "completed", exit_code=0)
     corrupt = repository.root / "corrupt"
     corrupt.mkdir()
@@ -212,7 +222,7 @@ def test_session_repository_skips_corrupt_metadata_when_listing(tmp_path: Path) 
 
 def test_session_repository_generates_timestamped_name_for_blank_input(tmp_path: Path) -> None:
     repository = SessionRepository(tmp_path / "sessions")
-    repository.create_running(
+    paths = repository.create_running(
         "",
         platform="linux",
         shell="bash",
@@ -220,5 +230,6 @@ def test_session_repository_generates_timestamped_name_for_blank_input(tmp_path:
         size=TerminalSize(80, 24),
         cwd=tmp_path,
     )
+    write_empty_cast(paths)
 
     assert repository.list_sessions()[0].metadata.experiment_name.startswith("实验-")

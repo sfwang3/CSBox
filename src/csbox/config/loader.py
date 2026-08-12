@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 import tomllib
 from collections.abc import Mapping
 from pathlib import Path
@@ -12,6 +10,9 @@ from pydantic import ValidationError
 
 from csbox.config.models import CSBoxConfig
 from csbox.config.paths import ConfigPaths
+from csbox.core.safe_paths import atomic_write_text, ensure_private_directory, read_regular_text
+
+_MAX_CONFIG_BYTES = 1024 * 1024
 
 
 class ConfigurationError(Exception):
@@ -49,9 +50,15 @@ def _read_toml(path: Path) -> dict[str, Any]:
     if not path.is_file():
         return {}
     try:
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
-        raise ConfigurationError(path, str(error)) from error
+        data = tomllib.loads(read_regular_text(path, max_bytes=_MAX_CONFIG_BYTES))
+    except (
+        OSError,
+        UnicodeDecodeError,
+        tomllib.TOMLDecodeError,
+        ValueError,
+        RecursionError,
+    ) as error:
+        raise ConfigurationError(path, "文件无法安全读取或解析；请检查 TOML 后重试") from error
     _validate(data, path)
     return data
 
@@ -110,24 +117,9 @@ def _serialize_config(config: CSBoxConfig) -> str:
 def save_project_config(config: CSBoxConfig, cwd: Path) -> Path:
     """Atomically persist the known configuration schema in the project directory."""
     destination = Path(cwd) / ".csbox" / "config.toml"
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path: Path | None = None
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=destination.parent,
-            prefix=".config-",
-            suffix=".tmp",
-            delete=False,
-        ) as temporary_file:
-            temporary_path = Path(temporary_file.name)
-            temporary_file.write(_serialize_config(config))
-            temporary_file.flush()
-            os.fsync(temporary_file.fileno())
-        os.replace(temporary_path, destination)
-    except OSError as error:
-        if temporary_path is not None:
-            temporary_path.unlink(missing_ok=True)
-        raise ConfigurationError(destination, str(error)) from error
+        ensure_private_directory(destination.parent)
+        atomic_write_text(destination, _serialize_config(config))
+    except (OSError, ValueError) as error:
+        raise ConfigurationError(destination, "配置无法安全保存") from error
     return destination

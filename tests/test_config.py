@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
 
+import csbox.config.loader as loader_module
 from csbox.config import (
     ApiConfig,
     ConfigPaths,
@@ -96,6 +96,17 @@ def test_load_config_wraps_bad_toml_with_chinese_error(tmp_path: Path) -> None:
     assert "配置错误" in str(error.value)
 
 
+def test_load_config_maps_deep_toml_recursion_to_a_safe_error(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    paths.user.write_text("x = " + ("[" * 10_000) + ("0" + "]" * 10_000), encoding="utf-8")
+
+    with pytest.raises(ConfigurationError) as error:
+        load_config(tmp_path, paths=paths)
+
+    assert error.value.path == paths.user
+    assert "安全读取或解析" in str(error.value)
+
+
 def test_load_config_wraps_invalid_utf8_with_chinese_error(tmp_path: Path) -> None:
     paths = _paths(tmp_path)
     paths.user.write_bytes(b"[lab]\nshell = \xff\n")
@@ -105,6 +116,41 @@ def test_load_config_wraps_invalid_utf8_with_chinese_error(tmp_path: Path) -> No
 
     assert error.value.path == paths.user
     assert "配置错误" in str(error.value)
+
+
+def test_load_config_reads_toml_through_a_bounded_regular_file_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _paths(tmp_path)
+    paths.user.write_text('[lab]\nshell = "bash"\n', encoding="utf-8")
+    observed: list[tuple[Path, int]] = []
+    from csbox.core.safe_paths import read_regular_text as real_read_regular_text
+
+    def observed_read(path: Path, *, max_bytes: int, encoding: str = "utf-8") -> str:
+        observed.append((Path(path), max_bytes))
+        return real_read_regular_text(path, max_bytes=max_bytes, encoding=encoding)
+
+    monkeypatch.setattr(loader_module, "read_regular_text", observed_read, raising=False)
+
+    assert load_config(tmp_path, paths=paths).lab.shell == "bash"
+    assert observed == [(paths.user, observed[0][1])]
+    assert observed[0][1] > 0
+
+
+def test_save_project_config_refuses_a_symlinked_private_parent(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    linked = tmp_path / ".csbox"
+    try:
+        linked.symlink_to(outside, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"symlinks are unavailable: {error}")
+
+    with pytest.raises(ConfigurationError, match="配置错误"):
+        save_project_config(CSBoxConfig(), tmp_path)
+
+    assert list(outside.iterdir()) == []
 
 
 @pytest.mark.parametrize(
@@ -168,22 +214,21 @@ def test_config_paths_do_not_call_home_when_home_is_injected(
     assert paths.user == tmp_path / "home/.config/csbox/config.toml"
 
 
-def test_save_project_config_replaces_same_directory_temporary_file(
+def test_save_project_config_uses_the_shared_atomic_writer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    calls: list[tuple[Path, Path]] = []
-    real_replace = os.replace
+    calls: list[Path] = []
+    real_write = loader.atomic_write_text
 
-    def replace(source: str | Path, destination: str | Path) -> None:
-        calls.append((Path(source), Path(destination)))
-        real_replace(source, destination)
+    def write(destination: Path, text: str) -> None:
+        calls.append(Path(destination))
+        real_write(destination, text)
 
-    monkeypatch.setattr(loader.os, "replace", replace)
+    monkeypatch.setattr(loader, "atomic_write_text", write)
     config_path = save_project_config(CSBoxConfig(lab=LabConfig(shell="bash")), tmp_path)
 
     assert config_path == tmp_path / ".csbox/config.toml"
-    assert calls == [(calls[0][0], config_path)]
-    assert calls[0][0].parent == config_path.parent
+    assert calls == [config_path]
     loaded_config = load_config(
         tmp_path, paths=ConfigPaths(user=tmp_path / "user.toml", project=config_path)
     )

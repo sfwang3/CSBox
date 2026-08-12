@@ -3,6 +3,9 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from csbox.api.models import ApiRequest, ApiRun, ApiScenario, ApiStep
+from csbox.api.repository import ApiRunRepository
+from csbox.check.models import CheckReport
 from csbox.core.events import TerminalEvent, TerminalEventType, TerminalSize
 from csbox.core.models import EnvironmentSnapshot
 from csbox.lab.captures import CaptureStore
@@ -38,6 +41,10 @@ def test_real_home_uses_recent_session_and_capture_count(tmp_path: Path) -> None
         cwd=tmp_path / "课程实验",
         started_at=datetime.now(UTC) - timedelta(minutes=2),
     )
+    paths.cast.write_text(
+        '{"version":3,"term":{"cols":80,"rows":24,"type":"xterm-256color"}}\n',
+        encoding="utf-8",
+    )
     emulator = TerminalEmulator(columns=8, rows=2)
     emulator.apply(
         TerminalEvent(
@@ -72,3 +79,38 @@ def test_real_home_has_localized_empty_state_without_demo_data(tmp_path: Path) -
 
     assert snapshot.recent_experiments == []
     assert snapshot.project_dir == tmp_path
+
+
+def test_real_home_includes_real_api_run_and_check_status(tmp_path: Path) -> None:
+    api_repository = ApiRunRepository.from_cwd(tmp_path)
+    api_repository.save(
+        ApiRun(
+            id="20260811T080000-api123456789",
+            scenario=ApiScenario(
+                name="中文接口场景",
+                source="scenarios/中文.toml",
+                steps=(
+                    ApiStep(
+                        name="查询",
+                        request=ApiRequest(method="GET", url="https://example.test/profile"),
+                    ),
+                ),
+            ),
+            started_at=datetime.now(UTC),
+        )
+    )
+
+    class CheckStub:
+        def run(self, root: Path) -> CheckReport:
+            return CheckReport(root=root)
+
+    snapshot = RealHomeDataSource(
+        SessionRepository(tmp_path / ".csbox/sessions"),
+        tmp_path,
+        api_repository=api_repository,
+        check_service=CheckStub(),  # type: ignore[arg-type]
+    ).get_home_snapshot(environment())
+
+    assert snapshot.recent_api_runs[0].scenario_name == "中文接口场景"
+    assert snapshot.recent_api_runs[0].status == "PASS"
+    assert snapshot.check_status == "PASS"

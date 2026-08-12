@@ -26,3 +26,7 @@ Windows PowerShell 5.1 与 PowerShell 7 的 native smoke 都直接创建 `Window
 `TerminalProxy` 用 `FileInputAdapter`/`FileOutputAdapter` 隔离 stdin/stdout；Unix raw termios 和 Windows console mode 都在 context exit 时恢复。Unix 安装并恢复 `SIGWINCH`，Windows 不假定有该信号。实验态不启动 full-screen Textual，避免破坏用户自己的 terminal workflow。
 
 Capture 默认键是 `F12`，配置键是 `Ctrl-Space`。VS Code、Windows Terminal 或其他宿主可能抢占 F12；`CaptureBindingProbe` 只给 advisory，不改宿主、Windows Terminal、Bash 或 PSReadLine 设置。无法实时捕获时，可在 Review 中补 Capture。
+
+## 安装态说明
+
+安装 wheel 或通过 `uv tool install` 使用时，Lab 仍调用当前平台的 Shell 和 PTY backend。CSBox 不把字体文件放进 distribution；PNG renderer 使用系统等宽字体与 CJK fallback。安装后如果系统没有可用中文字体，renderer 会返回明确错误，需要安装字体或在项目配置中指定字体路径。

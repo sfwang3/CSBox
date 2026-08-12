@@ -1,19 +1,25 @@
 from __future__ import annotations
 
 import json
-import os
 import platform as platform_module
-import tempfile
 import uuid
-from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 from csbox import __version__
 from csbox.core.events import TerminalSize
+from csbox.core.safe_paths import (
+    atomic_write_bytes,
+    ensure_private_directory,
+    mkdir_exclusive,
+    read_regular_text,
+)
 from csbox.lab.captures import CaptureStore
 from csbox.lab.models import SessionMetadata, SessionPaths
+from csbox.lab.recorder import AsciicastV3Reader, RecorderError
+
+_MAX_SESSION_METADATA_BYTES = 4 * 1024 * 1024
 
 
 class SessionRepositoryError(RuntimeError):
@@ -59,7 +65,8 @@ class SessionRepository:
         ):
             raise ValueError("session id must be a single safe path component")
         paths = SessionPaths(self.root / identifier)
-        paths.root.mkdir(parents=True, exist_ok=False)
+        ensure_private_directory(self.root)
+        mkdir_exclusive(paths.root)
         metadata = SessionMetadata(
             id=identifier,
             name=experiment_name,
@@ -113,6 +120,12 @@ class SessionRepository:
                 metadata = self._read_metadata(paths)
             except (OSError, UnicodeError, ValueError, SessionRepositoryError):
                 continue
+            if paths.cast.is_symlink() or not paths.cast.is_file():
+                continue
+            try:
+                AsciicastV3Reader(paths.cast).read_header()
+            except (OSError, UnicodeError, RecorderError):
+                continue
             captures = CaptureStore(paths.captures).load()
             summaries.append(
                 SessionSummary(paths=paths, metadata=metadata, capture_count=len(captures.captures))
@@ -145,10 +158,18 @@ class SessionRepository:
         return matches[0]
 
     def _read_metadata(self, paths: SessionPaths) -> SessionMetadata:
-        try:
-            return SessionMetadata.model_validate_json(paths.metadata.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, ValueError) as exc:
-            raise SessionRepositoryError(f"会话 metadata 无效：{paths.metadata}") from exc
+        return load_session_metadata(paths)
+
+
+def load_session_metadata(paths: SessionPaths) -> SessionMetadata:
+    """Load bounded session metadata through the Lab repository boundary."""
+
+    try:
+        return SessionMetadata.model_validate_json(
+            read_regular_text(paths.metadata, max_bytes=_MAX_SESSION_METADATA_BYTES)
+        )
+    except (OSError, UnicodeError, ValueError, RecursionError) as exc:
+        raise SessionRepositoryError("会话 metadata 无效。") from exc
 
 
 def default_experiment_name(now: datetime | None = None) -> str:
@@ -158,20 +179,4 @@ def default_experiment_name(now: datetime | None = None) -> str:
 
 def _atomic_write_json(path: Path, value: object) -> None:
     payload = (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-    )
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    except BaseException:
-        with suppress(OSError):
-            temporary.unlink(missing_ok=True)
-        raise
+    atomic_write_bytes(path, payload)

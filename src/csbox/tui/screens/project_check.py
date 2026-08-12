@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.events import Resize
 from textual.screen import Screen
 
-from csbox.check.models import CheckFinding, CheckReport, CheckStatus
+from csbox.check.models import CheckFinding, CheckReport, CheckStatus, DetectedProject
 from csbox.core.display_width import truncate_cells
+from csbox.core.safe_paths import safe_relative_path
+from csbox.core.text_layout import wrap_cells
 from csbox.locales import Translator
 from csbox.tui.widgets.project_check import CheckFindings, CheckFooter, CheckSummary
 
@@ -48,12 +52,13 @@ class ProjectCheckScreen(Screen[None]):
 
     def _refresh(self) -> None:
         self.query_one("#check-summary", CheckSummary).update(self._summary())
-        findings = self._findings(self.report.findings)
-        self.query_one("#check-findings", CheckFindings).update(findings)
+        report_findings = (*self.report.findings, *self._deep_findings())
+        findings_panel = self.query_one("#check-findings", CheckFindings)
+        narrow_panel = self.query_one("#check-narrow", CheckFindings)
+        findings_panel.update(self._findings(report_findings, self._content_width(findings_panel)))
         projects = [f"PROJECTS ({len(self.report.projects)})"]
         projects.extend(
-            f"{project.kind}: {truncate_cells(str(project.root), 48, ellipsis='…')}"
-            for project in self.report.projects
+            _project_label(self.report.root, project) for project in self.report.projects
         )
         if self.report.builds:
             projects.append("BUILDS")
@@ -61,44 +66,68 @@ class ProjectCheckScreen(Screen[None]):
                 f"{build.adapter_id}: {build.status.value}  {build.message}"
                 for build in self.report.builds
             )
-        self.query_one("#check-projects", CheckFindings).update("\n".join(projects))
-        self.query_one("#check-narrow", CheckFindings).update(findings)
+        projects_panel = self.query_one("#check-projects", CheckFindings)
+        project_lines = [
+            line
+            for project in projects
+            for line in wrap_cells(project, self._content_width(projects_panel))
+        ]
+        projects_panel.update("\n".join(project_lines))
+        narrow_panel.update(self._findings(report_findings, self._content_width(narrow_panel)))
         self.query_one("#check-footer", CheckFooter).update(
-            truncate_cells("Q/Esc 返回", max(1, self.size.width - 2), ellipsis="…")
+            truncate_cells(
+                "Q/Esc 返回",
+                self._content_width(self.query_one("#check-footer", CheckFooter)),
+                ellipsis="…",
+            )
         )
+
+    def _deep_findings(self) -> tuple[CheckFinding, ...]:
+        return () if self.report.deep_scan is None else (self.report.deep_scan,)
 
     def _summary(self) -> str:
         root = truncate_cells(
-            str(self.report.root),
+            ".",
             max(1, self.size.width - 18),
             ellipsis="…",
         )
         return (
             f"CHECK  //  {root}\n"
             f"STATUS: {self.report.status.value}    "
-            f"FINDINGS: {len(self.report.findings)}    PROJECTS: {len(self.report.projects)}"
+            f"FINDINGS: {len(self.report.findings) + len(self._deep_findings())}    "
+            f"PROJECTS: {len(self.report.projects)}"
         )
 
-    def _findings(self, findings: tuple[CheckFinding, ...]) -> str:
+    def _findings(self, findings: tuple[CheckFinding, ...], width: int) -> str:
         lines = ["FINDINGS"]
         for finding in findings:
             location = ""
             if finding.path is not None:
-                location = truncate_cells(str(finding.path), 36, ellipsis="…")
+                location = truncate_cells(
+                    _relative_location(self.report.root, finding.path),
+                    max(8, min(36, width // 2)),
+                    ellipsis="…",
+                )
             if finding.line is not None:
                 location += f":{finding.line}"
             category = f" [{finding.category}]" if finding.category else ""
             if (
-                finding.category in {"env", "private-key", "hard-coded-secret"}
+                finding.category in {"env", "private-key", "hard-coded-secret", "deep-secret-scan"}
                 and finding.status is CheckStatus.FAIL
             ):
                 lines.append(f"{_status_symbol(finding.status)} {location} {finding.category}")
                 continue
-            lines.append(
-                f"{_status_symbol(finding.status)} {finding.status.value} "
-                f"{finding.rule_id}{category} {location} {finding.message}"
+            lines.extend(
+                wrap_cells(
+                    f"{_status_symbol(finding.status)} {finding.status.value} "
+                    f"{finding.rule_id}{category} {location} {finding.message}",
+                    width,
+                )
             )
         return "\n".join(lines)
+
+    def _content_width(self, widget: CheckFindings | CheckFooter) -> int:
+        return max(2, widget.content_region.width or self.size.width - 6)
 
     def action_go_back(self) -> None:
         if getattr(self.app, "owns_check_screen", False):
@@ -117,6 +146,27 @@ def _status_symbol(status: CheckStatus) -> str:
         CheckStatus.FAIL: "[FAIL]",
         CheckStatus.SKIP: "[SKIP]",
     }[status]
+
+
+def _relative_location(root: Path, value: Path | str) -> str:
+    path = Path(value)
+    resolved_root = Path(root).resolve(strict=False)
+    if path.is_absolute():
+        try:
+            relative = path.resolve(strict=False).relative_to(resolved_root)
+        except ValueError:
+            return "<outside-project>"
+    else:
+        try:
+            relative = Path(safe_relative_path(path.as_posix()))
+        except ValueError:
+            return "<outside-project>"
+    return relative.as_posix() or "."
+
+
+def _project_label(root: Path, project: DetectedProject) -> str:
+    location = truncate_cells(_relative_location(root, project.root), 48, ellipsis="…")
+    return f"{project.kind}: {location}"
 
 
 __all__ = ["CheckScreen", "ProjectCheckScreen"]

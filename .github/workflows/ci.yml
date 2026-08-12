@@ -20,7 +20,7 @@ jobs:
         python-version: ["3.11", "3.14"]
     steps:
       - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install uv and Python
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
@@ -31,8 +31,249 @@ jobs:
       - name: Sync locked environment
         run: uv sync --locked
 
+      - name: Build distribution artifacts (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: uv build --clear --out-dir "$RUNNER_TEMP/csbox-dist"
+
+      - name: Build distribution artifacts (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: uv build --clear --out-dir "$env:RUNNER_TEMP/csbox-dist"
+
+      - name: Wheel install smoke outside repository (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          wheel=$(find "$RUNNER_TEMP/csbox-dist" -maxdepth 1 -name '*.whl' -print -quit)
+          venv="$RUNNER_TEMP/csbox-wheel-venv"
+          uv venv "$venv"
+          python_bin="$venv/bin/python"
+          csbox_bin="$venv/bin/csbox"
+          uv pip install --python "$python_bin" "$wheel"
+          outside="$RUNNER_TEMP/csbox-outside/中文项目"
+          smoke_root="$RUNNER_TEMP/csbox-wheel-smoke-config"
+          mkdir -p "$outside"
+          mkdir -p "$smoke_root"
+          (
+            cd "$outside"
+            env -u PYTHONPATH -u VIRTUAL_ENV -u CSBOX_HOME \
+              HOME="$smoke_root/home" USERPROFILE="$smoke_root/userprofile" \
+              APPDATA="$smoke_root/appdata" XDG_CONFIG_HOME="$smoke_root/xdg-config" \
+              PYTHONNOUSERSITE=1 "$csbox_bin" --version
+            env -u PYTHONPATH -u VIRTUAL_ENV -u CSBOX_HOME \
+              HOME="$smoke_root/home" USERPROFILE="$smoke_root/userprofile" \
+              APPDATA="$smoke_root/appdata" XDG_CONFIG_HOME="$smoke_root/xdg-config" \
+              PYTHONNOUSERSITE=1 "$csbox_bin" --help
+            env -u PYTHONPATH -u VIRTUAL_ENV -u CSBOX_HOME \
+              HOME="$smoke_root/home" USERPROFILE="$smoke_root/userprofile" \
+              APPDATA="$smoke_root/appdata" XDG_CONFIG_HOME="$smoke_root/xdg-config" \
+              PYTHONNOUSERSITE=1 "$csbox_bin" doctor
+            env -u PYTHONPATH -u VIRTUAL_ENV -u CSBOX_HOME \
+              HOME="$smoke_root/home" USERPROFILE="$smoke_root/userprofile" \
+              APPDATA="$smoke_root/appdata" XDG_CONFIG_HOME="$smoke_root/xdg-config" \
+              PYTHONNOUSERSITE=1 "$csbox_bin" lab --help
+            env -u PYTHONPATH -u VIRTUAL_ENV -u CSBOX_HOME \
+              HOME="$smoke_root/home" USERPROFILE="$smoke_root/userprofile" \
+              APPDATA="$smoke_root/appdata" XDG_CONFIG_HOME="$smoke_root/xdg-config" \
+              PYTHONNOUSERSITE=1 "$csbox_bin" api --help
+            env -u PYTHONPATH -u VIRTUAL_ENV -u CSBOX_HOME \
+              HOME="$smoke_root/home" USERPROFILE="$smoke_root/userprofile" \
+              APPDATA="$smoke_root/appdata" XDG_CONFIG_HOME="$smoke_root/xdg-config" \
+              PYTHONNOUSERSITE=1 "$csbox_bin" check --help
+            env -u PYTHONPATH -u VIRTUAL_ENV -u CSBOX_HOME \
+              HOME="$smoke_root/home" USERPROFILE="$smoke_root/userprofile" \
+              APPDATA="$smoke_root/appdata" XDG_CONFIG_HOME="$smoke_root/xdg-config" \
+              PYTHONNOUSERSITE=1 "$csbox_bin" pack --help
+          )
+
+      - name: Wheel install smoke outside repository (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $wheel = (Get-ChildItem "$env:RUNNER_TEMP/csbox-dist" -Filter '*.whl' | Select-Object -First 1).FullName
+          $venv = Join-Path $env:RUNNER_TEMP 'csbox-wheel-venv'
+          uv venv $venv
+          $python = Join-Path $venv 'Scripts/python.exe'
+          $csbox = Join-Path $venv 'Scripts/csbox.exe'
+          uv pip install --python $python $wheel
+          $outside = Join-Path $env:RUNNER_TEMP 'csbox-outside/中文项目'
+          $smokeRoot = Join-Path $env:RUNNER_TEMP 'csbox-wheel-smoke-config'
+          New-Item -ItemType Directory -Force $outside | Out-Null
+          New-Item -ItemType Directory -Force $smokeRoot | Out-Null
+          Push-Location $outside
+          try {
+            Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+            Remove-Item Env:VIRTUAL_ENV -ErrorAction SilentlyContinue
+            Remove-Item Env:CSBOX_HOME -ErrorAction SilentlyContinue
+            $env:HOME = Join-Path $smokeRoot 'home'
+            $env:USERPROFILE = Join-Path $smokeRoot 'userprofile'
+            $env:APPDATA = Join-Path $smokeRoot 'appdata'
+            $env:XDG_CONFIG_HOME = Join-Path $smokeRoot 'xdg-config'
+            $env:PYTHONNOUSERSITE = '1'
+            & $csbox --version
+            & $csbox --help
+            & $csbox doctor
+            & $csbox lab --help
+            & $csbox api --help
+            & $csbox check --help
+            & $csbox pack --help
+          } finally {
+            Pop-Location
+          }
+
+      - name: uv tool install smoke outside repository (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          wheel=$(find "$RUNNER_TEMP/csbox-dist" -maxdepth 1 -name '*.whl' -print -quit)
+          export UV_TOOL_DIR="$RUNNER_TEMP/csbox-tool-env"
+          export UV_TOOL_BIN_DIR="$RUNNER_TEMP/csbox-tool-bin"
+          uv tool install --force "$wheel"
+          csbox_bin="$UV_TOOL_BIN_DIR/csbox"
+          outside="$RUNNER_TEMP/csbox-tool-outside/中文项目"
+          smoke_root="$RUNNER_TEMP/csbox-tool-smoke-config"
+          mkdir -p "$outside"
+          mkdir -p "$smoke_root"
+          (
+            cd "$outside"
+            env -u PYTHONPATH -u VIRTUAL_ENV -u CSBOX_HOME \
+              HOME="$smoke_root/home" USERPROFILE="$smoke_root/userprofile" \
+              APPDATA="$smoke_root/appdata" XDG_CONFIG_HOME="$smoke_root/xdg-config" \
+              PYTHONNOUSERSITE=1 "$csbox_bin" --version
+            env -u PYTHONPATH -u VIRTUAL_ENV -u CSBOX_HOME \
+              HOME="$smoke_root/home" USERPROFILE="$smoke_root/userprofile" \
+              APPDATA="$smoke_root/appdata" XDG_CONFIG_HOME="$smoke_root/xdg-config" \
+              PYTHONNOUSERSITE=1 "$csbox_bin" --help
+          )
+
+      - name: uv tool install smoke outside repository (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $wheel = (Get-ChildItem "$env:RUNNER_TEMP/csbox-dist" -Filter '*.whl' | Select-Object -First 1).FullName
+          $env:UV_TOOL_DIR = Join-Path $env:RUNNER_TEMP 'csbox-tool-env'
+          $env:UV_TOOL_BIN_DIR = Join-Path $env:RUNNER_TEMP 'csbox-tool-bin'
+          uv tool install --force $wheel
+          $csbox = Join-Path $env:UV_TOOL_BIN_DIR 'csbox.exe'
+          $outside = Join-Path $env:RUNNER_TEMP 'csbox-tool-outside/中文项目'
+          $smokeRoot = Join-Path $env:RUNNER_TEMP 'csbox-tool-smoke-config'
+          New-Item -ItemType Directory -Force $outside | Out-Null
+          New-Item -ItemType Directory -Force $smokeRoot | Out-Null
+          Push-Location $outside
+          try {
+            Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+            Remove-Item Env:VIRTUAL_ENV -ErrorAction SilentlyContinue
+            Remove-Item Env:CSBOX_HOME -ErrorAction SilentlyContinue
+            $env:HOME = Join-Path $smokeRoot 'home'
+            $env:USERPROFILE = Join-Path $smokeRoot 'userprofile'
+            $env:APPDATA = Join-Path $smokeRoot 'appdata'
+            $env:XDG_CONFIG_HOME = Join-Path $smokeRoot 'xdg-config'
+            $env:PYTHONNOUSERSITE = '1'
+            & $csbox --version
+            & $csbox --help
+          } finally {
+            Pop-Location
+          }
+
+      - name: Optional pipx install smoke (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v pipx >/dev/null 2>&1; then
+            echo "CI limitation: pipx is unavailable; optional pipx smoke was not run."
+            exit 0
+          fi
+          wheel=$(find "$RUNNER_TEMP/csbox-dist" -maxdepth 1 -name '*.whl' -print -quit)
+          export PIPX_HOME="$RUNNER_TEMP/csbox-pipx-home"
+          export PIPX_BIN_DIR="$RUNNER_TEMP/csbox-pipx-bin"
+          pipx install --force "$wheel"
+          outside="$RUNNER_TEMP/csbox-pipx-outside/中文项目"
+          smoke_root="$RUNNER_TEMP/csbox-pipx-smoke-config"
+          mkdir -p "$outside"
+          mkdir -p "$smoke_root"
+          (
+            cd "$outside"
+            env -u PYTHONPATH -u VIRTUAL_ENV -u CSBOX_HOME \
+              HOME="$smoke_root/home" USERPROFILE="$smoke_root/userprofile" \
+              APPDATA="$smoke_root/appdata" XDG_CONFIG_HOME="$smoke_root/xdg-config" \
+              PYTHONNOUSERSITE=1 "$PIPX_BIN_DIR/csbox" --version
+            env -u PYTHONPATH -u VIRTUAL_ENV -u CSBOX_HOME \
+              HOME="$smoke_root/home" USERPROFILE="$smoke_root/userprofile" \
+              APPDATA="$smoke_root/appdata" XDG_CONFIG_HOME="$smoke_root/xdg-config" \
+              PYTHONNOUSERSITE=1 "$PIPX_BIN_DIR/csbox" --help
+          )
+
+      - name: Optional pipx install smoke (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Get-Command pipx -ErrorAction SilentlyContinue)) {
+            Write-Host 'CI limitation: pipx is unavailable; optional pipx smoke was not run.'
+            exit 0
+          }
+          $wheel = (Get-ChildItem "$env:RUNNER_TEMP/csbox-dist" -Filter '*.whl' | Select-Object -First 1).FullName
+          $env:PIPX_HOME = Join-Path $env:RUNNER_TEMP 'csbox-pipx-home'
+          $env:PIPX_BIN_DIR = Join-Path $env:RUNNER_TEMP 'csbox-pipx-bin'
+          pipx install --force $wheel
+          $csbox = Join-Path $env:PIPX_BIN_DIR 'csbox.exe'
+          $outside = Join-Path $env:RUNNER_TEMP 'csbox-pipx-outside/中文项目'
+          $smokeRoot = Join-Path $env:RUNNER_TEMP 'csbox-pipx-smoke-config'
+          New-Item -ItemType Directory -Force $outside | Out-Null
+          New-Item -ItemType Directory -Force $smokeRoot | Out-Null
+          Push-Location $outside
+          try {
+            Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+            Remove-Item Env:VIRTUAL_ENV -ErrorAction SilentlyContinue
+            Remove-Item Env:CSBOX_HOME -ErrorAction SilentlyContinue
+            $env:HOME = Join-Path $smokeRoot 'home'
+            $env:USERPROFILE = Join-Path $smokeRoot 'userprofile'
+            $env:APPDATA = Join-Path $smokeRoot 'appdata'
+            $env:XDG_CONFIG_HOME = Join-Path $smokeRoot 'xdg-config'
+            $env:PYTHONNOUSERSITE = '1'
+            & $csbox --version
+            & $csbox --help
+          } finally {
+            Pop-Location
+          }
+
       - name: Run tests
         run: uv run pytest
+
+      - name: Linux focused TUI regression
+        if: runner.os == 'Linux'
+        run: >-
+          uv run pytest tests/test_tui_matrix.py tests/test_tui.py
+          tests/test_review_tui.py tests/test_api_tui.py tests/test_check_tui.py
+          tests/test_pack_tui.py tests/test_task11_error_ux.py -q
+
+      - name: Linux PTY integration regression
+        if: runner.os == 'Linux'
+        run: uv run pytest -m "pty and integration"
+
+      - name: Linux conditional Zsh smoke
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          if command -v zsh >/dev/null 2>&1; then
+            uv run pytest tests/test_terminal_unix_integration.py -k zsh -q
+          else
+            echo "CI limitation: zsh is unavailable; conditional Zsh smoke was not run."
+          fi
+
+      - name: Windows focused TUI regression
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: >-
+          uv run pytest tests/test_tui_matrix.py tests/test_tui.py
+          tests/test_review_tui.py tests/test_api_tui.py tests/test_check_tui.py
+          tests/test_pack_tui.py tests/test_task11_error_ux.py -q
 
       - name: Check lint
         run: uv run ruff check .

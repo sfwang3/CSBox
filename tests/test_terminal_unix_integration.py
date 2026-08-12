@@ -13,6 +13,7 @@ from csbox.core.terminal import TerminalBackendError, UnixPTYBackend
 
 pytestmark = [
     pytest.mark.pty,
+    pytest.mark.integration,
     pytest.mark.skipif(os.name == "nt", reason="Unix PTY integration only"),
 ]
 
@@ -66,6 +67,13 @@ def bash_command() -> list[str]:
     return [bash, "--noprofile", "--norc"]
 
 
+def zsh_command() -> list[str]:
+    zsh = shutil.which("zsh")
+    if zsh is None:
+        pytest.skip("zsh is unavailable")
+    return [zsh, "-f"]
+
+
 def test_real_pty_preserves_unicode_ansi_cwd_and_resize(
     backend: UnixPTYBackend, tmp_path: Path
 ) -> None:
@@ -76,6 +84,27 @@ def test_real_pty_preserves_unicode_ansi_cwd_and_resize(
     output = read_until(backend, b"\x1b[0m")
     assert b"\x1b[31m" in output
     assert "红色中文".encode() in output
+
+    backend.write(b"pwd\n")
+    assert os.fsencode(tmp_path) in read_until(backend, os.fsencode(tmp_path))
+
+    backend.resize(100, 30)
+    backend.write(b"stty size\nexit\n")
+    assert b"30 100" in read_until(backend, b"30 100")
+    read_to_eof(backend)
+    assert backend.wait(timeout=1.0) == 0
+    assert backend.exit_code == 0
+
+
+def test_real_zsh_pty_preserves_unicode_cwd_resize_and_exit(
+    backend: UnixPTYBackend, tmp_path: Path
+) -> None:
+    backend.spawn(zsh_command(), cwd=tmp_path, size=TerminalSize(80, 24))
+
+    backend.write(b"printf '\\033[31mZSH_\xe4\xb8\xad\xe6\x96\x87\\033[0m\\n'\n")
+    output = read_until(backend, b"ZSH_\xe4\xb8\xad\xe6\x96\x87")
+    assert b"\x1b[31m" in output
+    assert "ZSH_中文".encode() in output
 
     backend.write(b"pwd\n")
     assert os.fsencode(tmp_path) in read_until(backend, os.fsencode(tmp_path))

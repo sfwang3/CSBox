@@ -5,17 +5,19 @@ from textual.containers import Vertical
 from textual.events import Resize
 from textual.widgets import Button, Static
 
+from csbox.api.redaction import Redactor
 from csbox.core.display_width import truncate_cells
-from csbox.core.models import HomeSnapshot, RecentExperiment
+from csbox.core.models import HomeSnapshot, RecentApiRun, RecentExperiment
 from csbox.locales import Translator
 
 ACTION_DEFINITIONS = (
     ("start", "home.entry.start"),
     ("replay", "home.entry.replay"),
-    ("check", "home.entry.check"),
     ("api", "home.entry.api"),
+    ("check", "home.entry.check"),
     ("pack", "home.entry.pack"),
 )
+_HOME_REDACTOR = Redactor.with_configured_values(())
 
 
 class BrandBlock(Vertical):
@@ -50,11 +52,14 @@ class EnvironmentPanel(Vertical):
         project_dir = self.snapshot.project_dir
         environment = self.snapshot.environment
         values = (
-            ("environment.os", f"{environment.os_name} {environment.os_version}"),
-            ("environment.python", environment.python_version),
+            (
+                "environment.os",
+                _HOME_REDACTOR.text(f"{environment.os_name} {environment.os_version}"),
+            ),
+            ("environment.python", _HOME_REDACTOR.text(environment.python_version)),
             (
                 "environment.shell",
-                environment.shell or self.locale("common.unknown"),
+                _HOME_REDACTOR.text(environment.shell or self.locale("common.unknown")),
             ),
             (
                 "environment.wsl",
@@ -67,7 +72,9 @@ class EnvironmentPanel(Vertical):
             (
                 "environment.project",
                 truncate_cells(
-                    str(project_dir) if project_dir else self.locale("common.unknown"),
+                    _HOME_REDACTOR.text(
+                        str(project_dir) if project_dir else self.locale("common.unknown")
+                    ),
                     max(24, self.size.width - 18) if self.size.width else 60,
                     ellipsis="…",
                 ),
@@ -114,6 +121,8 @@ class RecentPanel(Vertical):
         yield Static(self._note(), id="demo-note", markup=False)
         yield Static(self._count(), id="demo-count", markup=False)
         yield Static(self._content(), id="recent-content", markup=False)
+        yield Static(self._api_content(), id="recent-api-content", markup=False)
+        yield Static(self._check_content(), id="home-check-status", markup=False)
 
     def _content(self) -> str:
         if not self.snapshot.recent_experiments:
@@ -141,11 +150,11 @@ class RecentPanel(Vertical):
         available_width = self.size.width or 70
         context: list[str] = []
         if experiment.platform:
-            context.append(experiment.platform)
+            context.append(_HOME_REDACTOR.text(experiment.platform))
         if experiment.cwd:
             context.append(
                 truncate_cells(
-                    str(experiment.cwd),
+                    _HOME_REDACTOR.text(str(experiment.cwd)),
                     max(1, min(40, available_width // 3)),
                     ellipsis="…",
                 )
@@ -154,26 +163,61 @@ class RecentPanel(Vertical):
             "home.recent.item",
             demo=self.locale("home.demo.tag") if experiment.demo else "",
             name=truncate_cells(
-                experiment.name,
+                _HOME_REDACTOR.text(experiment.name),
                 max(1, min(32, available_width // 3)),
                 ellipsis="…",
             ),
             status=self.locale(status_key),
-            duration=self.locale("home.duration", duration=experiment.duration),
+            duration=self.locale(
+                "home.duration", duration=_HOME_REDACTOR.text(experiment.duration)
+            ),
             captures=experiment.capture_count,
             context=(" | " + " | ".join(context)) if context else "",
         )
         return truncate_cells(line, max(1, available_width - 2), ellipsis="…")
 
+    def _api_content(self) -> str:
+        if not self.snapshot.recent_api_runs:
+            return self.locale("home.api.empty")
+        lines = [self.locale("home.api.title")]
+        for run in self.snapshot.recent_api_runs:
+            lines.append(self._api_run_line(run))
+        return "\n".join(lines)
+
+    def _api_run_line(self, run: RecentApiRun) -> str:
+        status_key = f"home.api.status.{run.status}"
+        if status_key not in self.locale.messages:
+            status_key = "home.api.status.unknown"
+        line = self.locale(
+            "home.api.item",
+            id=truncate_cells(_HOME_REDACTOR.text(run.id), 12, ellipsis="…"),
+            name=truncate_cells(_HOME_REDACTOR.text(run.scenario_name), 24, ellipsis="…"),
+            status=self.locale(status_key),
+            elapsed=f"{run.elapsed_ms:.1f} ms",
+        )
+        return truncate_cells(line, max(1, (self.size.width or 70) - 2), ellipsis="…")
+
+    def _check_content(self) -> str:
+        if self.snapshot.check_status is None:
+            return self.locale("home.check.empty")
+        status_key = f"home.check.status.{self.snapshot.check_status}"
+        if status_key not in self.locale.messages:
+            status_key = "home.check.status.unknown"
+        return self.locale("home.check.status.item", status=self.locale(status_key))
+
     def on_resize(self, event: Resize) -> None:
         del event
         self.query_one("#recent-content", Static).update(self._content())
+        self.query_one("#recent-api-content", Static).update(self._api_content())
+        self.query_one("#home-check-status", Static).update(self._check_content())
 
     def update_snapshot(self, snapshot: HomeSnapshot) -> None:
         self.snapshot = snapshot
         self.query_one("#demo-note", Static).update(self._note())
         self.query_one("#demo-count", Static).update(self._count())
         self.query_one("#recent-content", Static).update(self._content())
+        self.query_one("#recent-api-content", Static).update(self._api_content())
+        self.query_one("#home-check-status", Static).update(self._check_content())
 
 
 class ShortcutBar(Static):

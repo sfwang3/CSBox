@@ -265,6 +265,8 @@ class Redactor:
 
 
 def _assignment_value_end(value: str, start: int) -> tuple[int, str | None, bool]:
+    if start < len(value) and value[start] in "[{":
+        return _composite_value_end(value, start), None, False
     quote_character = value[start] if value[start] in {'"', "'"} else None
     if quote_character is None:
         position = start
@@ -283,6 +285,37 @@ def _assignment_value_end(value: str, start: int) -> tuple[int, str | None, bool
             return position + 1, quote_character, True
         position += 1
     return position, quote_character, False
+
+
+def _composite_value_end(value: str, start: int) -> int:
+    """Find a nested JSON-like value iteratively for conservative fallback masking."""
+
+    closing = {"[": "]", "{": "}"}
+    expected = [closing[value[start]]]
+    quote_character: str | None = None
+    position = start + 1
+    while position < len(value):
+        character = value[position]
+        if quote_character is not None:
+            if character == "\\":
+                position += 2
+                continue
+            if character == quote_character:
+                quote_character = None
+            position += 1
+            continue
+        if character in {'"', "'"}:
+            quote_character = character
+        elif character in closing:
+            expected.append(closing[character])
+        elif character in "]}":
+            if character != expected[-1]:
+                return position
+            expected.pop()
+            if not expected:
+                return position + 1
+        position += 1
+    return position
 
 
 def _decode_quoted_key(value: str) -> str:

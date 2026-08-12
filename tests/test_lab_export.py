@@ -326,6 +326,7 @@ def test_force_export_removes_only_stale_generated_evidence(
     assert not stale.exists()
     assert user_png.read_bytes() == b"user image"
     assert user_file.read_text(encoding="utf-8") == "keep"
+    assert not list(tmp_path.glob(".csbox-lab-export-*.partial"))
 
 
 def test_force_export_preserves_user_evidence_referenced_by_markdown(
@@ -346,6 +347,22 @@ def test_force_export_preserves_user_evidence_referenced_by_markdown(
 
     assert not stale.exists()
     assert user_png.read_bytes() == b"user image"
+
+
+def test_force_export_preserves_a_generated_path_replaced_by_the_user(
+    tmp_path: Path,
+    session_with_captures: SessionPaths,
+    exporter: LabExporter,
+) -> None:
+    destination = tmp_path / "export"
+    first = exporter.export(session_with_captures, destination)
+    stale = first.evidence[1]
+    stale.write_bytes(b"user replacement")
+    assert CaptureStore(session_with_captures.captures).delete("capture-2")
+
+    exporter.export(session_with_captures, destination, force=True)
+
+    assert stale.read_bytes() == b"user replacement"
 
 
 def test_force_export_does_not_follow_backslash_encoded_history_path(
@@ -393,6 +410,22 @@ def test_force_export_skips_all_cleanup_for_a_mixed_invalid_manifest(
     assert any("manifest" in warning for warning in result.warnings)
 
 
+def test_force_export_treats_a_deep_old_manifest_as_untrusted(
+    tmp_path: Path,
+    session_with_captures: SessionPaths,
+    exporter: LabExporter,
+) -> None:
+    destination = tmp_path / "lab-evidence"
+    exporter.export(session_with_captures, destination)
+    manifest = destination / ".csbox-generated-evidence.json"
+    manifest.write_text("[" * 10_000 + "0" + "]" * 10_000, encoding="utf-8")
+
+    result = exporter.export(session_with_captures, destination, force=True)
+
+    assert result.markdown.is_file()
+    assert any("manifest" in warning for warning in result.warnings)
+
+
 def test_export_uses_session_start_plus_capture_offset_and_warns_on_bad_metadata(
     tmp_path: Path, exporter: LabExporter
 ) -> None:
@@ -432,3 +465,128 @@ def test_export_uses_session_start_plus_capture_offset_and_warns_on_bad_metadata
     fallback = exporter.export(paths, tmp_path / "fallback")
     assert "20:00:00" in fallback.markdown.read_text(encoding="utf-8")
     assert any("metadata" in warning for warning in fallback.warnings)
+
+
+def test_export_metadata_warning_does_not_echo_secret_input(
+    tmp_path: Path, exporter: LabExporter
+) -> None:
+    secret = "CSBOX_SECRET_SENTINEL_task17_metadata_warning"
+    paths = SessionPaths(tmp_path / "session")
+    paths.root.mkdir()
+    paths.cast.write_bytes(FIXTURE_CAST.read_bytes())
+    CaptureStore(paths.captures).create_capture(
+        rendered_snapshot("done", 1.0),
+        cwd=tmp_path,
+        title="safe",
+    )
+    paths.metadata.write_text(
+        json.dumps({"startedAt": secret}),
+        encoding="utf-8",
+    )
+
+    result = exporter.export(paths, tmp_path / "output")
+
+    assert result.warnings
+    assert secret not in repr(result.warnings)
+
+
+def test_new_lab_export_does_not_replace_a_directory_created_during_publication(
+    tmp_path: Path,
+    session_with_captures: SessionPaths,
+    exporter: LabExporter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "raced-output"
+    original_publish = exporter_module.safe_rename
+    called = False
+
+    def race_publish(source: Path, target: Path, *, replace_existing: bool = True) -> None:
+        nonlocal called
+        if target == destination and not called:
+            called = True
+            destination.mkdir()
+            (destination / "user.txt").write_text("keep", encoding="utf-8")
+        original_publish(source, target, replace_existing=replace_existing)
+
+    monkeypatch.setattr(exporter_module, "safe_rename", race_publish, raising=False)
+
+    with pytest.raises(LabExportError):
+        exporter.export(session_with_captures, destination)
+
+    assert called
+    assert (destination / "user.txt").read_text(encoding="utf-8") == "keep"
+
+
+def test_force_lab_export_rollback_preserves_concurrent_destination_and_old_backup(
+    tmp_path: Path,
+    session_with_captures: SessionPaths,
+    exporter: LabExporter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "lab-evidence"
+    first = exporter.export(session_with_captures, destination)
+    protected = first.evidence[0]
+    old_generated = protected.read_bytes()
+    concurrent = b"concurrent-user-data"
+    real_safe_rename = exporter_module.safe_rename
+    raced = False
+
+    def race_after_backup(source: Path, target: Path, *, replace_existing: bool = True) -> None:
+        nonlocal raced
+        if target == protected and source.name == protected.name and not raced:
+            raced = True
+            assert not target.exists()
+            target.write_bytes(concurrent)
+        real_safe_rename(source, target, replace_existing=replace_existing)
+
+    monkeypatch.setattr(exporter_module, "safe_rename", race_after_backup)
+
+    with pytest.raises(LabExportError):
+        exporter.export(session_with_captures, destination, force=True)
+
+    assert raced
+    assert protected.read_bytes() == old_generated
+    recovery = tuple(protected.parent.glob(".csbox-recovery-*.bak"))
+    assert len(recovery) == 1
+    assert recovery[0].read_bytes() == concurrent
+    assert not tuple(tmp_path.glob(".csbox-lab-export-*.partial"))
+
+
+def test_force_lab_export_restores_the_old_set_when_a_later_publish_fails(
+    tmp_path: Path,
+    session_with_captures: SessionPaths,
+    exporter: LabExporter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "lab-evidence"
+    first = exporter.export(session_with_captures, destination)
+    generated = (
+        *first.evidence,
+        first.markdown,
+        first.cast,
+        destination / ".csbox-generated-evidence.json",
+    )
+    if first.commands is not None:
+        generated += (first.commands,)
+    old_contents = {path: path.read_bytes() for path in generated}
+    exporter.theme = RenderTheme.light()
+    real_safe_rename = exporter_module.safe_rename
+    publish_calls = 0
+
+    def fail_second_publish(source: Path, target: Path, *, replace_existing: bool = True) -> None:
+        nonlocal publish_calls
+        if target in old_contents and source.name == target.name:
+            publish_calls += 1
+            if publish_calls == 2:
+                raise OSError("simulated later publication failure")
+        real_safe_rename(source, target, replace_existing=replace_existing)
+
+    monkeypatch.setattr(exporter_module, "safe_rename", fail_second_publish)
+
+    with pytest.raises(LabExportError):
+        exporter.export(session_with_captures, destination, force=True)
+
+    assert publish_calls == 2
+    assert {path: path.read_bytes() for path in generated} == old_contents
+    assert tuple(destination.rglob(".csbox-recovery-*.bak"))
+    assert not tuple(tmp_path.glob(".csbox-lab-export-*.partial"))

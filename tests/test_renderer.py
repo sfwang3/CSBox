@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from PIL import Image, ImageDraw
 
+import csbox.lab.renderer as renderer_module
 from csbox.lab.fonts import FontResolutionError, FontResolver
 from csbox.lab.renderer import (
     RenderTheme,
@@ -255,8 +256,10 @@ def test_renderer_atomically_preserves_existing_png_when_save_fails(
     destination = tmp_path / "evidence.png"
     destination.write_bytes(b"previous png")
 
-    def fail_save(image: Image.Image, target: str | Path, *args: object, **kwargs: object) -> None:
-        Path(target).write_bytes(b"partial png")
+    def fail_save(image: Image.Image, target: object, *args: object, **kwargs: object) -> None:
+        del image, args, kwargs
+        if hasattr(target, "write"):
+            target.write(b"partial png")
         raise OSError("disk full")
 
     monkeypatch.setattr(Image.Image, "save", fail_save)
@@ -268,30 +271,62 @@ def test_renderer_atomically_preserves_existing_png_when_save_fails(
     assert not list(tmp_path.glob("*.tmp"))
 
 
-def test_renderer_fsynchronizes_png_with_a_write_capable_descriptor(
+def test_renderer_refuses_a_symlinked_output_parent_without_writing_outside(
+    tmp_path: Path,
+    font_paths: tuple[Path, Path],
+) -> None:
+    redirected = tmp_path / "redirected"
+    redirected.mkdir()
+    linked = tmp_path / "linked"
+    try:
+        linked.symlink_to(redirected, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"symlinks are unavailable: {error}")
+    renderer = TerminalEvidenceRenderer(FontResolver(candidates=font_paths))
+    terminal = snapshot((TerminalCell(character="A"),))
+
+    with pytest.raises((OSError, ValueError), match="symlink|符号链接"):
+        renderer.render(terminal, linked / "evidence.png")
+
+    assert list(redirected.iterdir()) == []
+
+
+def test_renderer_rejects_pathological_pixel_allocation_before_image_creation(
+    tmp_path: Path,
+    font_paths: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    terminal = snapshot(tuple(TerminalCell() for _ in range(10)))
+    renderer = TerminalEvidenceRenderer(FontResolver(candidates=font_paths))
+    renderer.cell_width = 4_000
+    renderer.cell_height = 4_000
+
+    def unexpected_image(*args: object, **kwargs: object) -> Image.Image:
+        del args, kwargs
+        raise AssertionError("Image.new must not receive a pathological allocation")
+
+    monkeypatch.setattr(Image, "new", unexpected_image)
+
+    with pytest.raises(ValueError, match="像素|pixel|过大"):
+        renderer.render(terminal, tmp_path / "too-large.png")
+
+
+def test_renderer_uses_the_shared_atomic_byte_writer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     destination = tmp_path / "evidence.png"
-    opened_modes: list[str] = []
-    real_open = Path.open
+    written: list[Path] = []
+    real_write = renderer_module.atomic_write_bytes
 
-    def observe_open(
-        path: Path,
-        mode: str = "r",
-        buffering: int = -1,
-        encoding: str | None = None,
-        errors: str | None = None,
-        newline: str | None = None,
-    ) -> object:
-        if path.parent == tmp_path and path.name.startswith(".evidence.png."):
-            opened_modes.append(mode)
-        return real_open(path, mode, buffering, encoding, errors, newline)
+    def observe_write(path: Path, data: bytes) -> None:
+        written.append(Path(path))
+        real_write(path, data)
 
-    monkeypatch.setattr(Path, "open", observe_open)
+    monkeypatch.setattr(renderer_module, "atomic_write_bytes", observe_write, raising=False)
 
     _save_png_atomic(Image.new("RGB", (2, 2), "black"), destination)
 
-    assert "r+b" in opened_modes
+    assert written == [destination]
 
 
 def test_renderer_marks_bold_text_without_changing_its_cell_origin(

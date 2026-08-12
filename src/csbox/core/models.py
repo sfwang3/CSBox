@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -29,9 +30,27 @@ class RecentExperiment(BaseModel):
     session_id: str | None = None
 
 
+class RecentApiRun(BaseModel):
+    """A metadata-only API run summary safe for Home presentation."""
+
+    id: str
+    scenario_name: str
+    status: str
+    started_at: datetime | None = None
+    elapsed_ms: float = Field(default=0.0, ge=0.0)
+
+    @property
+    def run_id(self) -> str:
+        """Compatibility name for UI adapters that call the identifier a run ID."""
+
+        return self.id
+
+
 class HomeSnapshot(BaseModel):
     environment: EnvironmentSnapshot
     recent_experiments: list[RecentExperiment] = Field(default_factory=list)
+    recent_api_runs: list[RecentApiRun] = Field(default_factory=list)
+    check_status: str | None = None
     project_dir: Path | None = None
 
 

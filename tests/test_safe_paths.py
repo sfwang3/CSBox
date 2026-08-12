@@ -5,7 +5,13 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
-from csbox.core.safe_paths import atomic_write_text, safe_relative_path
+from csbox.core.safe_paths import (
+    atomic_copy_file,
+    atomic_write_text,
+    mkdir_exclusive,
+    safe_relative_path,
+    safe_rename,
+)
 
 _HAS_POSIX_DIRECTORY_FDS = (
     os.name == "posix"
@@ -71,6 +77,35 @@ def test_atomic_write_text_refuses_a_symlink_parent_directory(tmp_path: Path) ->
     assert not (redirected_directory / "output.txt").exists()
 
 
+def test_safe_rename_refuses_a_symlink_parent_directory(tmp_path: Path) -> None:
+    source = tmp_path / "source.txt"
+    source.write_text("safe", encoding="utf-8")
+    redirected_directory = tmp_path / "redirected"
+    redirected_directory.mkdir()
+    symlink_parent = tmp_path / "linked-output"
+    symlink_parent.symlink_to(redirected_directory, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="symlink parent"):
+        safe_rename(source, symlink_parent / "output.txt")
+
+    assert source.read_text(encoding="utf-8") == "safe"
+    assert not (redirected_directory / "output.txt").exists()
+
+
+def test_safe_rename_no_replace_preserves_an_existing_destination(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "generated.txt").write_text("generated", encoding="utf-8")
+    destination = tmp_path / "destination"
+    destination.mkdir()
+
+    with pytest.raises(FileExistsError):
+        safe_rename(source, destination, replace_existing=False)
+
+    assert (source / "generated.txt").read_text(encoding="utf-8") == "generated"
+    assert list(destination.iterdir()) == []
+
+
 def test_atomic_write_text_rechecks_parent_chain_after_canonicalization(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -111,6 +146,154 @@ def test_atomic_write_text_path_fallback_preserves_normal_nested_writes(
     atomic_write_text(destination, "计算机网络实验")
 
     assert destination.read_text(encoding="utf-8") == "计算机网络实验"
+
+
+def test_bounded_regular_reader_accepts_a_relative_parent_input_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from csbox.core.safe_paths import read_regular_text
+
+    source = tmp_path / "scenario.toml"
+    source.write_text('name = "上级目录"\n', encoding="utf-8")
+    child = tmp_path / "child"
+    child.mkdir()
+    monkeypatch.chdir(child)
+
+    assert read_regular_text(Path("../scenario.toml"), max_bytes=1024) == 'name = "上级目录"\n'
+
+
+def test_mkdir_fallback_rejects_symlink_parents_before_creating_outside(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import csbox.core.safe_paths as safe_paths
+
+    monkeypatch.setattr(safe_paths, "_HAS_POSIX_DIRECTORY_FDS", False)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    linked = tmp_path / "linked"
+    linked.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="symlink parent"):
+        mkdir_exclusive(linked / "nested" / "output")
+
+    assert list(outside.iterdir()) == []
+
+
+def test_safe_rename_path_fallback_does_not_require_posix_directory_flags(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import csbox.core.safe_paths as safe_paths
+
+    source = tmp_path / "source.txt"
+    source.write_text("safe", encoding="utf-8")
+    destination = tmp_path / "destination.txt"
+    monkeypatch.setattr(safe_paths, "_HAS_POSIX_DIRECTORY_FDS", False)
+    monkeypatch.delattr(safe_paths.os, "O_DIRECTORY")
+
+    safe_rename(source, destination, replace_existing=False)
+
+    assert destination.read_text(encoding="utf-8") == "safe"
+
+
+def test_safe_rename_windows_fallback_can_restore_an_existing_regular_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pathlib import PosixPath
+
+    import csbox.core.safe_paths as safe_paths
+
+    source = PosixPath(tmp_path) / "backup.txt"
+    source.write_text("original", encoding="utf-8")
+    destination = PosixPath(tmp_path) / "published.txt"
+    destination.write_text("partial", encoding="utf-8")
+    monkeypatch.setattr(safe_paths, "_HAS_POSIX_DIRECTORY_FDS", False)
+    monkeypatch.setattr(safe_paths.os, "name", "nt")
+    monkeypatch.setattr(safe_paths, "Path", PosixPath)
+
+    def windows_rename(source_path: object, destination_path: object) -> None:
+        del source_path, destination_path
+        raise FileExistsError("Windows rename does not replace")
+
+    monkeypatch.setattr(safe_paths.os, "rename", windows_rename)
+
+    safe_paths.safe_rename(source, destination)
+
+    assert destination.read_text(encoding="utf-8") == "original"
+    assert not source.exists()
+
+
+def test_atomic_copy_path_fallback_refuses_a_symlink_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import csbox.core.safe_paths as safe_paths
+
+    monkeypatch.setattr(safe_paths, "_HAS_POSIX_DIRECTORY_FDS", False)
+    source = tmp_path / "source.zip"
+    source.write_bytes(b"archive")
+    redirected = tmp_path / "redirected"
+    redirected.mkdir()
+    linked_parent = tmp_path / "linked-output"
+    linked_parent.symlink_to(redirected, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="symlink parent"):
+        atomic_copy_file(source, linked_parent / "output.zip")
+
+    assert not (redirected / "output.zip").exists()
+
+
+def test_atomic_copy_path_fallback_does_not_replace_a_raced_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import csbox.core.safe_paths as safe_paths
+
+    monkeypatch.setattr(safe_paths, "_HAS_POSIX_DIRECTORY_FDS", False)
+    source = tmp_path / "source.zip"
+    source.write_bytes(b"new archive")
+    destination = tmp_path / "output.zip"
+    original_link = safe_paths.os.link
+
+    def race_destination(*args: object, **kwargs: object) -> None:
+        destination.write_bytes(b"raced archive")
+        original_link(*args, **kwargs)
+
+    monkeypatch.setattr(safe_paths.os, "link", race_destination)
+
+    with pytest.raises(FileExistsError):
+        atomic_copy_file(source, destination, replace_existing=False)
+
+    assert destination.read_bytes() == b"raced archive"
+
+
+def test_atomic_copy_path_fallback_uses_windows_no_replace_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pathlib import PosixPath
+
+    import csbox.core.safe_paths as safe_paths
+
+    monkeypatch.setattr(safe_paths, "_HAS_POSIX_DIRECTORY_FDS", False)
+    monkeypatch.setattr(safe_paths.os, "name", "nt")
+    monkeypatch.setattr(safe_paths, "Path", PosixPath)
+    source = PosixPath(tmp_path) / "source.zip"
+    source.write_bytes(b"archive")
+    destination = PosixPath(tmp_path) / "output.zip"
+    rename_calls: list[tuple[object, object]] = []
+    original_rename = safe_paths.os.rename
+
+    def record_rename(source_path: object, destination_path: object) -> None:
+        rename_calls.append((source_path, destination_path))
+        original_rename(source_path, destination_path)
+
+    monkeypatch.setattr(safe_paths.os, "rename", record_rename)
+
+    atomic_copy_file(source, destination, replace_existing=False)
+
+    assert destination.read_bytes() == b"archive"
+    assert len(rename_calls) == 1
 
 
 @requires_posix_directory_fds
@@ -266,7 +449,7 @@ def test_atomic_write_text_does_not_unlink_a_colliding_temporary_name(
     import csbox.core.safe_paths as safe_paths
 
     destination = tmp_path / "output.txt"
-    temporary_name = f".{destination.name}-fixed.tmp"
+    temporary_name = ".csbox-atomic-fixed.tmp"
     existing_file = tmp_path / temporary_name
     existing_file.write_text("belongs-to-someone-else", encoding="utf-8")
     monkeypatch.setattr(safe_paths.secrets, "token_hex", lambda length: "fixed")

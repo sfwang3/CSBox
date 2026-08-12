@@ -157,6 +157,35 @@ def make_backend(
     return WindowsConPTYBackend(pty_process_factory=FakePtyProcess, write_timeout=write_timeout)
 
 
+def test_background_reader_applies_bounded_output_backpressure(tmp_path: Path) -> None:
+    limit = 1024
+    chunk = "中" * 64
+    process = FakePtyProcess(frames=[chunk] * 40 + [EOFError()])
+    FakePtyProcess.next_process = process
+    backend = WindowsConPTYBackend(
+        pty_process_factory=FakePtyProcess,
+        max_output_buffer_bytes=limit,
+    )
+    spawn_backend(backend, tmp_path)
+
+    deadline = time.monotonic() + 1.0
+    with backend._output_ready:
+        while backend._buffered_output_bytes < limit and time.monotonic() < deadline:
+            backend._output_ready.wait(deadline - time.monotonic())
+        assert backend._buffered_output_bytes <= limit
+        assert process.frames, "reader should stop consuming when the bounded backlog is full"
+
+    received = bytearray()
+    while True:
+        frame = backend.read(max_bytes=257, timeout=0.5)
+        assert frame is not None
+        if frame == b"":
+            break
+        received.extend(frame)
+
+    assert bytes(received) == (chunk * 40).encode("utf-8")
+
+
 def spawn_backend(backend: WindowsConPTYBackend, tmp_path: Path) -> None:
     backend.spawn(
         ["pwsh.exe", "-NoLogo"],

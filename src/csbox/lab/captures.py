@@ -1,20 +1,24 @@
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 import threading
 import uuid
 from collections.abc import Callable
-from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 from pydantic import ValidationError
 
+from csbox.core.safe_paths import (
+    atomic_write_bytes,
+    ensure_private_directory,
+    read_regular_text,
+)
 from csbox.lab.models import CaptureRecord
 from csbox.lab.screen import TerminalSnapshot
+
+_MAX_CAPTURE_DOCUMENT_BYTES = 64 * 1024 * 1024
 
 
 class CaptureStoreError(RuntimeError):
@@ -56,8 +60,8 @@ class CaptureStore:
 
             try:
                 captures, warnings = _read_document(self.path)
-            except (OSError, UnicodeError, json.JSONDecodeError, _InvalidDocument) as exc:
-                warning = f"primary captures file is invalid: {exc}"
+            except (OSError, UnicodeError, json.JSONDecodeError, ValueError, RecursionError):
+                warning = "primary captures file is invalid"
                 if self.backup_path.exists():
                     return self._recover_backup((warning,))
                 return CaptureReadResult((), (warning,))
@@ -121,10 +125,8 @@ class CaptureStore:
     def _recover_backup(self, preceding_warnings: tuple[str, ...]) -> CaptureReadResult:
         try:
             captures, backup_warnings = _read_document(self.backup_path)
-        except (OSError, UnicodeError, json.JSONDecodeError, _InvalidDocument) as exc:
-            return CaptureReadResult(
-                (), (*preceding_warnings, f"backup captures file is invalid: {exc}")
-            )
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError, RecursionError):
+            return CaptureReadResult((), (*preceding_warnings, "backup captures file is invalid"))
         warnings = (
             *preceding_warnings,
             "captures recovered from backup",
@@ -144,15 +146,15 @@ class CaptureStore:
             _serialize_document(_sort_captures(previous)) if had_document else new_payload
         )
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
+            ensure_private_directory(self.path.parent)
             _atomic_write(self.backup_path, backup_payload)
             _atomic_write(self.path, new_payload)
-        except OSError as exc:
-            raise CaptureStoreError(f"could not persist captures: {exc}") from exc
+        except (OSError, ValueError) as exc:
+            raise CaptureStoreError("could not persist captures") from exc
 
 
 def _read_document(path: Path) -> tuple[tuple[CaptureRecord, ...], list[str]]:
-    value = json.loads(path.read_text(encoding="utf-8"))
+    value = json.loads(read_regular_text(path, max_bytes=_MAX_CAPTURE_DOCUMENT_BYTES))
     if not isinstance(value, dict) or value.get("version") != 1:
         raise _InvalidDocument("expected captures schema version 1")
     raw_captures = value.get("captures")
@@ -164,8 +166,8 @@ def _read_document(path: Path) -> tuple[tuple[CaptureRecord, ...], list[str]]:
     for index, raw_capture in enumerate(raw_captures, start=1):
         try:
             captures.append(CaptureRecord.model_validate(raw_capture))
-        except (ValidationError, TypeError, ValueError) as exc:
-            warnings.append(f"invalid capture {index} ignored: {exc}")
+        except (ValidationError, TypeError, ValueError):
+            warnings.append(f"invalid capture {index} ignored")
     return tuple(captures), warnings
 
 
@@ -182,33 +184,4 @@ def _serialize_document(captures: tuple[CaptureRecord, ...]) -> bytes:
 
 
 def _atomic_write(path: Path, data: bytes) -> None:
-    descriptor, temporary_name = tempfile.mkstemp(
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-    )
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-        _fsync_directory(path.parent)
-    except BaseException:
-        with suppress(OSError):
-            temporary.unlink(missing_ok=True)
-        raise
-
-
-def _fsync_directory(directory: Path) -> None:
-    try:
-        descriptor = os.open(directory, os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        os.fsync(descriptor)
-    except OSError:
-        pass
-    finally:
-        os.close(descriptor)
+    atomic_write_bytes(path, data)

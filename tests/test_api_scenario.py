@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import csbox.api.scenario as scenario_module
 from csbox.api.errors import ApiConfigError
 from csbox.api.scenario import ScenarioLoader
 
@@ -12,6 +13,34 @@ def _write_scenario(tmp_path: Path, content: str) -> Path:
     path = tmp_path / "login.toml"
     path.write_text(content, encoding="utf-8")
     return path
+
+
+def test_loader_rejects_oversized_and_deeply_nested_toml_before_model_building(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(scenario_module, "MAX_SCENARIO_BYTES", 256, raising=False)
+    oversized = _write_scenario(
+        tmp_path,
+        'name = "large"\nsteps = []\n# ' + ("x" * 512),
+    )
+
+    with pytest.raises(ApiConfigError, match="读取|大小|上限|解析"):
+        ScenarioLoader().load(oversized)
+
+    monkeypatch.setattr(scenario_module, "MAX_SCENARIO_BYTES", 64 * 1024, raising=False)
+    deep = tmp_path / "deep.toml"
+    nested = "value"
+    for _ in range(80):
+        nested = "{ child = " + nested + " }"
+    deep.write_text(
+        'name = "deep"\n[[steps]]\nname = "step"\nmethod = "POST"\n'
+        'url = "https://example.test"\njson = ' + nested + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ApiConfigError, match="结构|深|解析"):
+        ScenarioLoader().load(deep)
 
 
 def test_loader_converts_typed_toml_and_preserves_json_value_types(tmp_path: Path) -> None:

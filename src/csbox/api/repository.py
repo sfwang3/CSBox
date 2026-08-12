@@ -24,7 +24,12 @@ from csbox.api.models import (
 )
 from csbox.api.redaction import Redactor
 from csbox.config import ConfigPaths
-from csbox.core.safe_paths import atomic_write_text, mkdir_exclusive, safe_relative_path
+from csbox.core.safe_paths import (
+    atomic_write_text,
+    mkdir_exclusive,
+    read_regular_text,
+    safe_relative_path,
+)
 from csbox.core.schema import SCHEMA_VERSION
 
 _STATUSES = ("PASS", "FAIL", "CONFIG_ERROR", "RUNTIME_ERROR")
@@ -44,6 +49,7 @@ _METADATA_KEYS = frozenset(
 _RESULT_KEYS = frozenset({"schema_version", "scenario", "results"})
 _SCENARIO_KEYS = frozenset({"name", "source"})
 _RESULT_SCENARIO_KEYS = frozenset({"name", "source", "steps"})
+_MAX_RUN_DOCUMENT_BYTES = 64 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,7 +144,13 @@ class ApiRunRepository:
             return loaded
         except ApiPersistenceError:
             raise
-        except (TypeError, ValueError, ValidationError, json.JSONDecodeError) as error:
+        except (
+            TypeError,
+            ValueError,
+            ValidationError,
+            json.JSONDecodeError,
+            RecursionError,
+        ) as error:
             raise _persistence_error("运行记录不可用，结果文件无效。") from error
 
     def list(self) -> tuple[ApiRunSummary, ...]:
@@ -210,6 +222,7 @@ class ApiRunRepository:
             UnicodeError,
             ValueError,
             json.JSONDecodeError,
+            RecursionError,
         ) as error:
             raise _persistence_error("运行记录不可用，结果文件无效。") from error
 
@@ -218,9 +231,16 @@ class ApiRunRepository:
             raise _persistence_error("运行文件不能是符号链接。")
         try:
             document = json.loads(
-                path.read_text(encoding="utf-8"), parse_constant=_reject_json_constant
+                read_regular_text(path, max_bytes=_MAX_RUN_DOCUMENT_BYTES),
+                parse_constant=_reject_json_constant,
             )
-        except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as error:
+        except (
+            OSError,
+            UnicodeError,
+            ValueError,
+            json.JSONDecodeError,
+            RecursionError,
+        ) as error:
             raise _persistence_error("运行记录文件无效。") from error
         if not isinstance(document, dict):
             raise _persistence_error("运行记录文件无效。")

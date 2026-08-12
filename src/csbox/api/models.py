@@ -163,6 +163,14 @@ class ApiRun(_ApiModel):
 
 
 class ApiEvidence(_ApiModel):
+    model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False, frozen=True)
+
+    run_id: str | None = None
+    scenario_name: str | None = None
+    scenario_source: str | None = None
+    step_index: int | None = Field(default=None, ge=1)
+    run_status: ApiRunStatus | None = None
+    started_at: datetime | None = None
     title: str
     request: ApiRequest
     response: ApiResponse | None = None

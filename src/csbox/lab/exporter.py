@@ -4,6 +4,7 @@ import hashlib
 import html
 import json
 import re
+import secrets
 import shutil
 import unicodedata
 from dataclasses import dataclass
@@ -12,12 +13,23 @@ from pathlib import Path, PurePosixPath
 
 from pydantic import ValidationError
 
+from csbox.core.safe_paths import (
+    atomic_copy_file,
+    atomic_write_text,
+    mkdir_exclusive,
+    open_regular_binary,
+    read_regular_text,
+    restore_backup_or_preserve,
+    safe_rename,
+)
 from csbox.lab.captures import CaptureStore
 from csbox.lab.models import SessionMetadata, SessionPaths
 from csbox.lab.renderer import RenderTheme, TerminalEvidenceRenderer
 
 _COMPONENT_BUDGET = 240
 _EVIDENCE_MANIFEST = ".csbox-generated-evidence.json"
+_MAX_LAB_METADATA_BYTES = 4 * 1024 * 1024
+_MAX_LAB_MANIFEST_BYTES = 4 * 1024 * 1024
 
 
 class LabExportError(RuntimeError):
@@ -58,66 +70,101 @@ class LabExporter:
         _validate_session_sources(paths)
         if output.exists() and output.resolve() == paths.root.resolve():
             raise LabExportError("导出目录不能覆盖原始实验目录。")
-        self._prepare_destination(output, force=force)
-        evidence_directory = output / "evidence"
-        self._prepare_evidence_directory(evidence_directory)
-        markdown_path = output / "evidence.md"
-        cast_path = output / "session.cast"
-        commands_path = output / "commands.txt"
-        manifest_path = output / _EVIDENCE_MANIFEST
-        for path in (markdown_path, cast_path, commands_path, manifest_path):
-            _reject_symlink(path)
+        if output.is_symlink():
+            raise LabExportError("导出目录不能是符号链接。")
+        destination_was_existing = output.exists()
+        if destination_was_existing:
+            self._prepare_destination(output, force=force)
+            _validate_existing_export_targets(output)
         previous_evidence, cleanup_warnings = (
-            _previous_generated_evidence(output) if force else ((), ())
+            _previous_generated_evidence(output) if destination_was_existing and force else ((), ())
         )
+        staging = _new_export_staging(output)
+        working_output = staging
+        try:
+            self._prepare_destination(working_output, force=True)
+            evidence_directory = working_output / "evidence"
+            self._prepare_evidence_directory(evidence_directory)
+            markdown_path = working_output / "evidence.md"
+            cast_path = working_output / "session.cast"
+            commands_path = working_output / "commands.txt"
+            manifest_path = working_output / _EVIDENCE_MANIFEST
+            for path in (markdown_path, cast_path, commands_path, manifest_path):
+                _reject_symlink(path)
 
-        capture_result = CaptureStore(paths.captures).load()
-        session_start, metadata_warnings = _load_session_start(paths)
-        rendered: list[Path] = []
-        markdown_entries: list[str] = []
-        commands: list[str] = []
-        for index, capture in enumerate(capture_result.captures, start=1):
-            title = _display_title(capture.title, index)
-            slug = _safe_slug(capture.title, index)
-            image_path = evidence_directory / f"{index:02d}-{slug}.png"
-            _reject_symlink(image_path)
-            self.renderer.render(capture.snapshot, image_path, self.theme)
-            rendered.append(image_path)
-            captured_at = (
-                session_start + timedelta(seconds=capture.timestamp)
-                if session_start is not None
-                else capture.created_at
+            capture_result = CaptureStore(paths.captures).load()
+            session_start, metadata_warnings = _load_session_start(paths)
+            rendered: list[Path] = []
+            markdown_entries: list[str] = []
+            commands: list[str] = []
+            for index, capture in enumerate(capture_result.captures, start=1):
+                title = _display_title(capture.title, index)
+                slug = _safe_slug(capture.title, index)
+                image_path = evidence_directory / f"{index:02d}-{slug}.png"
+                _reject_symlink(image_path)
+                self.renderer.render(capture.snapshot, image_path, self.theme)
+                rendered.append(image_path)
+                captured_at = (
+                    session_start + timedelta(seconds=capture.timestamp)
+                    if session_start is not None
+                    else capture.created_at
+                )
+                markdown_entries.append(_markdown_entry(index, title, captured_at, image_path.name))
+                command = _known_command(capture.command)
+                if command is not None:
+                    commands.append(command)
+
+            markdown = "## 实验记录\n"
+            if markdown_entries:
+                markdown += "\n" + "\n\n".join(markdown_entries) + "\n"
+            atomic_write_text(markdown_path, markdown)
+            atomic_copy_file(paths.cast, cast_path, replace_existing=False)
+            exported_commands: Path | None = None
+            if commands:
+                atomic_write_text(commands_path, "\n".join(commands) + "\n")
+                exported_commands = commands_path
+            _write_evidence_manifest(manifest_path, rendered, working_output)
+
+            result = LabExportResult(
+                destination=output,
+                evidence=tuple(rendered),
+                markdown=markdown_path,
+                cast=cast_path,
+                commands=exported_commands,
+                warnings=(*capture_result.warnings, *metadata_warnings, *cleanup_warnings),
             )
-            markdown_entries.append(_markdown_entry(index, title, captured_at, image_path.name))
-            command = _known_command(capture.command)
-            if command is not None:
-                commands.append(command)
+            generated = tuple(
+                (path, output / path.relative_to(staging))
+                for path in (*rendered, markdown_path, cast_path, manifest_path)
+            )
+            if exported_commands is not None:
+                generated += ((commands_path, output / "commands.txt"),)
+            generated_destinations = {destination for _source, destination in generated}
+            stale = tuple(path for path in previous_evidence if path not in generated_destinations)
+            obsolete = ()
+            if destination_was_existing and force and exported_commands is None:
+                obsolete = (output / "commands.txt",)
 
-        markdown = "## 实验记录\n"
-        if markdown_entries:
-            markdown += "\n" + "\n\n".join(markdown_entries) + "\n"
-        markdown_path.write_text(markdown, encoding="utf-8", newline="\n")
-        shutil.copyfile(paths.cast, cast_path)
-        exported_commands: Path | None = None
-        if commands:
-            commands_path.write_text("\n".join(commands) + "\n", encoding="utf-8", newline="\n")
-            exported_commands = commands_path
-        elif force and commands_path.is_file():
-            commands_path.unlink()
-        current_evidence = set(rendered)
-        for stale in previous_evidence:
-            if stale not in current_evidence and stale.is_file():
-                stale.unlink()
-        _write_evidence_manifest(manifest_path, rendered, output)
-
-        return LabExportResult(
-            destination=output,
-            evidence=tuple(rendered),
-            markdown=markdown_path,
-            cast=cast_path,
-            commands=exported_commands,
-            warnings=(*capture_result.warnings, *metadata_warnings, *cleanup_warnings),
-        )
+            if destination_was_existing:
+                try:
+                    _publish_staged_export(staging, output, generated, (*stale, *obsolete))
+                except (OSError, ValueError) as exc:
+                    raise LabExportError(
+                        "导出发布失败；并发冲突文件会保留为 .csbox-recovery-*.bak。"
+                    ) from exc
+            else:
+                if output.exists() or output.is_symlink():
+                    raise LabExportError("导出目录在发布前已被创建。")
+                _validate_staged_export(generated)
+                try:
+                    safe_rename(staging, output, replace_existing=False)
+                except (OSError, ValueError) as exc:
+                    raise LabExportError("导出目录在发布前已被创建或不可安全使用。") from exc
+            _remove_staging(staging)
+            return _relocate_export_result(result, staging, output)
+        except BaseException:
+            _remove_staging(staging)
+            raise
 
     @staticmethod
     def _prepare_destination(destination: Path, *, force: bool) -> None:
@@ -129,7 +176,7 @@ class LabExporter:
             if not force:
                 raise LabExportError(f"导出目录已存在；如需覆盖请使用 force：{destination}")
             return
-        destination.mkdir(parents=True)
+        mkdir_exclusive(destination)
 
     @staticmethod
     def _prepare_evidence_directory(destination: Path) -> None:
@@ -137,7 +184,7 @@ class LabExporter:
             raise LabExportError("evidence 目录不能是符号链接。")
         if destination.exists() and not destination.is_dir():
             raise LabExportError(f"evidence 路径不是目录：{destination}")
-        destination.mkdir(exist_ok=True)
+        mkdir_exclusive(destination)
 
 
 def _markdown_entry(
@@ -153,6 +200,115 @@ def _markdown_entry(
         "结果：\n\n"
         f"![实验记录]({_markdown_url(f'evidence/{image_name}')})"
     )
+
+
+def _new_export_staging(output: Path) -> Path:
+    for _ in range(8):
+        staging = output.parent / f".csbox-lab-export-{secrets.token_hex(16)}.partial"
+        try:
+            mkdir_exclusive(staging)
+        except FileExistsError:
+            continue
+        return staging
+    raise LabExportError("无法创建安全的导出临时目录。")
+
+
+def _remove_staging(staging: Path) -> None:
+    if staging.is_symlink() or not staging.is_dir():
+        return
+    if any(staging.glob(".backup-*")):
+        return
+    shutil.rmtree(staging, ignore_errors=True)
+
+
+def _relocate_export_result(
+    result: LabExportResult,
+    staging: Path,
+    output: Path,
+) -> LabExportResult:
+    def relocate(path: Path) -> Path:
+        return output / path.relative_to(staging)
+
+    return LabExportResult(
+        destination=output,
+        evidence=tuple(relocate(path) for path in result.evidence),
+        markdown=relocate(result.markdown),
+        cast=relocate(result.cast),
+        commands=None if result.commands is None else relocate(result.commands),
+        warnings=result.warnings,
+    )
+
+
+def _validate_existing_export_targets(destination: Path) -> None:
+    evidence_directory = destination / "evidence"
+    if evidence_directory.is_symlink():
+        raise LabExportError("evidence 目录不能是符号链接。")
+    if evidence_directory.exists() and not evidence_directory.is_dir():
+        raise LabExportError(f"evidence 路径不是目录：{evidence_directory}")
+    for path in (
+        destination / "evidence.md",
+        destination / "session.cast",
+        destination / "commands.txt",
+        destination / _EVIDENCE_MANIFEST,
+    ):
+        _reject_symlink(path)
+        if path.exists() and not path.is_file():
+            raise LabExportError(f"导出目标不是文件：{path}")
+
+
+def _validate_staged_export(generated: tuple[tuple[Path, Path], ...]) -> None:
+    for source, _destination in generated:
+        if source.is_symlink() or not source.is_file():
+            raise LabExportError(f"导出临时文件无效：{source}")
+
+
+def _publish_staged_export(
+    staging: Path,
+    output: Path,
+    generated: tuple[tuple[Path, Path], ...],
+    obsolete: tuple[Path, ...],
+) -> None:
+    """Publish generated files while preserving user-owned export files."""
+
+    if output.is_symlink() or not output.is_dir():
+        raise LabExportError("导出目录在发布前不可用。")
+    _validate_staged_export(generated)
+    evidence_directory = output / "evidence"
+    if evidence_directory.is_symlink():
+        raise LabExportError("evidence 目录不能是符号链接。")
+    created_evidence_directory = False
+    if evidence_directory.exists() and not evidence_directory.is_dir():
+        raise LabExportError(f"evidence 路径不是目录：{evidence_directory}")
+    if not evidence_directory.exists():
+        mkdir_exclusive(evidence_directory)
+        created_evidence_directory = True
+
+    backups: dict[Path, Path] = {}
+    operations = (*generated, *((None, path) for path in obsolete))
+    try:
+        for index, (source, destination) in enumerate(operations, start=1):
+            _reject_symlink(destination)
+            if destination.exists():
+                if not destination.is_file():
+                    raise LabExportError(f"导出目标不是文件：{destination}")
+                backup = staging / f".backup-{index}"
+                safe_rename(destination, backup, replace_existing=False)
+                backups[destination] = backup
+            if source is not None:
+                safe_rename(source, destination, replace_existing=False)
+    except BaseException:
+        for destination, backup in reversed(tuple(backups.items())):
+            if backup.exists():
+                restore_backup_or_preserve(backup, destination)
+        if (
+            created_evidence_directory
+            and evidence_directory.is_dir()
+            and not any(evidence_directory.iterdir())
+        ):
+            evidence_directory.rmdir()
+        raise
+    for backup in backups.values():
+        backup.unlink()
 
 
 def _display_title(title: str, index: int) -> str:
@@ -282,9 +438,11 @@ def _load_session_start(paths: SessionPaths) -> tuple[datetime | None, tuple[str
     if not paths.metadata.exists():
         return None, ("metadata.json 缺失，证据时间回退到 capture createdAt。",)
     try:
-        metadata = SessionMetadata.model_validate_json(paths.metadata.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, ValidationError, ValueError) as exc:
-        return None, (f"metadata.json 无效，证据时间回退到 capture createdAt：{exc}",)
+        metadata = SessionMetadata.model_validate_json(
+            read_regular_text(paths.metadata, max_bytes=_MAX_LAB_METADATA_BYTES)
+        )
+    except (OSError, UnicodeError, ValidationError, ValueError):
+        return None, ("metadata.json 无效，证据时间回退到 capture createdAt。",)
     return metadata.started_at, ()
 
 
@@ -297,17 +455,25 @@ def _previous_generated_evidence(
     if manifest.is_symlink():
         raise LabExportError(f"历史 evidence manifest 不能是符号链接：{manifest.name}")
     try:
-        document = json.loads(manifest.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        return (), (f"旧 evidence manifest 无法读取，未清理历史 evidence：{exc}",)
-    if not isinstance(document, dict) or document.get("version") != 1:
+        document = json.loads(read_regular_text(manifest, max_bytes=_MAX_LAB_MANIFEST_BYTES))
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError, RecursionError):
+        return (), ("旧 evidence manifest 无法读取，未清理历史 evidence。",)
+    if not isinstance(document, dict) or document.get("version") != 2:
         return (), ("旧 evidence manifest 版本无效，未清理历史 evidence。",)
     files = document.get("files")
-    if not isinstance(files, list) or any(not isinstance(item, str) for item in files):
+    if not isinstance(files, list) or any(not isinstance(item, dict) for item in files):
         return (), ("旧 evidence manifest 内容无效，未清理历史 evidence。",)
     generated: list[Path] = []
     evidence_directory = destination / "evidence"
-    for relative_name in files:
+    for item in files:
+        relative_name = item.get("path")
+        expected_digest = item.get("sha256")
+        if (
+            not isinstance(relative_name, str)
+            or not isinstance(expected_digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", expected_digest)
+        ):
+            return (), ("旧 evidence manifest 内容无效，未清理历史 evidence。",)
         if "\\" in relative_name:
             return (), ("旧 evidence manifest 包含非法路径，未清理历史 evidence。",)
         relative = PurePosixPath(relative_name)
@@ -322,7 +488,14 @@ def _previous_generated_evidence(
             return (), ("旧 evidence manifest 包含非法路径，未清理历史 evidence。",)
         if candidate.is_symlink():
             raise LabExportError(f"历史 evidence 不能是符号链接：{candidate.name}")
-        generated.append(candidate)
+        try:
+            current_digest = _file_sha256(candidate)
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError):
+            return (), ("旧 evidence 内容无法安全验证，未清理历史 evidence。",)
+        if current_digest == expected_digest:
+            generated.append(candidate)
     return tuple(generated), ()
 
 
@@ -331,9 +504,22 @@ def _write_evidence_manifest(
     rendered: list[Path],
     destination: Path,
 ) -> None:
-    relative_files = [path.relative_to(destination).as_posix() for path in rendered]
-    manifest.write_text(
-        json.dumps({"version": 1, "files": relative_files}, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-        newline="\n",
+    relative_files = [
+        {
+            "path": path.relative_to(destination).as_posix(),
+            "sha256": _file_sha256(path),
+        }
+        for path in rendered
+    ]
+    atomic_write_text(
+        manifest,
+        json.dumps({"version": 2, "files": relative_files}, ensure_ascii=False, indent=2) + "\n",
     )
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open_regular_binary(path) as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()

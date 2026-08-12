@@ -66,6 +66,10 @@ async def test_home_screen_mounts_at_80_by_24_with_demo_data() -> None:
         assert len(app.screen.query("Button")) == 5
         assert "[DEMO]" in str(app.screen.query_one("#demo-note").renderable)
         assert app.screen.is_wide is False
+        for button in app.screen.query("Button"):
+            button.focus()
+            await pilot.pause()
+            assert button.region.y < 24
 
 
 @pytest.mark.asyncio
@@ -82,7 +86,9 @@ async def test_entry_opens_localized_unavailable_dialog() -> None:
         await pilot.press("enter")
         await pilot.pause()
 
-        assert str(app.screen.query_one("#dialog-message").renderable) == "该功能将在后续版本实现。"
+        message = str(app.screen.query_one("#dialog-message").renderable)
+        assert "csbox lab start" in message
+        assert "F5" in message
         assert app.screen.query_one("#dialog-close")
 
 
