@@ -342,7 +342,7 @@ def test_wheel_install_runs_console_entrypoint_and_installed_resources_outside_r
         "asyncio.run(tui_smoke())",
         "print(CSBoxApp.CSS_PATH)",
     )
-    assert probe.strip().endswith("csbox/tui/themes/csbox.tcss")
+    assert Path(probe.strip()).as_posix().endswith("csbox/tui/themes/csbox.tcss")
 
     check = subprocess.run(
         [str(command), "check", str(outside / "临时项目"), "--plain"],

@@ -74,6 +74,7 @@ def test_windows_metadata_fallback_rejects_same_size_mutation(
     entry = inventory.files[0]
     replacement = b"evil\n"
     assert len(replacement) == entry.size
+    original_metadata = source.stat()
 
     monkeypatch.setattr(detectors.os, "name", "nt")
     with (
@@ -82,6 +83,10 @@ def test_windows_metadata_fallback_rejects_same_size_mutation(
     ):
         assert stream.read() == b"safe\n"
         entry.absolute.write_bytes(replacement)
+        os.utime(
+            source,
+            ns=(original_metadata.st_atime_ns, original_metadata.st_mtime_ns + 1_000_000_000),
+        )
 
 
 def test_windows_descriptor_metadata_rejects_mutation_when_path_snapshot_is_stale(
