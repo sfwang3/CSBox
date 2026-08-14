@@ -95,9 +95,10 @@ class HttpxTransport:
         arguments: dict[str, Any] = {
             "method": request.method,
             "url": request.url,
-            "params": request.query,
             "headers": request.headers,
         }
+        if request.query:
+            arguments["params"] = request.query
         if request.json_body is not None:
             arguments["json"] = request.json_body
         elif request.form:

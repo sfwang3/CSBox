@@ -63,16 +63,21 @@ def _is_reparse_point(path: Path) -> bool:
         metadata = path.lstat()
     except OSError:
         return False
-    return _is_reparse_metadata(metadata)
+    return is_reparse_metadata(metadata)
 
 
-def _is_reparse_metadata(metadata: os.stat_result) -> bool:
+def is_reparse_metadata(metadata: os.stat_result) -> bool:
+    """Return whether metadata identifies a symlink or Windows reparse point."""
     if stat.S_ISLNK(metadata.st_mode):
         return True
     if os.name == "nt":
         reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
         return bool(getattr(metadata, "st_file_attributes", 0) & reparse_flag)
     return False
+
+
+def _is_reparse_metadata(metadata: os.stat_result) -> bool:
+    return is_reparse_metadata(metadata)
 
 
 def _prepare_path_parent(original_parent: Path) -> Path:

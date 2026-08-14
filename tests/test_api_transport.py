@@ -144,6 +144,26 @@ async def test_transport_maps_allowed_methods_query_headers_and_client_security_
 
 
 @pytest.mark.asyncio
+async def test_transport_preserves_query_embedded_in_url_when_query_mapping_is_empty() -> None:
+    observed_urls: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        observed_urls.append(str(request.url))
+        return httpx.Response(200, json={"ok": True}, request=request)
+
+    def client_factory(**kwargs: object) -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=httpx.MockTransport(handler), **kwargs)
+
+    url = "https://example.test/delay?ms=450"
+    response = await HttpxTransport(client_factory=client_factory).send(
+        ApiRequest(method="GET", url=url)
+    )
+
+    assert observed_urls == [url]
+    assert response.url == url
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("api_request", "expected_body"),
     [

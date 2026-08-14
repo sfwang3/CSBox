@@ -2,12 +2,31 @@ from __future__ import annotations
 
 import inspect
 import os
+import stat
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import csbox.check.detectors as detectors
 from csbox.check.detectors import FileInventory
+
+
+def _metadata_with(metadata: os.stat_result, **overrides: int) -> SimpleNamespace:
+    values = {
+        name: getattr(metadata, name)
+        for name in dir(metadata)
+        if name.startswith("st_") and not callable(getattr(metadata, name))
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def _windows_reparse_metadata(metadata: os.stat_result) -> SimpleNamespace:
+    return _metadata_with(
+        metadata,
+        st_file_attributes=getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400),
+    )
 
 
 def test_text_cache_reads_one_file_once_and_reports_a_cache_hit(tmp_path: Path) -> None:
@@ -32,10 +51,186 @@ def test_text_cache_reads_one_file_once_and_reports_a_cache_hit(tmp_path: Path) 
 def test_text_scan_normalizes_native_crlf_and_cr_newlines(tmp_path: Path) -> None:
     source = tmp_path / "notes.txt"
     source.write_bytes("中文 note\r\nsecond\rthird\n".encode())
+    normalized = "中文 note\nsecond\nthird\n"
+    cache_budget = len(normalized.encode("utf-8"))
+
+    inventory = FileInventory.build(tmp_path, text_cache_limit_bytes=cache_budget)
+    entry = inventory.files[0]
+
+    assert inventory.text(entry) == normalized
+    assert inventory.text(entry) == normalized
+    stats = inventory.text_scan_stats
+    assert stats.cached_bytes == cache_budget
+    assert stats.cache_hits == 1
+    assert stats.skipped_budget == 0
+
+
+def test_windows_metadata_fallback_rejects_same_size_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "notes.txt"
+    source.write_bytes(b"safe\n")
+    inventory = FileInventory.build(tmp_path)
+    entry = inventory.files[0]
+    replacement = b"evil\n"
+    assert len(replacement) == entry.size
+
+    monkeypatch.setattr(detectors.os, "name", "nt")
+    with (
+        pytest.raises(ValueError, match="changed during copy"),
+        inventory.open_entry(entry) as stream,
+    ):
+        assert stream.read() == b"safe\n"
+        entry.absolute.write_bytes(replacement)
+
+
+def test_windows_descriptor_metadata_rejects_mutation_when_path_snapshot_is_stale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "notes.txt"
+    source.write_bytes(b"safe\n")
+    inventory = FileInventory.build(tmp_path)
+    entry = inventory.files[0]
+    original_stat = detectors.os.stat
+    initial_path_metadata = original_stat(source, follow_symlinks=False)
+    path_type = type(source)
+
+    def stale_path_stat(path: object, *, follow_symlinks: bool = True) -> os.stat_result:
+        if path_type(path) == source:
+            return initial_path_metadata
+        return original_stat(path, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(detectors.os, "name", "nt")
+    monkeypatch.setattr(detectors.os, "stat", stale_path_stat)
+    with (
+        pytest.raises(ValueError, match="changed during copy"),
+        inventory.open_entry(entry) as stream,
+    ):
+        assert stream.read() == b"safe\n"
+        source.write_bytes(b"evil\n")
+        os.utime(
+            source,
+            ns=(initial_path_metadata.st_atime_ns, initial_path_metadata.st_mtime_ns + 1_000_000),
+        )
+
+
+def test_windows_metadata_does_not_compare_path_and_descriptor_representations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "notes.txt"
+    source.write_bytes(b"safe\n")
+    inventory = FileInventory.build(tmp_path)
+    entry = inventory.files[0]
+    original_fstat = detectors.os.fstat
+
+    def divergent_fstat(file_descriptor: int) -> SimpleNamespace:
+        metadata = original_fstat(file_descriptor)
+        return _metadata_with(
+            metadata,
+            st_dev=metadata.st_dev + 1,
+            st_ino=metadata.st_ino + 1,
+            st_mtime_ns=metadata.st_mtime_ns + 1,
+            st_ctime_ns=metadata.st_ctime_ns + 1,
+        )
+
+    monkeypatch.setattr(detectors.os, "name", "nt")
+    monkeypatch.setattr(detectors.os, "fstat", divergent_fstat)
+
+    with inventory.open_entry(entry) as stream:
+        assert stream.read() == b"safe\n"
+
+
+def test_windows_metadata_fallback_rejects_same_size_replacement_before_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "notes.txt"
+    source.write_bytes(b"safe\n")
+    replacement = tmp_path / "replacement.txt"
+    replacement.write_bytes(b"evil\n")
+    inventory = FileInventory.build(tmp_path)
+    entry = inventory.entry("notes.txt")
+    assert entry is not None
+    assert replacement.stat().st_size == entry.size
+    os.replace(replacement, source)
+
+    monkeypatch.setattr(detectors.os, "name", "nt")
+    with (
+        pytest.raises(ValueError, match="changed before copy"),
+        inventory.open_entry(entry),
+    ):
+        pytest.fail("the replacement must not be exposed to the caller")
+
+
+def test_windows_inventory_uses_fresh_path_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "notes.txt"
+    source.write_bytes(b"safe\n")
+    original_stat = detectors.os.stat
+    path_type = type(source)
+    calls: list[tuple[Path, bool]] = []
+
+    def recording_stat(path: object, *, follow_symlinks: bool = True) -> os.stat_result:
+        calls.append((path_type(path), follow_symlinks))
+        return original_stat(path, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(detectors.os, "name", "nt")
+    monkeypatch.setattr(detectors.os, "stat", recording_stat)
+    monkeypatch.setattr(detectors, "Path", path_type)
 
     inventory = FileInventory.build(tmp_path)
 
-    assert inventory.text(inventory.files[0]) == "中文 note\nsecond\nthird\n"
+    assert inventory.entry("notes.txt") is not None
+    assert (source, False) in calls
+
+
+def test_windows_inventory_excludes_reparse_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "notes.txt"
+    source.write_bytes(b"safe\n")
+    original_stat = detectors.os.stat
+    path_type = type(source)
+
+    def reparse_stat(path: object, *, follow_symlinks: bool = True) -> object:
+        metadata = original_stat(path, follow_symlinks=follow_symlinks)
+        return _windows_reparse_metadata(metadata) if path_type(path) == source else metadata
+
+    monkeypatch.setattr(detectors.os, "name", "nt")
+    monkeypatch.setattr(detectors.os, "stat", reparse_stat)
+    monkeypatch.setattr(detectors, "Path", path_type)
+
+    inventory = FileInventory.build(tmp_path)
+
+    assert inventory.files == ()
+    assert [(item.relative.as_posix(), item.reason) for item in inventory.excluded_entries] == [
+        ("notes.txt", "reparse")
+    ]
+
+
+def test_windows_open_rejects_reparse_parent_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    source = nested / "notes.txt"
+    source.write_bytes(b"safe\n")
+    inventory = FileInventory.build(tmp_path)
+    entry = inventory.files[0]
+    original_lstat = Path.lstat
+
+    def reparse_lstat(path: Path) -> object:
+        metadata = original_lstat(path)
+        return _windows_reparse_metadata(metadata) if path == nested else metadata
+
+    monkeypatch.setattr(detectors.os, "name", "nt")
+    monkeypatch.setattr(Path, "lstat", reparse_lstat)
+
+    with (
+        pytest.raises(ValueError, match="symlink parent"),
+        inventory.open_entry(entry),
+    ):
+        pytest.fail("a reparse parent must not be opened")
 
 
 def test_large_file_is_skipped_without_reading_and_without_cache_content(tmp_path: Path) -> None:

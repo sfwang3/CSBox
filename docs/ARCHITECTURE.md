@@ -10,7 +10,7 @@ lab (proxy, recorder, screen, captures, replay, renderer, export)
 tui / cli  ───────────────→  check / pack services
 ```
 
-`core` 只描述终端事件、尺寸、显示宽度和 backend 边界，不依赖 Recorder、pyte、Pillow 或 Textual。`lab` 将真实 backend 的字节转换为统一 `TerminalEvent`，再分发给 recorder、emulator 和 Capture store。`check`、`pack` 是独立 service；`pack` 通过 `CheckService` 复用检查结果，但不修改源项目。CLI/TUI 负责编排和展示。
+`core` 的终端协议层只描述事件、尺寸、显示宽度和 backend 边界，不依赖 Recorder、pyte、Pillow 或 Textual。`core.fonts` 是 API 与 Lab evidence 共用的兼容入口，它委托 `lab.fonts` 并使用 Pillow。`lab` 将真实 backend 的字节转换为统一 `TerminalEvent`，再分发给 recorder、emulator 和 Capture store。`check`、`pack` 是独立 service；`pack` 通过 `CheckService` 复用检查结果，但不修改源项目。CLI/TUI 负责编排和展示。
 
 ## 实验事件流
 

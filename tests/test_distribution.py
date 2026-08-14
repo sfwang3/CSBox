@@ -34,6 +34,7 @@ def _build_distributions(tmp_path: Path) -> tuple[Path, Path]:
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     return next(output.glob("*.whl")), next(output.glob("*.tar.gz"))
 
@@ -58,6 +59,7 @@ def _runtime_requirements(tmp_path: Path) -> Path:
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     requirements = "\n".join(
         line for line in result.stdout.splitlines() if not line.startswith("-e .")
@@ -108,6 +110,7 @@ def _install_runtime_dependencies(tmp_path: Path, python: Path) -> None:
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
 
 
@@ -120,6 +123,7 @@ def _run_installed_probe(python: Path, cwd: Path, *lines: str) -> str:
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     return result.stdout
 
@@ -203,7 +207,13 @@ def test_wheel_install_runs_console_entrypoint_and_installed_resources_outside_r
 ) -> None:
     wheel, _ = _build_distributions(tmp_path)
     venv = tmp_path / "venv"
-    subprocess.run(["uv", "venv", str(venv)], check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["uv", "venv", str(venv)],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
     _install_runtime_dependencies(tmp_path, _venv_python(venv))
     subprocess.run(
         [
@@ -219,6 +229,7 @@ def test_wheel_install_runs_console_entrypoint_and_installed_resources_outside_r
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
 
     outside = tmp_path / "仓库之外" / "示例项目"
@@ -234,6 +245,7 @@ def test_wheel_install_runs_console_entrypoint_and_installed_resources_outside_r
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     installed_version = subprocess.run(
         [
@@ -246,6 +258,7 @@ def test_wheel_install_runs_console_entrypoint_and_installed_resources_outside_r
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
     ).stdout.strip()
     assert version_result.stdout.strip() == installed_version
 
@@ -264,6 +277,7 @@ def test_wheel_install_runs_console_entrypoint_and_installed_resources_outside_r
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
         assert result.stdout
 
@@ -337,6 +351,7 @@ def test_wheel_install_runs_console_entrypoint_and_installed_resources_outside_r
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     assert "README" in check.stdout
     pack = subprocess.run(
@@ -346,6 +361,7 @@ def test_wheel_install_runs_console_entrypoint_and_installed_resources_outside_r
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     assert "中文文件.txt" in pack.stdout
     assert not any(outside.glob("*.zip"))
@@ -356,7 +372,13 @@ def test_uv_tool_install_runs_built_wheel_outside_repository(tmp_path: Path) -> 
     wheel, _ = _build_distributions(tmp_path)
     constraints = _runtime_requirements(tmp_path)
     dependency_venv = tmp_path / "dependency-cache"
-    subprocess.run(["uv", "venv", str(dependency_venv)], check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["uv", "venv", str(dependency_venv)],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
     _install_runtime_dependencies(tmp_path, _venv_python(dependency_venv))
 
     tool_dir = tmp_path / "tool-env"
@@ -378,6 +400,7 @@ def test_uv_tool_install_runs_built_wheel_outside_repository(tmp_path: Path) -> 
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     command = tool_bin / ("csbox.exe" if os.name == "nt" else "csbox")
     assert command.is_file()
@@ -392,5 +415,6 @@ def test_uv_tool_install_runs_built_wheel_outside_repository(tmp_path: Path) -> 
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     assert result.stdout.strip() == "0.2.0"

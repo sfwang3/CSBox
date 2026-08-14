@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import BinaryIO, ClassVar, Protocol
 
 from csbox.check.models import DetectedProject
+from csbox.core.safe_paths import is_reparse_metadata
 
 MAX_TEXT_SCAN_BYTES = 256 * 1024
 DEFAULT_TEXT_CACHE_LIMIT_BYTES = 8 * 1024 * 1024
@@ -163,7 +164,7 @@ def _iter_directory_entries(directory: Path) -> Iterator[os.DirEntry[str]]:
         return
 
     try:
-        if directory.is_symlink():
+        if is_reparse_metadata(directory.lstat()):
             return
         with os.scandir(directory) as iterator:
             yield from sorted(iterator, key=lambda item: (item.name.casefold(), item.name))
@@ -259,7 +260,15 @@ class FileInventory:
                     if child.is_symlink():
                         excluded_entries.append(InventoryExclusion(relative, "symlink", "symlink"))
                         continue
-                    if child.is_dir(follow_symlinks=False):
+                    metadata = (
+                        os.stat(child_path, follow_symlinks=False)
+                        if os.name == "nt"
+                        else child.stat(follow_symlinks=False)
+                    )
+                    if is_reparse_metadata(metadata):
+                        excluded_entries.append(InventoryExclusion(relative, "reparse", "reparse"))
+                        continue
+                    if stat.S_ISDIR(metadata.st_mode):
                         directories.append(relative)
                         if child.name.casefold() not in PRUNED_DIRECTORIES:
                             pending.append(child_path)
@@ -268,11 +277,8 @@ class FileInventory:
                                 InventoryExclusion(relative, "directory", "directory")
                             )
                         continue
-                    if not child.is_file(follow_symlinks=False):
-                        excluded_entries.append(InventoryExclusion(relative, "special", "special"))
-                        continue
-                    metadata = child.stat(follow_symlinks=False)
                     if not stat.S_ISREG(metadata.st_mode):
+                        excluded_entries.append(InventoryExclusion(relative, "special", "special"))
                         continue
                     files.append(
                         FileEntry(
@@ -357,7 +363,7 @@ class FileInventory:
             self._stats.skipped_sensitive += 1
             self._text_cache[entry.relative] = None
             return None
-        if self._path_has_symlink(entry.relative):
+        if self._path_has_reparse_point(entry.relative):
             self._stats.skipped_unreadable += 1
             self._text_cache[entry.relative] = None
             return None
@@ -391,7 +397,7 @@ class FileInventory:
                 with suppress(OSError):
                     os.close(file_descriptor)
 
-        if os.name != "posix" and not self._entry_is_stable(entry, metadata):
+        if os.name != "posix" and not self._path_matches_entry(entry, metadata.st_size):
             self._stats.skipped_unreadable += 1
             self._text_cache[entry.relative] = None
             return None
@@ -416,14 +422,18 @@ class FileInventory:
         # text fixtures commonly contain CRLF even when the logical content
         # uses LF; scanners should report logical lines, not host newlines.
         content = content.replace("\r\n", "\n").replace("\r", "\n")
-        if self._text_cache_bytes + len(data) > self.text_cache_limit_bytes:
+        # Count the normalized UTF-8 representation retained in the cache so
+        # the cache budget and reported statistics do not vary with the host
+        # platform's native newline encoding.
+        cache_bytes = len(content.encode("utf-8"))
+        if self._text_cache_bytes + cache_bytes > self.text_cache_limit_bytes:
             self._stats.skipped_budget += 1
             # The budget bounds retained memory, not security coverage.  Return
             # this successfully scanned text without caching it so later rules
             # can safely re-read it instead of receiving a false cache miss.
             return content
         self._text_cache[entry.relative] = content
-        object.__setattr__(self, "_text_cache_bytes", self._text_cache_bytes + len(data))
+        object.__setattr__(self, "_text_cache_bytes", self._text_cache_bytes + cache_bytes)
         return content
 
     def _open_entry(self, relative: Path, flags: int) -> int:
@@ -479,7 +489,7 @@ class FileInventory:
         """Open an inventory file without following a replacement symlink."""
         if not self._is_owned_entry(entry):
             raise ValueError("inventory entry is not owned by this root")
-        if self._path_has_symlink(entry.relative):
+        if self._path_has_reparse_point(entry.relative):
             raise ValueError("inventory entry has a symlink parent")
 
         flags = os.O_RDONLY
@@ -491,20 +501,27 @@ class FileInventory:
             flags |= os.O_NOFOLLOW
         file_descriptor = self._open_entry(entry.relative, flags)
         try:
-            if self._path_has_symlink(entry.relative):
+            if self._path_has_reparse_point(entry.relative):
                 raise ValueError("inventory entry was replaced by a symlink")
             opened = os.fstat(file_descriptor)
             if not stat.S_ISREG(opened.st_mode):
                 raise ValueError("inventory entry is not a regular file")
             if not self._matches_entry_metadata(entry, opened):
                 raise ValueError("inventory entry changed before copy")
+            if os.name == "nt" and not self._path_matches_entry(entry, opened.st_size):
+                raise ValueError("inventory entry changed before copy")
             with os.fdopen(file_descriptor, "rb", closefd=False) as stream:
                 yield stream
-            if self._path_has_symlink(entry.relative):
+            if self._path_has_reparse_point(entry.relative):
                 raise ValueError("inventory entry was replaced by a symlink")
             current = os.fstat(file_descriptor)
             if not self._matches_entry_metadata(entry, current):
                 raise ValueError("inventory entry changed during copy")
+            if os.name == "nt":
+                if not self._descriptor_is_stable(opened, current):
+                    raise ValueError("inventory entry changed during copy")
+                if not self._path_matches_entry(entry, current.st_size):
+                    raise ValueError("inventory entry changed during copy")
         finally:
             with suppress(OSError):
                 os.close(file_descriptor)
@@ -515,32 +532,42 @@ class FileInventory:
             return False
         return entry.absolute == self.root.joinpath(*entry.relative.parts)
 
-    def _path_has_symlink(self, relative: Path) -> bool:
+    def _path_has_reparse_point(self, relative: Path) -> bool:
         current = self.root
         for part in relative.parts:
             current /= part
             try:
-                if current.is_symlink():
+                if is_reparse_metadata(current.lstat()):
                     return True
             except OSError:
                 return True
         return False
 
-    def _entry_is_stable(self, entry: FileEntry, opened: os.stat_result) -> bool:
-        if self._path_has_symlink(entry.relative):
+    def _path_matches_entry(self, entry: FileEntry, opened_size: int) -> bool:
+        if self._path_has_reparse_point(entry.relative):
             return False
         try:
             current = os.stat(entry.absolute, follow_symlinks=False)
         except OSError:
             return False
-        if not stat.S_ISREG(current.st_mode):
+        if is_reparse_metadata(current) or not stat.S_ISREG(current.st_mode):
             return False
         if os.name == "nt":
             # Windows file IDs and change timestamps can be reported with
-            # different fidelity by stat() and fstat(). The open descriptor
-            # is the authoritative handle; retain size and reparse checks,
-            # while avoiding false mutation reports from optional metadata.
-            return current.st_size == opened.st_size == entry.size
+            # different fidelity by stat() and fstat(). Compare the path
+            # metadata with the original path snapshot, rather than comparing
+            # it with descriptor metadata. This catches same-size in-place
+            # writes without treating normal stat/fstat representation
+            # differences as mutations.
+            if entry.device is not None and current.st_dev != entry.device:
+                return False
+            if entry.inode is not None and current.st_ino != entry.inode:
+                return False
+            if entry.mtime_ns is not None and current.st_mtime_ns != entry.mtime_ns:
+                return False
+            if entry.ctime_ns is not None and current.st_ctime_ns != entry.ctime_ns:
+                return False
+            return current.st_size == opened_size == entry.size
         if entry.device is not None and current.st_dev != entry.device:
             return False
         if entry.inode is not None and current.st_ino != entry.inode:
@@ -549,7 +576,22 @@ class FileInventory:
             return False
         if entry.ctime_ns is not None and current.st_ctime_ns != entry.ctime_ns:
             return False
-        return current.st_dev == opened.st_dev and current.st_ino == opened.st_ino
+        return current.st_size == opened_size == entry.size
+
+    @staticmethod
+    def _descriptor_is_stable(opened: os.stat_result, current: os.stat_result) -> bool:
+        if opened.st_size != current.st_size:
+            return False
+        if opened.st_mtime_ns != current.st_mtime_ns:
+            return False
+        if opened.st_ctime_ns != current.st_ctime_ns:
+            return False
+        for field_name in ("st_dev", "st_ino"):
+            opened_value = getattr(opened, field_name, 0)
+            current_value = getattr(current, field_name, 0)
+            if opened_value and current_value and opened_value != current_value:
+                return False
+        return True
 
     @staticmethod
     def _matches_entry_metadata(entry: FileEntry, metadata: os.stat_result) -> bool:
