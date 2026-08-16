@@ -135,22 +135,30 @@ def test_native_windows_conpty_shell_unicode_resize_and_exit(
         cwd=tmp_path,
         size=TerminalSize(80, 24),
     )
-    backend.resize(100, 30)
+    for size in (
+        TerminalSize(100, 30),
+        TerminalSize(120, 35),
+        TerminalSize(160, 45),
+    ):
+        backend.resize(size.columns, size.rows)
     output = _read_first_output(backend)
     backend.write(
         (
             ""
             "$size = $Host.UI.RawUI.WindowSize; "
             "Write-Output ('CSBOX_SIZE_{0}x{1}' -f $size.Width, $size.Height); "
-            "Write-Output 'CSBOX_NATIVE_中文_OK'; Write-Output (Get-Location); exit 0\r\n"
+            "Write-Output 'CSBOX_NATIVE_中文_OK'; "
+            "1..20 | ForEach-Object { Write-Output ('CSBOX_FLOW_{0}' -f $_) }; "
+            "Write-Output (Get-Location); exit 0\r\n"
         ).encode()
     )
 
-    output += _read_until(backend, b"CSBOX_SIZE_100x30")
+    output += _read_until(backend, b"CSBOX_SIZE_160x45")
     output += _read_to_eof(backend)
 
-    assert b"CSBOX_SIZE_100x30" in output
+    assert b"CSBOX_SIZE_160x45" in output
     assert "CSBOX_NATIVE_中文_OK".encode() in output
+    assert b"CSBOX_FLOW_20" in output
     assert str(tmp_path).encode() in output
     assert backend.wait(timeout=2.0) == 0
 
