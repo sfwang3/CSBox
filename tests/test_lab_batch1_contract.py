@@ -274,6 +274,34 @@ def test_repository_does_not_recover_a_session_with_an_active_owner(tmp_path: Pa
     assert restarted.list_sessions()[0].metadata.status == "starting"
 
 
+def test_windows_owner_probe_maps_lock_contention_to_blocking_io(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import csbox.lab.repository as repository_module
+
+    class LockedStream:
+        closed = False
+
+        def seek(self, offset: int) -> None:
+            del offset
+
+        def read(self, size: int) -> bytes:
+            del size
+            raise PermissionError(13, "locked by another Windows handle")
+
+        def close(self) -> None:
+            self.closed = True
+
+    stream = LockedStream()
+    monkeypatch.setattr(repository_module.os, "name", "nt")
+    monkeypatch.setattr(Path, "open", lambda path, mode: stream)
+
+    with pytest.raises(BlockingIOError):
+        repository_module._SessionOwner(Path("owner.lock"))
+
+    assert stream.closed is True
+
+
 def test_stale_recovery_holds_owner_until_interrupted_metadata_is_written(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

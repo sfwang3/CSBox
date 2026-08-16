@@ -25,6 +25,11 @@ from csbox.lab.recorder import AsciicastV3Reader, RecorderError
 _MAX_SESSION_METADATA_BYTES = 4 * 1024 * 1024
 
 
+def _raise_if_windows_lock_contention(error: OSError) -> None:
+    if os.name == "nt" and error.errno in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+        raise BlockingIOError from error
+
+
 class SessionRepositoryError(RuntimeError):
     """A session could not be found or its metadata could not be persisted."""
 
@@ -42,11 +47,20 @@ class _SessionOwner:
 
     def __init__(self, path: Path) -> None:
         self.path = path
-        self._stream = path.open("a+b")
+        try:
+            self._stream = path.open("a+b")
+        except OSError as exc:
+            _raise_if_windows_lock_contention(exc)
+            raise
         self._locked = False
         try:
             self._stream.seek(0)
-            if self._stream.read(1) != b"\0":
+            try:
+                marker = self._stream.read(1)
+            except OSError as exc:
+                _raise_if_windows_lock_contention(exc)
+                raise
+            if marker != b"\0":
                 self._stream.seek(0)
                 self._stream.write(b"\0")
                 self._stream.flush()
@@ -65,8 +79,7 @@ class _SessionOwner:
                 self._stream.seek(0)
                 msvcrt.locking(self._stream.fileno(), msvcrt.LK_NBLCK, 1)
             except OSError as exc:
-                if exc.errno in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
-                    raise BlockingIOError from exc
+                _raise_if_windows_lock_contention(exc)
                 raise
             return
         import fcntl
