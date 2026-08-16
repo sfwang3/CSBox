@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from textual.widgets import Static
@@ -293,7 +294,7 @@ def test_windows_owner_probe_maps_lock_contention_to_blocking_io(
             self.closed = True
 
     stream = LockedStream()
-    monkeypatch.setattr(repository_module.os, "name", "nt")
+    monkeypatch.setattr(repository_module, "os", SimpleNamespace(name="nt"))
     monkeypatch.setattr(Path, "open", lambda path, mode: stream)
 
     with pytest.raises(BlockingIOError):
@@ -579,6 +580,37 @@ def test_unknown_child_exit_is_not_encoded_as_success(tmp_path: Path) -> None:
 
     events = AsciicastV3Reader(cast_path).read().events
     assert [(event.code, event.data) for event in events] == [("x", "unknown")]
+
+
+def test_proxy_waits_for_backend_eof_after_process_is_dead() -> None:
+    class DeadBeforeEofBackend(ScriptedBackend):
+        def is_alive(self) -> bool:
+            return False
+
+    backend = DeadBeforeEofBackend([None, b"late output", b""], exit_code=0)
+    output = MemoryOutput()
+    events: list[TerminalEvent] = []
+
+    class EventSink:
+        def handle(self, event: TerminalEvent) -> None:
+            events.append(event)
+
+    proxy = TerminalProxy(
+        backend,
+        command=("bash",),
+        input_adapter=MemoryInput([b""]),
+        output_adapter=output,
+        terminal_state_factory=TerminalState,
+        dispatcher=TerminalEventDispatcher([EventSink()]),
+        emulator=TerminalEmulator(columns=80, rows=24),
+    )
+
+    assert proxy.run() == 0
+    assert bytes(output.data) == b"late output"
+    assert [event.type for event in events] == [
+        TerminalEventType.OUTPUT,
+        TerminalEventType.EXIT,
+    ]
 
 
 def test_read_failure_does_not_append_a_success_exit_event(tmp_path: Path) -> None:

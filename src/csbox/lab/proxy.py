@@ -337,9 +337,7 @@ class TerminalProxy:
 
             output = self.backend.read(timeout=0.0 if self._resize_pending else 0.05)
             if output is None:
-                if input_closed and not self.backend.is_alive():
-                    output = b""
-                elif self._resize_pending:
+                if self._resize_pending:
                     self._apply_pending_resize()
                     continue
                 else:
