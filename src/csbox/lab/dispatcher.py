@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Protocol
 
-from csbox.core.events import TerminalEvent
+from csbox.core.events import TerminalEvent, TerminalEventType
 
 
 class TerminalEventSink(Protocol):
@@ -14,6 +14,7 @@ class DispatchError(RuntimeError):
     def __init__(self, sink_index: int, sink: object) -> None:
         self.sink_index = sink_index
         self.sink = sink
+        self.rollback_errors: tuple[BaseException, ...] = ()
         super().__init__(f"terminal event sink {sink_index} failed")
 
 
@@ -40,10 +41,24 @@ class TerminalEventDispatcher:
     def dispatch(self, event: TerminalEvent) -> None:
         if not isinstance(event, TerminalEvent):
             raise TypeError("event must be a TerminalEvent")
+        completed: list[TerminalEventSink] = []
         for index, sink in enumerate(tuple(self._sinks), start=1):
             try:
                 sink.handle(event)
             except Exception as exc:
-                raise DispatchError(index, sink) from exc
+                error = DispatchError(index, sink)
+                if event.type is TerminalEventType.CAPTURE:
+                    rollback_errors: list[BaseException] = []
+                    for completed_sink in (sink, *reversed(completed)):
+                        rollback = getattr(completed_sink, "rollback", None)
+                        if not callable(rollback):
+                            continue
+                        try:
+                            rollback(event)
+                        except BaseException as rollback_error:
+                            rollback_errors.append(rollback_error)
+                    error.rollback_errors = tuple(rollback_errors)
+                raise error from exc
+            completed.append(sink)
 
     __call__ = dispatch

@@ -14,8 +14,9 @@ from textual.widgets import Static
 from csbox.api.redaction import Redactor
 from csbox.core.display_width import display_width, truncate_cells
 from csbox.lab.captures import CaptureStore
-from csbox.lab.models import CaptureRecord, SessionPaths
-from csbox.lab.replay import ReplayService
+from csbox.lab.models import CaptureRecord, SessionMetadata, SessionPaths
+from csbox.lab.recorder import RecorderError
+from csbox.lab.replay import ReplayService, ReplayState
 from csbox.lab.repository import SessionRepositoryError, load_session_metadata
 from csbox.lab.screen import TerminalCell, TerminalSnapshot
 from csbox.locales import Translator
@@ -34,12 +35,19 @@ _REVIEW_REDACTOR = Redactor.with_configured_values(())
 
 @dataclass(frozen=True, slots=True)
 class ReviewView:
+    session_name: str
+    lifecycle_status: str
+    lifecycle_reason: str | None
+    state: str
     snapshot: TerminalSnapshot
     captures: tuple[CaptureRecord, ...]
+    capture_count: int
+    event_count: int
     current_time: float
     duration: float
     playing: bool
     selected_capture: int
+    warnings: tuple[str, ...]
 
 
 class ReviewController:
@@ -52,11 +60,13 @@ class ReviewController:
         captures: CaptureStore,
         *,
         cwd: Path,
+        metadata: SessionMetadata | None = None,
     ) -> None:
         self.session = session
         self.replay = replay
         self.capture_store = captures
         self.cwd = cwd
+        self.metadata = metadata
         self.current_time = 0.0
         self.playing = False
         self.selected_capture = 0
@@ -64,15 +74,65 @@ class ReviewController:
     @classmethod
     def from_session(cls, session: SessionPaths) -> ReviewController:
         cwd = session.root
+        metadata: SessionMetadata | None = None
         if session.metadata.is_file():
             with suppress(SessionRepositoryError):
-                cwd = load_session_metadata(session).cwd
+                metadata = load_session_metadata(session)
+                cwd = metadata.cwd
+        columns = metadata.initial_columns if metadata is not None else 80
+        rows = metadata.initial_rows if metadata is not None else 24
+        try:
+            replay = ReplayService(session.cast)
+        except (OSError, UnicodeError, ValueError, RecorderError) as error:
+            replay = ReplayService.unavailable(
+                session.cast,
+                columns=columns,
+                rows=rows,
+                warning=f"录制数据无法读取：{type(error).__name__}",
+            )
         return cls(
             session,
-            ReplayService(session.cast),
+            replay,
             CaptureStore(session.captures),
             cwd=cwd,
+            metadata=metadata,
         )
+
+    @property
+    def session_name(self) -> str:
+        return (
+            self.metadata.experiment_name if self.metadata is not None else self.session.root.name
+        )
+
+    @property
+    def lifecycle_status(self) -> str:
+        return self.metadata.status if self.metadata is not None else "unknown"
+
+    @property
+    def lifecycle_reason(self) -> str | None:
+        return None if self.metadata is None else self.metadata.status_reason
+
+    @property
+    def state(self) -> str:
+        if self.replay.state is ReplayState.CORRUPT:
+            return "corrupt"
+        if self.lifecycle_status == "failed":
+            return "failed"
+        if self.lifecycle_status == "interrupted":
+            return "interrupted"
+        if self.replay.state is ReplayState.EMPTY or self.duration <= 0:
+            return "empty"
+        return "playable"
+
+    @property
+    def event_count(self) -> int:
+        return self.replay.event_count
+
+    @property
+    def warnings(self) -> tuple[str, ...]:
+        if self.lifecycle_reason:
+            return (*self.replay.warnings, self.lifecycle_reason)
+        return self.replay.warnings
 
     @property
     def duration(self) -> float:
@@ -91,16 +151,23 @@ class ReviewController:
         selected = min(self.selected_capture, max(0, len(captures) - 1))
         self.selected_capture = selected
         return ReviewView(
+            session_name=self.session_name,
+            lifecycle_status=self.lifecycle_status,
+            lifecycle_reason=self.lifecycle_reason,
+            state=self.state,
             snapshot=self.snapshot,
             captures=captures,
+            capture_count=len(captures),
+            event_count=self.event_count,
             current_time=self.current_time,
             duration=self.duration,
             playing=self.playing,
             selected_capture=selected,
+            warnings=self.warnings,
         )
 
     def play(self) -> None:
-        self.playing = self.current_time < self.duration
+        self.playing = self.replay.output_event_count > 0 and self.current_time < self.duration
 
     def pause(self) -> None:
         self.playing = False
@@ -261,14 +328,15 @@ class ReviewScreen(Screen[None]):
 
     def _refresh(self) -> None:
         view = self.controller.view()
-        self.query_one("#review-terminal", ReviewTerminal).update(snapshot_to_text(view.snapshot))
+        terminal = self.query_one("#review-terminal", ReviewTerminal)
+        terminal.update(self._terminal_renderable(view))
         self.query_one("#review-timeline", ReviewTimeline).update(self._timeline(view))
         captures = self.query_one("#review-captures", ReviewCaptureList)
         captures.update(self._captures(view, self._content_width(captures)))
         self.query_one("#review-footer", ReviewFooter).update(self._footer(view))
         narrow = self.query_one("#review-narrow", Static)
         if self.active_pane == "terminal":
-            narrow.update(snapshot_to_text(view.snapshot))
+            narrow.update(self._terminal_renderable(view))
         elif self.active_pane == "timeline":
             narrow.update(self._timeline(view))
         else:
@@ -276,16 +344,40 @@ class ReviewScreen(Screen[None]):
 
     def _title(self) -> str:
         available_width = self.size.width - 16 if self.size.width else 64
-        title = truncate_cells(self.controller.session.root.name, max(1, available_width))
+        title = truncate_cells(self.controller.session_name, max(1, available_width))
         return f"REVIEW  //  {title}"
 
     def _timeline(self, view: ReviewView) -> str:
-        state = "播放中" if view.playing else "已暂停"
-        return (
-            "TIMELINE\n"
-            f"{format_progress(view.current_time, view.duration, width=28)}\n"
-            f"{view.current_time:05.1f}s / {view.duration:05.1f}s  {state}"
-        )
+        playback = "播放中" if view.playing else "已暂停"
+        lines = [
+            "TIMELINE",
+            format_progress(view.current_time, view.duration, width=28),
+            f"{view.current_time:05.1f}s / {view.duration:05.1f}s  {playback}",
+            f"状态：{view.state} / {view.lifecycle_status}",
+            f"事件：{view.event_count}  Capture：{view.capture_count}",
+        ]
+        if view.lifecycle_reason:
+            lines.append(f"原因：{view.lifecycle_reason}")
+        if view.warnings:
+            lines.append(f"警告：{view.warnings[0]}")
+        width = self._panel_width("#review-timeline", 32)
+        return "\n".join(truncate_cells(line, width, ellipsis="…") for line in lines)
+
+    def _terminal_renderable(self, view: ReviewView) -> Text:
+        if view.state == "empty":
+            return Text("此会话没有可播放终端事件")
+        if view.state == "corrupt" and view.event_count == 0:
+            return Text("此会话录制数据损坏，无法完整回看")
+        if view.state in {"failed", "interrupted"} and view.event_count == 0:
+            return Text(f"此会话状态为 {view.lifecycle_status}，没有可播放终端事件")
+        return snapshot_to_text(view.snapshot)
+
+    def _panel_width(self, selector: str, fallback: int) -> int:
+        try:
+            widget = self.query_one(selector, Static)
+            return max(8, widget.content_region.width or fallback)
+        except Exception:
+            return fallback
 
     def _captures(self, view: ReviewView, width: int) -> str:
         lines = ["CAPTURES"]

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import platform
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,12 +23,14 @@ from csbox.lab.proxy import (
     FileOutputAdapter,
     RawTerminalState,
     TerminalProxy,
+    TerminalStatus,
     current_terminal_size,
 )
 from csbox.lab.recorder import AsciicastV3Recorder
 from csbox.lab.renderer import RenderTheme, TerminalEvidenceRenderer
 from csbox.lab.repository import SessionRepository, SessionSummary, default_experiment_name
 from csbox.lab.screen import TerminalEmulator
+from csbox.lab.status import HostOnlyLabPresenter
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +39,7 @@ class LabRunResult:
     status: str
     exit_code: int | None
     advisory: str
+    status_events: tuple[TerminalStatus, ...] = ()
 
 
 class LabService:
@@ -81,6 +85,7 @@ class LabService:
         size: TerminalSize | None = None,
     ) -> LabRunResult:
         selected_size = size or current_terminal_size()
+        experiment_name = name or default_experiment_name()
         profile = select_shell(
             shell,
             self.config.lab.shell,
@@ -90,8 +95,8 @@ class LabService:
         shell_version = detect_shell_version(profile)
         adapter = self.input_adapter_factory()
         advisory = self.capture_advisory(adapter)
-        paths = self.repository.create_running(
-            name or default_experiment_name(),
+        paths = self.repository.create_starting(
+            experiment_name,
             shell=profile.kind.value,
             shell_version=shell_version,
             size=selected_size,
@@ -101,6 +106,8 @@ class LabService:
         exit_code: int | None = None
         status = "failed"
         failure: BaseException | None = None
+        status_reason: str | None = None
+        status_events: tuple[TerminalStatus, ...] = ()
         try:
             recorder = AsciicastV3Recorder(
                 paths.cast,
@@ -115,11 +122,22 @@ class LabService:
             def create_capture(snapshot, timestamp):
                 return captures.create_capture(snapshot, timestamp, cwd=self.cwd)
 
+            def rollback_capture(value: object) -> None:
+                capture_id = getattr(value, "capture_id", None)
+                if capture_id is not None:
+                    captures.delete(str(capture_id))
+
+            output_adapter = self.output_adapter_factory()
+            host_presenter = HostOnlyLabPresenter(
+                output_adapter,
+                experiment_name=experiment_name,
+                capture_key=self.config.lab.capture_key,
+            )
             proxy = TerminalProxy(
                 self.backend_factory(),
                 command=tuple(command or profile.command),
                 input_adapter=adapter,
-                output_adapter=self.output_adapter_factory(),
+                output_adapter=output_adapter,
                 terminal_state_factory=self.terminal_state_factory,
                 dispatcher=dispatcher,
                 emulator=emulator,
@@ -127,14 +145,21 @@ class LabService:
                 capture_handler=create_capture,
                 cwd=self.cwd,
                 size=selected_size,
+                started_callback=lambda: self.repository.mark_running(paths),
+                capture_rollback=rollback_capture,
+                host_boundary=host_presenter.start,
+                status_sink=host_presenter.publish,
             )
             exit_code = proxy.run()
+            status_events = tuple(proxy.status_events)
             status = "completed"
         except KeyboardInterrupt as exc:
             status = "interrupted"
+            status_reason = "user interrupted session"
             failure = exc
         except BaseException as exc:
             status = "failed"
+            status_reason = _lifecycle_failure_reason(exc)
             failure = exc
         finally:
             if recorder is not None:
@@ -144,14 +169,29 @@ class LabService:
                     if failure is None:
                         failure = exc
                         status = "failed"
+                        status_reason = _lifecycle_failure_reason(exc)
             try:
-                self.repository.finish(paths, status, exit_code=exit_code)
+                self.repository.finish(
+                    paths,
+                    status,
+                    exit_code=exit_code,
+                    reason=status_reason,
+                )
             except BaseException as exc:
+                persistence_reason = _error_reason(exc)
+                status = "failed"
+                status_reason = _append_reason(status_reason, persistence_reason)
                 if failure is None:
                     failure = exc
+                try:
+                    self.repository.finish(paths, "failed", reason=status_reason)
+                except BaseException as retry_error:
+                    status_reason = _append_reason(status_reason, _error_reason(retry_error))
+                    with suppress(BaseException):
+                        self.repository.release_owner(paths)
         if failure is not None:
             raise failure
-        return LabRunResult(paths, status, exit_code, advisory.message)
+        return LabRunResult(paths, status, exit_code, advisory.message, status_events)
 
     def export(
         self,
@@ -170,6 +210,21 @@ class LabService:
         selected_theme = RenderTheme.light() if theme == "light" else RenderTheme.dark()
         renderer = TerminalEvidenceRenderer(FontResolver(explicit=self.config.render.font))
         return LabExporter(renderer, theme=selected_theme).export(paths, output, force=force)
+
+
+def _lifecycle_failure_reason(error: BaseException) -> str:
+    if isinstance(error, KeyboardInterrupt):
+        return "user interrupted session"
+    return f"{type(error).__name__}: session infrastructure failed"
+
+
+def _error_reason(error: BaseException) -> str:
+    message = str(error).strip()
+    return message or type(error).__name__
+
+
+def _append_reason(previous: str | None, addition: str) -> str:
+    return addition if not previous else f"{previous}; {addition}"
 
 
 def create_lab_service(cwd: Path | str | None = None) -> LabService:

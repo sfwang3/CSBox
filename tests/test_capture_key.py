@@ -5,6 +5,7 @@ import pytest
 from csbox.lab.keymap import CaptureBindingProbe, CaptureKeyMatcher
 
 F12 = b"\x1b[24~"
+CTRL_SPACE = b"\x00"
 
 
 def collect(matcher: CaptureKeyMatcher, chunks: list[bytes]) -> tuple[bytes, int]:
@@ -49,6 +50,13 @@ def test_multiple_captures_and_ordinary_controls_are_preserved() -> None:
     assert captures == 2
 
 
+def test_default_f12_binding_also_consumes_ctrl_space_fallback() -> None:
+    forwarded, captures = collect(CaptureKeyMatcher("f12"), [b"A", CTRL_SPACE, b"B"])
+
+    assert forwarded == b"AB"
+    assert captures == 1
+
+
 def test_flush_forwards_an_unfinished_non_match() -> None:
     matcher = CaptureKeyMatcher("f12")
 
@@ -73,6 +81,7 @@ def test_binding_probe_reports_host_advisory_without_mutating_environment() -> N
     assert advisory.key == "f12"
     assert advisory.supported is True
     assert "VS Code" in advisory.message
+    assert "Ctrl-Space" in advisory.message
     assert environment == {"TERM_PROGRAM": "vscode", "TERM": "xterm-256color"}
 
 
