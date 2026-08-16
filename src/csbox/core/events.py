@@ -59,6 +59,11 @@ class TerminalEventClock:
         self._started_at = monotonic()
         self._sequence = 0
 
+    def start(self) -> None:
+        """Set the recording origin after the child boundary is established."""
+
+        self._started_at = self._monotonic()
+
     def next(
         self,
         event_type: TerminalEventType,

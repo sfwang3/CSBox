@@ -8,7 +8,7 @@ import queue
 import threading
 import time
 from collections.abc import Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
 
@@ -46,6 +46,18 @@ MAX_CAST_LINE_BYTES: Final = 1024 * 1024
 # Bound the screen allocation as a whole so normal wide terminal geometries are
 # not rejected solely because one axis exceeds an arbitrary threshold.
 MAX_CAST_SCREEN_CELLS: Final = 1_000_000
+
+
+@dataclass
+class _RecorderAck:
+    done: threading.Event = field(default_factory=threading.Event)
+    error: BaseException | None = None
+
+
+@dataclass
+class _RollbackRequest:
+    sequence: int
+    ack: _RecorderAck
 
 
 class AsciicastV3Recorder:
@@ -88,6 +100,8 @@ class AsciicastV3Recorder:
         self._stop_enqueued = False
         self._fully_closed = False
         self._writer_error: BaseException | None = None
+        self._capture_ack_lock = threading.Lock()
+        self._capture_waiters: dict[int, _RecorderAck] = {}
         self._ready = threading.Event()
         self._thread = threading.Thread(
             target=self._writer_main,
@@ -106,22 +120,58 @@ class AsciicastV3Recorder:
     def record(self, event: TerminalEvent) -> None:
         if not isinstance(event, TerminalEvent):
             raise TypeError("event must be a TerminalEvent")
+        capture_ack: _RecorderAck | None = None
         with self._state_lock:
             if not self._accepting:
                 raise RecorderError("recorder is closed")
             self._raise_writer_error()
+            if event.type is TerminalEventType.CAPTURE:
+                capture_ack = _RecorderAck()
+                with self._capture_ack_lock:
+                    self._capture_waiters[event.sequence] = capture_ack
             try:
                 self._queue.put(event, timeout=self._enqueue_timeout)
             except queue.Full as exc:
+                if capture_ack is not None:
+                    with self._capture_ack_lock:
+                        self._capture_waiters.pop(event.sequence, None)
                 self._raise_writer_error()
                 raise RecorderError("recorder queue remained full") from exc
             if event.type is TerminalEventType.EXIT:
                 self._accepting = False
             self._raise_writer_error()
+        if capture_ack is not None:
+            if not capture_ack.done.wait(timeout=self._close_timeout):
+                with self._capture_ack_lock:
+                    self._capture_waiters.pop(event.sequence, None)
+                raise RecorderError("recorder Capture write did not finish in time")
+            if capture_ack.error is not None:
+                raise RecorderError("recorder Capture write failed") from capture_ack.error
+            self._raise_writer_error()
 
     handle = record
     write = record
     __call__ = record
+
+    def rollback(self, event: TerminalEvent) -> None:
+        if not isinstance(event, TerminalEvent):
+            raise TypeError("event must be a TerminalEvent")
+        if event.type is not TerminalEventType.CAPTURE:
+            return
+        ack = _RecorderAck()
+        with self._state_lock:
+            self._raise_writer_error()
+            try:
+                self._queue.put(
+                    _RollbackRequest(sequence=event.sequence, ack=ack),
+                    timeout=self._enqueue_timeout,
+                )
+            except queue.Full as exc:
+                raise RecorderError("recorder rollback queue remained full") from exc
+        if not ack.done.wait(timeout=self._close_timeout):
+            raise RecorderError("recorder Capture rollback did not finish in time")
+        if ack.error is not None:
+            raise RecorderError("recorder Capture rollback failed") from ack.error
 
     def close(self) -> None:
         if not self._close_lock.acquire(timeout=self._close_timeout):
@@ -178,6 +228,7 @@ class AsciicastV3Recorder:
                 self._write_events(stream)
         except BaseException as exc:
             self._writer_error = exc
+            self._fail_capture_waiters(exc)
             self._ready.set()
 
     def _write_events(self, stream: Any) -> None:
@@ -188,6 +239,7 @@ class AsciicastV3Recorder:
         previous_time = 0.0
         rounding_error = 0.0
         decoders_finalized = False
+        capture_offsets: dict[int, tuple[int, int, float, float]] = {}
 
         while True:
             item = self._queue.get()
@@ -196,7 +248,15 @@ class AsciicastV3Recorder:
                     if not decoders_finalized:
                         self._flush_decoder_tails(stream, decoders)
                     return
+                if isinstance(item, _RollbackRequest):
+                    restored_timeline = self._rollback_capture(stream, item, capture_offsets)
+                    if restored_timeline is not None:
+                        previous_time, rounding_error = restored_timeline
+                    continue
                 assert isinstance(item, TerminalEvent)
+                capture_offset = stream.tell() if item.type is TerminalEventType.CAPTURE else None
+                previous_time_before_event = previous_time
+                rounding_error_before_event = rounding_error
                 delta = item.relative_time - previous_time
                 if delta < 0:
                     raise RecorderError("event relative time moved backwards")
@@ -210,8 +270,57 @@ class AsciicastV3Recorder:
                     decoders_finalized = True
                 code, data = _encode_event(item, decoders)
                 self._write_json_line(stream, [interval, code, data])
+                if capture_offset is not None:
+                    capture_offsets[item.sequence] = (
+                        capture_offset,
+                        stream.tell(),
+                        previous_time_before_event,
+                        rounding_error_before_event,
+                    )
+                    self._complete_capture_waiter(item.sequence)
             finally:
                 self._queue.task_done()
+
+    def _rollback_capture(
+        self,
+        stream: Any,
+        request: _RollbackRequest,
+        capture_offsets: dict[int, tuple[int, int, float, float]],
+    ) -> tuple[float, float] | None:
+        offsets = capture_offsets.pop(request.sequence, None)
+        if offsets is None or stream.tell() != offsets[1]:
+            request.ack.error = RecorderError("recorder Capture rollback is no longer contiguous")
+            request.ack.done.set()
+            return None
+        try:
+            stream.seek(offsets[0])
+            stream.truncate()
+            stream.seek(0, os.SEEK_END)
+            stream.flush()
+        except BaseException as error:
+            request.ack.error = error
+        finally:
+            request.ack.done.set()
+        return offsets[2], offsets[3]
+
+    def _complete_capture_waiter(
+        self,
+        sequence: int,
+        error: BaseException | None = None,
+    ) -> None:
+        with self._capture_ack_lock:
+            waiter = self._capture_waiters.pop(sequence, None)
+        if waiter is not None:
+            waiter.error = error
+            waiter.done.set()
+
+    def _fail_capture_waiters(self, error: BaseException) -> None:
+        with self._capture_ack_lock:
+            waiters = tuple(self._capture_waiters.values())
+            self._capture_waiters.clear()
+        for waiter in waiters:
+            waiter.error = error
+            waiter.done.set()
 
     @staticmethod
     def _write_json_line(stream: Any, value: object) -> None:
@@ -240,7 +349,7 @@ def _encode_event(event: TerminalEvent, decoders: dict[TerminalEventType, Any]) 
         assert isinstance(event.payload, str)
         return "m", event.payload
     assert event.type is TerminalEventType.EXIT
-    return "x", str(event.payload if event.payload is not None else 0)
+    return "x", str(event.payload) if event.payload is not None else "unknown"
 
 
 class AsciicastV3Reader:

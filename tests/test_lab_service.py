@@ -119,7 +119,7 @@ def test_service_creates_running_metadata_before_spawning_and_persists_capture(
     def observe_spawn(command, *, cwd=None, env=None, size=None) -> None:
         sessions = repository.list_sessions()
         assert len(sessions) == 1
-        assert sessions[0].metadata.status == "running"
+        assert sessions[0].metadata.status == "starting"
         original_spawn(command, cwd=cwd, env=env, size=size)
 
     backend.spawn = observe_spawn  # type: ignore[method-assign]

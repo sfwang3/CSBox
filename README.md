@@ -58,7 +58,7 @@ csbox lab export <SESSION> --output evidence --theme dark
 capture_key = "ctrl-space"
 ```
 
-宿主终端可能拦截 `F12`；CSBox 会给出提示，不会修改宿主、Shell 或编辑器配置。无法实时 Capture 时，可以在 Review 中补录。Lab export 会生成 PNG、`evidence.md` 和 `session.cast`；有可信命令时还会生成 `commands.txt`。
+默认 Capture 键是 `F12`，`Ctrl-Space` 是备用键；CSBox 只报告实际观察到的匹配输入，不修改宿主、Shell 或编辑器配置。无法实时 Capture 时，可以在 Review 中补录。Lab export 会生成 PNG、`evidence.md` 和 `session.cast`；有可信命令时还会生成 `commands.txt`。
 
 ### API：场景、运行和 Evidence
 

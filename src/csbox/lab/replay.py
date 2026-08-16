@@ -8,6 +8,7 @@ import math
 from bisect import bisect_right
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Final
 
@@ -39,6 +40,21 @@ EmulatorFactory = Callable[..., TerminalEmulator]
 
 class CheckpointStoreError(RuntimeError):
     """A derived replay checkpoint index could not be persisted."""
+
+
+class ReplayState(StrEnum):
+    PLAYABLE = "playable"
+    EMPTY = "empty"
+    CORRUPT = "corrupt"
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayDiagnostics:
+    state: ReplayState
+    duration: float
+    event_count: int
+    output_event_count: int
+    warnings: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,19 +155,78 @@ class ReplayService:
         )
         self._emulator_factory = emulator_factory
         read_result = AsciicastV3Reader(self.cast_path).read()
-        self.warnings = read_result.warnings
+        warnings = list(read_result.warnings)
         self._columns, self._rows = _header_dimensions(read_result.header)
         self._events = _timed_events(read_result.events)
         event_duration = self._events[-1].relative_time if self._events else 0.0
         self.duration = event_duration + read_result.trailing_interval
+        self.event_count = len(read_result.events)
+        self.output_event_count = sum(
+            1 for event in read_result.events if event.code == "o" and event.data
+        )
+        self.state = (
+            ReplayState.CORRUPT
+            if _has_integrity_warning(tuple(warnings))
+            else ReplayState.PLAYABLE
+            if self.output_event_count
+            else ReplayState.EMPTY
+        )
         checkpoints = self.checkpoint_store.load(self.cast_path)
         if not _checkpoints_match(checkpoints, read_result, self._events):
             checkpoints = self._build_checkpoints(read_result)
-            self.checkpoint_store.save(self.cast_path, checkpoints)
+            try:
+                self.checkpoint_store.save(self.cast_path, checkpoints)
+            except CheckpointStoreError:
+                warnings.append("replay checkpoints could not be persisted")
+        self.warnings = tuple(warnings)
         assert checkpoints is not None
         self.checkpoints = checkpoints
         self._checkpoint_keys = tuple(
             (checkpoint.relative_time, checkpoint.event_index) for checkpoint in checkpoints
+        )
+
+    @classmethod
+    def unavailable(
+        cls,
+        cast_path: Path | str,
+        *,
+        columns: int,
+        rows: int,
+        warning: str,
+        checkpoint_store: CheckpointStore | None = None,
+        emulator_factory: EmulatorFactory = TerminalEmulator,
+    ) -> ReplayService:
+        """Create a controlled zero-event replay for an unreadable cast."""
+
+        if columns <= 0 or rows <= 0:
+            raise ValueError("fallback terminal dimensions must be positive")
+        instance = cls.__new__(cls)
+        instance.cast_path = Path(cast_path)
+        instance.checkpoint_store = checkpoint_store or CheckpointStore(
+            _default_checkpoint_path(instance.cast_path)
+        )
+        instance._emulator_factory = emulator_factory
+        instance.warnings = (warning,)
+        instance._columns = columns
+        instance._rows = rows
+        instance._events = ()
+        instance.duration = 0.0
+        instance.event_count = 0
+        instance.output_event_count = 0
+        instance.state = ReplayState.CORRUPT
+        snapshot = emulator_factory(columns=columns, rows=rows).snapshot()
+        instance.checkpoints = (Checkpoint(0, 0, 0.0, snapshot),)
+        instance._checkpoint_keys = ((0.0, 0),)
+        return instance
+
+    @property
+    def diagnostics(self) -> ReplayDiagnostics:
+        return ReplayDiagnostics(
+            state=self.state,
+            duration=self.duration,
+            event_count=self.event_count,
+            output_event_count=self.output_event_count,
+            warnings=self.warnings,
         )
 
     def seek(self, relative_time: float) -> TerminalSnapshot:
@@ -222,6 +297,17 @@ def _timed_events(events: tuple[CastEvent, ...]) -> tuple[_ReplayEvent, ...]:
         relative_time += event.interval
         replay_events.append(_ReplayEvent(relative_time=relative_time, cast=event))
     return tuple(replay_events)
+
+
+def _has_integrity_warning(warnings: tuple[str, ...]) -> bool:
+    markers = (
+        "truncated cast line",
+        "corrupt cast line",
+        "oversized cast line",
+        "invalid cast event",
+        "invalid resize",
+    )
+    return any(any(marker in warning for marker in markers) for warning in warnings)
 
 
 def _default_checkpoint_path(cast_path: Path) -> Path:
