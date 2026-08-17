@@ -19,7 +19,7 @@ def test_check_error_is_actionable_without_raw_exception(monkeypatch, tmp_path: 
 
     monkeypatch.setattr(cli_module, "create_check_service", lambda _root: FailingCheck())
 
-    result = CliRunner().invoke(app, ["check", str(tmp_path), "--verbose"])
+    result = CliRunner().invoke(app, ["check", str(tmp_path)])
 
     assert result.exit_code == 1
     assert "发生了什么" in result.stdout
@@ -38,7 +38,7 @@ def test_pack_error_is_actionable_without_raw_exception(monkeypatch, tmp_path: P
 
     monkeypatch.setattr(cli_module, "create_pack_service", lambda _root: FailingPack())
 
-    result = CliRunner().invoke(app, ["pack", str(tmp_path), "--verbose"])
+    result = CliRunner().invoke(app, ["pack", str(tmp_path)])
 
     assert result.exit_code == 1
     assert "发生了什么" in result.stdout
@@ -57,7 +57,7 @@ def test_lab_start_error_is_actionable_without_raw_exception(monkeypatch) -> Non
 
     monkeypatch.setattr(cli_module, "create_lab_service", lambda: FailingLab())
 
-    result = CliRunner().invoke(app, ["lab", "start", "中文实验", "--verbose"])
+    result = CliRunner().invoke(app, ["lab", "start", "中文实验"])
 
     assert result.exit_code == 1
     assert "发生了什么" in result.stdout
@@ -65,3 +65,21 @@ def test_lab_start_error_is_actionable_without_raw_exception(monkeypatch) -> Non
     assert "怎么处理" in result.stdout
     assert SECRET not in result.stdout
     assert SECRET not in result.stderr
+
+
+def test_verbose_lab_error_preserves_type_chain_and_native_code(monkeypatch) -> None:
+    cli_module = importlib.import_module("csbox.cli.main")
+
+    class FailingLab:
+        def start(self, *_args: object, **_kwargs: object) -> None:
+            cause = OSError(2, "missing shell")
+            raise RuntimeError("host startup failed") from cause
+
+    monkeypatch.setattr(cli_module, "create_lab_service", lambda: FailingLab())
+
+    result = CliRunner().invoke(app, ["lab", "start", "中文实验", "--verbose"])
+
+    assert result.exit_code == 1
+    assert "RuntimeError" in result.stderr
+    assert "FileNotFoundError" in result.stderr
+    assert "native_code=2" in result.stderr

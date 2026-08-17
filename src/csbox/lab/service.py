@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import platform
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,13 +22,18 @@ from csbox.lab.proxy import (
     FileInputAdapter,
     FileOutputAdapter,
     RawTerminalState,
+    TerminalCleanupError,
     TerminalProxy,
+    TerminalStatus,
     current_terminal_size,
 )
 from csbox.lab.recorder import AsciicastV3Recorder
 from csbox.lab.renderer import RenderTheme, TerminalEvidenceRenderer
 from csbox.lab.repository import SessionRepository, SessionSummary, default_experiment_name
 from csbox.lab.screen import TerminalEmulator
+from csbox.lab.status import LabSurfacePresenter
+from csbox.lab.surface import AlternateScreenSurface
+from csbox.lab.windows_host import WindowsTerminalLabLauncher
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +42,7 @@ class LabRunResult:
     status: str
     exit_code: int | None
     advisory: str
+    status_events: tuple[TerminalStatus, ...] = ()
 
 
 class LabService:
@@ -50,7 +57,9 @@ class LabService:
         backend_factory: Callable[[], TerminalBackend] = create_terminal_backend,
         input_adapter_factory: Callable[[], object] = FileInputAdapter,
         output_adapter_factory: Callable[[], object] = FileOutputAdapter,
-        terminal_state_factory: Callable[[], object] = RawTerminalState,
+        terminal_state_factory: Callable[[], object] | None = None,
+        terminal_surface_factory: Callable[[object], object] | None = None,
+        windows_launcher: WindowsTerminalLabLauncher | None = None,
     ) -> None:
         self.repository = repository
         self.config = config
@@ -59,6 +68,8 @@ class LabService:
         self.input_adapter_factory = input_adapter_factory
         self.output_adapter_factory = output_adapter_factory
         self.terminal_state_factory = terminal_state_factory
+        self.terminal_surface_factory = terminal_surface_factory
+        self.windows_launcher = windows_launcher
 
     def list(self) -> tuple[SessionSummary, ...]:
         return self.repository.list_sessions()
@@ -79,8 +90,11 @@ class LabService:
         shell: str | None = None,
         command: Sequence[str] | None = None,
         size: TerminalSize | None = None,
+        dedicated_host: bool = False,
+        ready_callback: Callable[[SessionPaths], object] | None = None,
     ) -> LabRunResult:
         selected_size = size or current_terminal_size()
+        experiment_name = name or default_experiment_name()
         profile = select_shell(
             shell,
             self.config.lab.shell,
@@ -90,8 +104,23 @@ class LabService:
         shell_version = detect_shell_version(profile)
         adapter = self.input_adapter_factory()
         advisory = self.capture_advisory(adapter)
-        paths = self.repository.create_running(
-            name or default_experiment_name(),
+        selected_command = tuple(command or profile.command)
+        if self.windows_launcher is not None and not dedicated_host:
+            launch = self.windows_launcher.start(
+                name=experiment_name,
+                shell=profile.kind.value,
+                command=selected_command,
+                cwd=self.cwd,
+                size=selected_size,
+            )
+            return LabRunResult(
+                SessionPaths(self.repository.root / launch.session_id),
+                launch.status,
+                None,
+                advisory.message,
+            )
+        paths = self.repository.create_starting(
+            experiment_name,
             shell=profile.kind.value,
             shell_version=shell_version,
             size=selected_size,
@@ -101,6 +130,8 @@ class LabService:
         exit_code: int | None = None
         status = "failed"
         failure: BaseException | None = None
+        status_reason: str | None = None
+        status_events: tuple[TerminalStatus, ...] = ()
         try:
             recorder = AsciicastV3Recorder(
                 paths.cast,
@@ -115,26 +146,63 @@ class LabService:
             def create_capture(snapshot, timestamp):
                 return captures.create_capture(snapshot, timestamp, cwd=self.cwd)
 
+            def rollback_capture(value: object) -> None:
+                capture_id = getattr(value, "capture_id", None)
+                if capture_id is not None:
+                    captures.delete(str(capture_id))
+
+            output_adapter = self.output_adapter_factory()
+            surface_presenter = LabSurfacePresenter(
+                output_adapter,
+                experiment_name=experiment_name,
+                capture_key=self.config.lab.capture_key,
+            )
+            terminal_state_factory = self.terminal_state_factory or RawTerminalState
+            surface_factory = None if dedicated_host else self.terminal_surface_factory
+            if surface_factory is None and not dedicated_host:
+
+                def surface_factory(output: object) -> object:
+                    return AlternateScreenSurface(output)
+
+            def mark_running_and_ready() -> None:
+                self.repository.mark_running(paths)
+                if ready_callback is not None:
+                    ready_callback(paths)
+
             proxy = TerminalProxy(
                 self.backend_factory(),
-                command=tuple(command or profile.command),
+                command=selected_command,
                 input_adapter=adapter,
-                output_adapter=self.output_adapter_factory(),
-                terminal_state_factory=self.terminal_state_factory,
+                output_adapter=output_adapter,
+                terminal_state_factory=terminal_state_factory,
                 dispatcher=dispatcher,
                 emulator=emulator,
                 capture_key=self.config.lab.capture_key,
                 capture_handler=create_capture,
                 cwd=self.cwd,
                 size=selected_size,
+                started_callback=mark_running_and_ready,
+                capture_rollback=rollback_capture,
+                host_boundary=surface_presenter.start,
+                status_sink=surface_presenter,
+                terminal_surface_factory=(
+                    (lambda: surface_factory(output_adapter))
+                    if surface_factory is not None
+                    else None
+                ),
             )
             exit_code = proxy.run()
+            status_events = tuple(proxy.status_events)
             status = "completed"
         except KeyboardInterrupt as exc:
             status = "interrupted"
+            status_reason = "user interrupted session"
             failure = exc
         except BaseException as exc:
             status = "failed"
+            if isinstance(exc, TerminalCleanupError):
+                exit_code = exc.exit_code
+            status_reason = _lifecycle_failure_reason(exc)
             failure = exc
         finally:
             if recorder is not None:
@@ -144,14 +212,29 @@ class LabService:
                     if failure is None:
                         failure = exc
                         status = "failed"
+                        status_reason = _lifecycle_failure_reason(exc)
             try:
-                self.repository.finish(paths, status, exit_code=exit_code)
+                self.repository.finish(
+                    paths,
+                    status,
+                    exit_code=exit_code,
+                    reason=status_reason,
+                )
             except BaseException as exc:
+                persistence_reason = _error_reason(exc)
+                status = "failed"
+                status_reason = _append_reason(status_reason, persistence_reason)
                 if failure is None:
                     failure = exc
+                try:
+                    self.repository.finish(paths, "failed", reason=status_reason)
+                except BaseException as retry_error:
+                    status_reason = _append_reason(status_reason, _error_reason(retry_error))
+                    with suppress(BaseException):
+                        self.repository.release_owner(paths)
         if failure is not None:
             raise failure
-        return LabRunResult(paths, status, exit_code, advisory.message)
+        return LabRunResult(paths, status, exit_code, advisory.message, status_events)
 
     def export(
         self,
@@ -172,11 +255,38 @@ class LabService:
         return LabExporter(renderer, theme=selected_theme).export(paths, output, force=force)
 
 
-def create_lab_service(cwd: Path | str | None = None) -> LabService:
+def _lifecycle_failure_reason(error: BaseException) -> str:
+    if isinstance(error, KeyboardInterrupt):
+        return "user interrupted session"
+    if isinstance(error, TerminalCleanupError):
+        return str(error)
+    return f"{type(error).__name__}: session infrastructure failed"
+
+
+def _error_reason(error: BaseException) -> str:
+    message = str(error).strip()
+    return message or type(error).__name__
+
+
+def _append_reason(previous: str | None, addition: str) -> str:
+    return addition if not previous else f"{previous}; {addition}"
+
+
+def create_lab_service(
+    cwd: Path | str | None = None,
+    *,
+    dedicated_host: bool = False,
+) -> LabService:
     working_directory = Path.cwd() if cwd is None else Path(cwd)
     config = load_config(working_directory)
+    windows_launcher = None
+    if os.name == "nt" and not dedicated_host:
+        windows_launcher = WindowsTerminalLabLauncher(
+            launch_root=working_directory / ".csbox" / "launches"
+        )
     return LabService(
         repository=SessionRepository.from_cwd(working_directory),
         config=config,
         cwd=working_directory,
+        windows_launcher=windows_launcher,
     )

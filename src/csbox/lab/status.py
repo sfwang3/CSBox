@@ -1,0 +1,68 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from csbox.lab.proxy import OutputAdapter, TerminalStatus
+
+
+class LabSurfacePresenter:
+    """Expose Lab context through the terminal title, not the child screen.
+
+    Windows Terminal and other VT consumers keep OSC title updates outside the
+    child PTY screen.  The proxy refreshes the title after child output so a
+    shell that writes its own title cannot permanently hide the Lab contract.
+    """
+
+    def __init__(
+        self,
+        output: OutputAdapter,
+        *,
+        experiment_name: str,
+        capture_key: str = "f12",
+    ) -> None:
+        self.output = output
+        self.experiment_name = _sanitize(str(experiment_name))
+        self.capture_label = "F12 / Ctrl-Space" if capture_key == "f12" else "Ctrl-Space / F12"
+        self._started = False
+        self.capture_count = 0
+        self._last_message = "正在录制"
+
+    def start(self) -> None:
+        if self._started:
+            return
+        self._started = True
+        self.refresh()
+
+    def publish(self, status: TerminalStatus) -> None:
+        if status.kind == "capture_succeeded":
+            self.capture_count += 1
+        self._last_message = _sanitize(status.message)
+        self.refresh()
+
+    def __call__(self, status: TerminalStatus) -> None:
+        self.publish(status)
+
+    def refresh(self) -> None:
+        if not self._started:
+            return
+        title = (
+            f"CSBox Lab // {self.experiment_name} | ● 正在录制 | "
+            f"Capture {self.capture_count} | {self.capture_label} | "
+            f"输入 exit 结束实验 | {self._last_message}"
+        )
+        self._write(f"\x1b]0;{title}\x07".encode())
+
+    def _write(self, data: bytes) -> None:
+        offset = 0
+        while offset < len(data):
+            written = self.output.write(data[offset:])
+            if type(written) is not int or written <= 0:
+                raise BrokenPipeError("本地终端未能接收 Lab 状态。")
+            offset += written
+
+
+def _sanitize(value: str) -> str:
+    return "".join(
+        character if ord(character) >= 0x20 and character != "\x7f" else " " for character in value
+    )

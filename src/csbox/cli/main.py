@@ -40,6 +40,30 @@ def _print_safe_failure(message: str, error: Exception, *, verbose: bool) -> Non
     Console(markup=False).print(message)
     if verbose:
         Console(markup=False, stderr=True).print(f"调试类型：{type(error).__name__}")
+        Console(markup=False, stderr=True).print(f"调试异常链：{_format_exception_chain(error)}")
+
+
+def _format_exception_chain(error: BaseException) -> str:
+    parts: list[str] = []
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        detail = str(current).strip()
+        native_code = getattr(current, "winerror", None)
+        if native_code is None:
+            native_code = getattr(current, "errno", None)
+        if native_code is not None:
+            detail = (
+                f"{detail} (native_code={native_code})" if detail else f"native_code={native_code}"
+            )
+        parts.append(f"{type(current).__name__}: {detail}" if detail else type(current).__name__)
+
+        linked = getattr(current, "cause", None)
+        if not isinstance(linked, BaseException):
+            linked = current.__cause__ or current.__context__
+        current = linked
+    return " -> ".join(parts)
 
 
 def _version_callback(value: bool) -> bool:
@@ -368,8 +392,29 @@ def lab_start(
         raise typer.Exit(code=1) from error
     if not advisory_printed:
         console.print(result.advisory)
-    status_label = "完成" if result.status == "completed" else result.status
+    status_label = {
+        "completed": "完成",
+        "running": "启动",
+        "interrupted": "中断",
+        "failed": "失败",
+    }.get(result.status, result.status)
     console.print(f"实验已{status_label}：{result.session.root}")
+
+
+@lab_app.command("_host", hidden=True)
+def lab_host(
+    intent: Annotated[Path, typer.Option("--intent", help="内部 dedicated-host intent。")],
+    token: Annotated[str, typer.Option("--token", help="内部 dedicated-host token。")],
+) -> None:
+    """Run the private Windows Terminal host without writing diagnostics to the body."""
+
+    from csbox.lab.windows_host import run_dedicated_lab_host
+
+    try:
+        return_code = run_dedicated_lab_host(intent, token)
+    except Exception:
+        return_code = 1
+    raise typer.Exit(code=return_code)
 
 
 @lab_app.command("export")

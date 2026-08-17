@@ -24,7 +24,7 @@ Shell ←→ UnixPTYBackend / WindowsConPTYBackend
           └─ resize / exit / error → session metadata
 ```
 
-`TerminalProxy` 负责 raw terminal state、SIGWINCH（Unix）、Capture key matching、短写重试、EOF 和 cleanup。Capture 快捷键本身不会转发给 Shell；其他输入和输出按字节传递。recorder 关闭时 flush UTF-8 decoder tail，并将退出和失败状态写入 metadata。
+`TerminalProxy` 负责 raw terminal state、Lab alternate-screen enter/restore、SIGWINCH（Unix）、Capture key matching、短写重试、EOF 和 cleanup。Capture 快捷键本身不会转发给 Shell；其他输入和输出按字节传递，但新的 recorder 不持久化 raw input。recorder 关闭时 flush UTF-8 decoder tail，并将退出和失败状态写入 metadata。
 
 ## Replay 与导出
 

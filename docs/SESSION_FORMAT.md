@@ -7,15 +7,20 @@ session.cast       asciicast v3 header + NDJSON events
 metadata.json      session lifecycle and environment metadata
 captures.json      ordered Capture records and terminal snapshots
 checkpoints.json   ReplayService 的可重建派生索引
+owner.lock         运行期 owner 锁；不属于证据内容
 ```
 
 ## session.cast
 
-第一行是 asciicast v3 header，包含 terminal `cols`、`rows`、`type`，环境只允许安全的 `SHELL`/`TERM` 字段。事件使用标准 code：`o` output、`i` input、`r` resize、`m` mark/Capture、`x` exit。reader 对孤立坏行、未知 event 和 UTF-8 边界给出 warning，并尽量保留其余有效事件。
+第一行是 asciicast v3 header，包含 terminal `cols`、`rows`、`type`，环境只允许安全的 `SHELL`/`TERM` 字段。reader 兼容标准 code：`o` output、legacy `i` input、`r` resize、`m` mark/Capture、`x` exit；新的 CSBox 录制只写 `o`/`r`/`m`/`x`，不持久化真实键盘输入。reader 对孤立坏行、未知 event 和 UTF-8 边界给出 warning，并尽量保留其余有效事件。
 
 ## metadata.json
 
-metadata 记录 session id、实验名、`running`/`completed`/`interrupted`/`failed`、UTC started/ended 时间、平台、Shell、Shell version、初始 rows/columns、cwd 和 CSBox 版本。创建、完成和配置写入使用临时文件加 `os.replace`；运行中断也会尽力落下终态。
+metadata 记录 session id、实验名、`starting`/`running`/`completed`/`interrupted`/`failed`、可选 `statusReason`、可选 child `exitCode`、owner pid/token、UTC started/ended 时间、平台、Shell、Shell version、初始 rows/columns、cwd 和 CSBox 版本。
+
+生命周期顺序是：spawn 前写入 `starting`；PTY 成功建立且 recorder 已可接收事件后写入 `running`；正常 EOF 或 shell 退出写入 `completed`，child 的非零 `exitCode` 不等于 CSBox `failed`；用户中断或应用异常终止写入 `interrupted`；PTY/recorder/关键 session 持久化无法继续保证完整性时写入 `failed`。无法取得 child exit status 时不伪造 `0`。读取 session 时，`starting`/`running` 只有在 owner lock 仍有效时才保持活动；无有效 owner 的记录会恢复为 `interrupted` 并留下 `statusReason`。
+
+创建、状态转换和完成写入使用临时文件加 `os.replace`；owner lock 在终态落盘后释放。recorder 的时间起点在 child spawn 成功后建立，初始 terminal size 写入 cast header；spawn 前的 host scrollback 和 CSBox 自己的 status 文本不进入 `session.cast`。
 
 ## captures.json
 

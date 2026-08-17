@@ -6,6 +6,7 @@ import pytest
 from typer.testing import CliRunner
 
 from csbox.cli.main import app
+from csbox.lab.proxy import TerminalCleanupError
 
 runner = CliRunner()
 cli_module = import_module("csbox.cli.main")
@@ -49,3 +50,16 @@ def test_cli_main_reconfigures_non_utf8_stdout_before_chinese_help(
     assert exit_info.value.code == 0
     assert stream.encoding.lower().replace("-", "") == "utf8"
     assert "doctor" in output.getvalue().decode("utf-8")
+
+
+def test_verbose_failure_keeps_native_exception_chain(capsys: pytest.CaptureFixture[str]) -> None:
+    cause = OSError("The handle is invalid")
+    cause.winerror = 6  # type: ignore[attr-defined]
+    error = TerminalCleanupError(cause, 1)
+
+    cli_module._print_safe_failure("failure", error, verbose=True)
+
+    captured = capsys.readouterr()
+    assert "调试类型：TerminalCleanupError" in captured.err
+    assert "TerminalCleanupError" in captured.err
+    assert "OSError: The handle is invalid (native_code=6)" in captured.err.replace("\n", " ")

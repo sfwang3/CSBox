@@ -160,7 +160,7 @@ def make_backend(
 def test_background_reader_applies_bounded_output_backpressure(tmp_path: Path) -> None:
     limit = 1024
     chunk = "中" * 64
-    process = FakePtyProcess(frames=[chunk] * 40 + [EOFError()])
+    process = FakePtyProcess(frames=[chunk] * 40 + [EOFError()], alive=False, exitstatus=0)
     FakePtyProcess.next_process = process
     backend = WindowsConPTYBackend(
         pty_process_factory=FakePtyProcess,
@@ -342,6 +342,94 @@ def test_eof_error_becomes_eof_and_captures_exit_status(tmp_path: Path) -> None:
     assert backend.exit_code == 9
     assert backend.wait(timeout=0.01) == 9
     assert not backend.is_alive()
+
+
+def test_closed_conpty_output_handle_after_child_exit_is_expected_eof(tmp_path: Path) -> None:
+    class ClosedOutputHandle(OSError):
+        winerror = 109  # ERROR_BROKEN_PIPE
+
+    process = FakePtyProcess(
+        frames=[ClosedOutputHandle("pipe closed")],
+        alive=False,
+        exitstatus=0,
+    )
+    backend = make_backend(process)
+    spawn_backend(backend, tmp_path)
+
+    assert backend.read(timeout=0.5) == b""
+    assert backend.exit_code == 0
+
+
+def test_eof_while_child_is_alive_is_backend_failure(tmp_path: Path) -> None:
+    process = FakePtyProcess(frames=[EOFError("pipe closed")], alive=True)
+    backend = make_backend(process)
+    spawn_backend(backend, tmp_path)
+
+    with pytest.raises(TerminalBackendError) as caught:
+        backend.read(timeout=1.0)
+
+    assert isinstance(caught.value.cause, RuntimeError)
+    backend.close()
+    assert process.close_forces == [True]
+
+
+def test_empty_pywinpty_sentinel_is_not_eof(tmp_path: Path) -> None:
+    class SentinelThenExitProcess(FakePtyProcess):
+        def read(self, size: int = 1024) -> str:
+            try:
+                return super().read(size)
+            except EOFError:
+                self.alive = False
+                raise
+
+    process = SentinelThenExitProcess(frames=["", "after-sentinel", EOFError()])
+    backend = make_backend(process)
+    spawn_backend(backend, tmp_path)
+
+    assert backend.read(timeout=0.5) == b"after-sentinel"
+    assert backend.read(timeout=0.5) == b""
+    backend.close()
+
+
+def test_eof_waits_for_a_racing_child_exit(tmp_path: Path) -> None:
+    class RacyExitProcess(FakePtyProcess):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.status_checks = 0
+
+        def isalive(self) -> bool:
+            self.status_checks += 1
+            if self.status_checks >= 2:
+                self.alive = False
+            return super().isalive()
+
+    process = RacyExitProcess(frames=[EOFError()], alive=True, exitstatus=7)
+    backend = make_backend(process)
+    spawn_backend(backend, tmp_path)
+
+    assert backend.read(timeout=0.5) == b""
+    assert backend.exit_code == 7
+    backend.close()
+
+
+def test_closed_conpty_handle_during_natural_cleanup_is_not_backend_failure(
+    tmp_path: Path,
+) -> None:
+    class ClosedHandle(OSError):
+        winerror = 6  # ERROR_INVALID_HANDLE
+
+    process = FakePtyProcess(
+        frames=[EOFError()],
+        alive=False,
+        exitstatus=0,
+        close_failures=[ClosedHandle("already closed")],
+    )
+    backend = make_backend(process)
+    spawn_backend(backend, tmp_path)
+
+    assert backend.read(timeout=0.5) == b""
+    backend.close()
+    assert backend.exit_code == 0
 
 
 def test_close_waits_for_delayed_final_frame_before_closing_dead_process(
