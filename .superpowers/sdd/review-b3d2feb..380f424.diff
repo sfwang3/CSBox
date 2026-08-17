@@ -1,0 +1,533 @@
+# Review package: b3d2feb..HEAD
+
+## Commits
+380f424 docs: add Task 2 implementation report
+519fa12 feat: add safe paths and cell layout primitives
+
+## Files changed
+ .superpowers/sdd/task-2-report.md | 73 +++++++++++++++++++++++++++++++++++++++
+ src/csbox/config/__init__.py      |  2 ++
+ src/csbox/config/loader.py        | 23 +++++++++---
+ src/csbox/config/models.py        |  7 ++++
+ src/csbox/core/safe_paths.py      | 48 +++++++++++++++++++++++++
+ src/csbox/core/text_layout.py     | 28 +++++++++++++++
+ tests/test_config.py              | 46 ++++++++++++++++++++++++
+ tests/test_safe_paths.py          | 64 ++++++++++++++++++++++++++++++++++
+ tests/test_text_layout.py         | 27 +++++++++++++++
+ 9 files changed, 314 insertions(+), 4 deletions(-)
+
+## Diff
+diff --git a/.superpowers/sdd/task-2-report.md b/.superpowers/sdd/task-2-report.md
+new file mode 100644
+index 0000000..54ff604
+--- /dev/null
++++ b/.superpowers/sdd/task-2-report.md
+@@ -0,0 +1,73 @@
++# CSBox v0.2 Task 2 实施报告
++
++## 范围
++
++仅实现 Task 2：共享安全路径校验、原子文本写入、按终端 cell 宽度换行，以及严格的 `ApiConfig`。未实现 API models 或后续任务，也未重构 Lab。
++
++## RED / GREEN 证据
++
++### RED
++
++先新增 `tests/test_safe_paths.py`、`tests/test_text_layout.py`，并在 `tests/test_config.py` 增加 Task 2 配置测试。
++
++运行：
++
++```text
++uv run pytest tests/test_safe_paths.py tests/test_text_layout.py -q
++```
++
++结果：收集阶段失败，两个目标模块尚不存在：`ModuleNotFoundError: csbox.core.safe_paths` 和 `ModuleNotFoundError: csbox.core.text_layout`。这是新增接口缺失导致的预期 RED。
++
++另为 API 配置持久化补充了回环测试，先运行该测试得到失败：保存后读取的 `api.variables` 仍为空；随后补齐现有配置序列化逻辑。
++
++### GREEN
++
++运行：
++
++```text
++uv run pytest tests/test_safe_paths.py tests/test_text_layout.py tests/test_config.py -q
++...................................                                      [100%]
++35 passed in 0.11s
++
++uv run ruff check src/csbox/core src/csbox/config tests/test_safe_paths.py tests/test_text_layout.py tests/test_config.py
++All checks passed!
++
++uv run ruff format --check src/csbox/core src/csbox/config tests/test_safe_paths.py tests/test_text_layout.py tests/test_config.py
++21 files already formatted
++```
++
++完整回归：
++
++```text
++uv run pytest -q
++317 passed, 1 skipped in 5.26s
++SKIPPED: Windows 原生 ConPTY smoke 只在 Windows CI 执行
++```
++
++## 文件与行为
++
++- `src/csbox/core/safe_paths.py`
++  - `safe_relative_path` 拒绝绝对路径、盘符路径、UNC-like 路径、反斜杠混用、`~` 家目录和 `..` 路径段。
++  - `atomic_write_text` 拒绝 symlink destination；使用目标目录中的临时文件、flush/fsync、`os.replace` 完成原子 UTF-8 文本写入，并清理失败临时文件。
++- `src/csbox/core/text_layout.py`
++  - `wrap_cells` 使用现有 wcwidth cluster 语义，支持 CJK、ASCII 与组合字符，保证返回行的 `display_width <= width`。
++- `src/csbox/config/models.py`
++  - 新增严格 `ApiConfig`：`variables`、默认 `response_max_bytes=262144`、默认 `timeout_seconds=10.0`，并加入 `CSBoxConfig.api`。
++  - response 上限为 1 KiB 至 16 MiB，timeout 上限为 0.1 至 300 秒；所有配置模型继续 `extra="forbid", strict=True`。
++- `src/csbox/config/__init__.py`
++  - 导出 `ApiConfig`。
++- `src/csbox/config/loader.py`
++  - 配置校验错误改为仅输出配置路径、字段、错误类型和中文修复动作，不输出 Pydantic 的原始 input/context。
++  - 保存配置时支持 `[api]` 与 `[api.variables]`，并验证回读。
++- 测试覆盖要求中的：`计算机网络实验`、`abc中文123`、`C:\\Users\\测试用户\\桌面\\实验一`、`~/课程实验/计算机网络/实验一`、组合字符和宽度 1/2/3。
++
++## 提交
++
++实现提交：`519fa12b272497102b8db9d04be2d076117554a8`（`feat: add safe paths and cell layout primitives`）。
++
++## 自审与 concerns
++
++- 当前 `width=1` 无法容纳宽度为 2 的单个 CJK cluster；为满足硬性宽度保证，helper 会跳过不可表示的 oversized cluster，不会拆分 cluster 或生成超宽行。这是终端 cell 约束下的明确取舍。
++- 原子写入检查的是 destination 本身的 symlink；未扩展为拒绝 symlink 父目录，因为 brief 只要求拒绝 symlink destinations。
++- 未修改任何真实 secrets、环境文件、远程分支或远程仓库。
++
+diff --git a/src/csbox/config/__init__.py b/src/csbox/config/__init__.py
+index 13617dd..794caff 100644
+--- a/src/csbox/config/__init__.py
++++ b/src/csbox/config/__init__.py
+@@ -1,23 +1,25 @@
+ from csbox.config.loader import ConfigurationError, load_config, save_project_config
+ from csbox.config.models import (
++    ApiConfig,
+     CheckConfig,
+     CourseConfig,
+     CSBoxConfig,
+     LabConfig,
+     PackConfig,
+     RenderConfig,
+     StudentConfig,
+ )
+ from csbox.config.paths import ConfigPaths
+ 
+ __all__ = [
++    "ApiConfig",
+     "CSBoxConfig",
+     "CheckConfig",
+     "ConfigurationError",
+     "ConfigPaths",
+     "CourseConfig",
+     "LabConfig",
+     "PackConfig",
+     "RenderConfig",
+     "StudentConfig",
+     "load_config",
+diff --git a/src/csbox/config/loader.py b/src/csbox/config/loader.py
+index fe2228e..9d846ee 100644
+--- a/src/csbox/config/loader.py
++++ b/src/csbox/config/loader.py
+@@ -31,21 +31,25 @@ def _merge_dicts(base: dict[str, Any], override: Mapping[str, Any]) -> dict[str,
+             merged[key] = _merge_dicts(dict(merged[key]), value)
+         else:
+             merged[key] = value
+     return merged
+ 
+ 
+ def _validate(data: Mapping[str, Any], path: Path) -> None:
+     try:
+         CSBoxConfig.model_validate(data)
+     except ValidationError as error:
+-        raise ConfigurationError(path, str(error)) from error
++        details = []
++        for item in error.errors(include_url=False, include_context=False):
++            location = ".".join(str(part) for part in item["loc"])
++            details.append(f"{location}: {item['type']}；请修改该字段后重试")
++        raise ConfigurationError(path, "；".join(details)) from error
+ 
+ 
+ def _read_toml(path: Path) -> dict[str, Any]:
+     if not path.is_file():
+         return {}
+     try:
+         data = tomllib.loads(path.read_text(encoding="utf-8"))
+     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+         raise ConfigurationError(path, str(error)) from error
+     _validate(data, path)
+@@ -64,37 +68,48 @@ def load_config(
+     config_data = CSBoxConfig().model_dump(mode="python")
+     for path in (resolved_paths.user, resolved_paths.project):
+         config_data = _merge_dicts(config_data, _read_toml(path))
+     if overrides:
+         override_path = Path("<命令行覆盖>")
+         _validate(overrides, override_path)
+         config_data = _merge_dicts(config_data, overrides)
+     try:
+         return CSBoxConfig.model_validate(config_data)
+     except ValidationError as error:
+-        raise ConfigurationError(resolved_paths.project, str(error)) from error
++        details = []
++        for item in error.errors(include_url=False, include_context=False):
++            location = ".".join(str(part) for part in item["loc"])
++            details.append(f"{location}: {item['type']}；请修改该字段后重试")
++        raise ConfigurationError(resolved_paths.project, "；".join(details)) from error
+ 
+ 
+-def _toml_value(value: str | int) -> str:
++def _toml_value(value: str | int | float | bool) -> str:
+     if isinstance(value, str):
+         return json.dumps(value, ensure_ascii=False)
+     return str(value)
+ 
+ 
+ def _serialize_config(config: CSBoxConfig) -> str:
+     data = config.model_dump(mode="python", exclude_none=True)
+     lines = [f"locale = {_toml_value(data['locale'])}", ""]
+-    for section in ("student", "course", "lab", "render", "pack", "check"):
++    for section in ("student", "course", "lab", "render", "pack", "check", "api"):
+         lines.append(f"[{section}]")
+         for key, value in data[section].items():
++            if section == "api" and key == "variables":
++                continue
+             lines.append(f"{key} = {_toml_value(value)}")
+         lines.append("")
++    if data["api"]["variables"]:
++        lines.append("[api.variables]")
++        for key, value in data["api"]["variables"].items():
++            lines.append(f"{json.dumps(key, ensure_ascii=False)} = {_toml_value(value)}")
++        lines.append("")
+     return "\n".join(lines)
+ 
+ 
+ def save_project_config(config: CSBoxConfig, cwd: Path) -> Path:
+     """Atomically persist the known configuration schema in the project directory."""
+     destination = Path(cwd) / ".csbox" / "config.toml"
+     destination.parent.mkdir(parents=True, exist_ok=True)
+     temporary_path: Path | None = None
+     try:
+         with tempfile.NamedTemporaryFile(
+diff --git a/src/csbox/config/models.py b/src/csbox/config/models.py
+index ae27036..6a8d64b 100644
+--- a/src/csbox/config/models.py
++++ b/src/csbox/config/models.py
+@@ -29,18 +29,25 @@ class RenderConfig(_ConfigModel):
+ 
+ 
+ class PackConfig(_ConfigModel):
+     filename: str = "{id}-{name}-{course}.zip"
+ 
+ 
+ class CheckConfig(_ConfigModel):
+     large_file_threshold_mb: int = Field(default=50, ge=1, le=4096)
+ 
+ 
++class ApiConfig(_ConfigModel):
++    variables: dict[str, str] = Field(default_factory=dict)
++    response_max_bytes: int = Field(default=262144, ge=1024, le=16 * 1024 * 1024)
++    timeout_seconds: float = Field(default=10.0, ge=0.1, le=300.0)
++
++
+ class CSBoxConfig(_ConfigModel):
+     locale: str = "zh_CN"
+     student: StudentConfig = Field(default_factory=StudentConfig)
+     course: CourseConfig = Field(default_factory=CourseConfig)
+     lab: LabConfig = Field(default_factory=LabConfig)
+     render: RenderConfig = Field(default_factory=RenderConfig)
+     pack: PackConfig = Field(default_factory=PackConfig)
+     check: CheckConfig = Field(default_factory=CheckConfig)
++    api: ApiConfig = Field(default_factory=ApiConfig)
+diff --git a/src/csbox/core/safe_paths.py b/src/csbox/core/safe_paths.py
+new file mode 100644
+index 0000000..ae0469c
+--- /dev/null
++++ b/src/csbox/core/safe_paths.py
+@@ -0,0 +1,48 @@
++from __future__ import annotations
++
++import os
++import tempfile
++from pathlib import Path, PurePosixPath
++
++
++def safe_relative_path(value: str) -> PurePosixPath:
++    """Validate and normalize a user-controlled POSIX-relative path."""
++    if not isinstance(value, str) or not value or "\x00" in value:
++        raise ValueError("path must be a non-empty relative POSIX path")
++    if "\\" in value or value.startswith("/") or value.startswith("//"):
++        raise ValueError("path must use relative POSIX separators")
++    if len(value) >= 2 and value[1] == ":" and value[0].isalpha():
++        raise ValueError("drive-qualified paths are not allowed")
++
++    parts = value.split("/")
++    if parts[0] == "~" or ".." in parts:
++        raise ValueError("home and parent paths are not allowed")
++    return PurePosixPath(value)
++
++
++def atomic_write_text(destination: Path, text: str) -> None:
++    """Write UTF-8 text through a same-directory temporary file and replace."""
++    destination = Path(destination)
++    if destination.is_symlink():
++        raise ValueError("refusing to write through a symlink destination")
++
++    destination.parent.mkdir(parents=True, exist_ok=True)
++    temporary_path: Path | None = None
++    try:
++        with tempfile.NamedTemporaryFile(
++            mode="w",
++            encoding="utf-8",
++            dir=destination.parent,
++            prefix=f".{destination.name}-",
++            suffix=".tmp",
++            delete=False,
++        ) as temporary_file:
++            temporary_path = Path(temporary_file.name)
++            temporary_file.write(text)
++            temporary_file.flush()
++            os.fsync(temporary_file.fileno())
++        os.replace(temporary_path, destination)
++    except OSError:
++        if temporary_path is not None:
++            temporary_path.unlink(missing_ok=True)
++        raise
+diff --git a/src/csbox/core/text_layout.py b/src/csbox/core/text_layout.py
+new file mode 100644
+index 0000000..bde6dcd
+--- /dev/null
++++ b/src/csbox/core/text_layout.py
+@@ -0,0 +1,28 @@
++from __future__ import annotations
++
++from csbox.core.display_width import _cell_clusters, display_width
++
++
++def wrap_cells(text: str, width: int) -> tuple[str, ...]:
++    """Wrap text by terminal cells without splitting wcwidth clusters."""
++    if width <= 0:
++        raise ValueError("width must be positive")
++
++    lines: list[str] = []
++    for logical_line in text.split("\n"):
++        current: list[str] = []
++        used = 0
++        for cluster, cluster_width in _cell_clusters(logical_line):
++            if cluster_width > width:
++                continue
++            if current and used + cluster_width > width:
++                lines.append("".join(current))
++                current = []
++                used = 0
++            current.append(cluster)
++            used += cluster_width
++        lines.append("".join(current))
++
++    result = tuple(lines)
++    assert all(display_width(line) <= width for line in result)
++    return result
+diff --git a/tests/test_config.py b/tests/test_config.py
+index 61f4f3a..0b804c8 100644
+--- a/tests/test_config.py
++++ b/tests/test_config.py
+@@ -1,18 +1,19 @@
+ from __future__ import annotations
+ 
+ import os
+ from pathlib import Path
+ 
+ import pytest
+ 
+ from csbox.config import (
++    ApiConfig,
+     ConfigPaths,
+     ConfigurationError,
+     CSBoxConfig,
+     LabConfig,
+     load_config,
+     loader,
+     save_project_config,
+ )
+ 
+ 
+@@ -21,20 +22,54 @@ def _paths(tmp_path: Path) -> ConfigPaths:
+ 
+ 
+ def test_load_config_uses_schema_defaults(tmp_path: Path) -> None:
+     config = load_config(tmp_path, paths=_paths(tmp_path))
+ 
+     assert config.locale == "zh_CN"
+     assert config.lab.capture_key == "f12"
+     assert config.render.theme == "dark"
+     assert config.pack.filename == "{id}-{name}-{course}.zip"
+     assert config.check.large_file_threshold_mb == 50
++    assert config.api == ApiConfig()
++
++
++@pytest.mark.parametrize(
++    ("field", "value"),
++    [("response_max_bytes", 0), ("timeout_seconds", 0.0)],
++)
++def test_load_config_reports_api_field_and_repair_without_exposing_value(
++    tmp_path: Path, field: str, value: int | float
++) -> None:
++    paths = _paths(tmp_path)
++    paths.user.write_text(f"[api]\n{field} = {value}\n", encoding="utf-8")
++
++    with pytest.raises(ConfigurationError) as error:
++        load_config(tmp_path, paths=paths)
++
++    message = str(error.value)
++    assert str(paths.user) in message
++    assert field in message
++    assert "修改" in message or "设置" in message
++    assert f": {value}" not in message
++
++
++def test_api_config_is_strict_and_has_bounded_defaults() -> None:
++    config = ApiConfig(variables={"BASE_URL": "https://example.test"})
++
++    assert config.response_max_bytes == 262144
++    assert config.timeout_seconds == 10.0
++    with pytest.raises(ValueError):
++        ApiConfig(response_max_bytes=0)
++    with pytest.raises(ValueError):
++        ApiConfig(timeout_seconds=0.0)
++    with pytest.raises(ValueError):
++        ApiConfig.model_validate({"timeout_seconds": "10"})
+ 
+ 
+ def test_project_config_overrides_user_config(tmp_path: Path) -> None:
+     paths = ConfigPaths(user=tmp_path / "user.toml", project=tmp_path / ".csbox/config.toml")
+     paths.user.write_text('[lab]\nshell = "bash"\n', encoding="utf-8")
+     paths.project.parent.mkdir()
+     paths.project.write_text('[lab]\nshell = "zsh"\n', encoding="utf-8")
+ 
+     assert load_config(tmp_path, paths=paths).lab.shell == "zsh"
+ 
+@@ -146,10 +181,21 @@ def test_save_project_config_replaces_same_directory_temporary_file(
+     monkeypatch.setattr(loader.os, "replace", replace)
+     config_path = save_project_config(CSBoxConfig(lab=LabConfig(shell="bash")), tmp_path)
+ 
+     assert config_path == tmp_path / ".csbox/config.toml"
+     assert calls == [(calls[0][0], config_path)]
+     assert calls[0][0].parent == config_path.parent
+     loaded_config = load_config(
+         tmp_path, paths=ConfigPaths(user=tmp_path / "user.toml", project=config_path)
+     )
+     assert loaded_config.lab.shell == "bash"
++
++
++def test_save_project_config_round_trips_api_settings(tmp_path: Path) -> None:
++    config = CSBoxConfig(api=ApiConfig(variables={"BASE_URL": "https://example.test"}))
++
++    config_path = save_project_config(config, tmp_path)
++    loaded = load_config(
++        tmp_path, paths=ConfigPaths(user=tmp_path / "user.toml", project=config_path)
++    )
++
++    assert loaded.api.variables == {"BASE_URL": "https://example.test"}
+diff --git a/tests/test_safe_paths.py b/tests/test_safe_paths.py
+new file mode 100644
+index 0000000..cc46307
+--- /dev/null
++++ b/tests/test_safe_paths.py
+@@ -0,0 +1,64 @@
++from __future__ import annotations
++
++from pathlib import Path, PurePosixPath
++
++import pytest
++
++from csbox.core.safe_paths import atomic_write_text, safe_relative_path
++
++
++@pytest.mark.parametrize(
++    "value",
++    [
++        "/tmp/实验一",
++        "C:\\Users\\测试用户\\桌面\\实验一",
++        "\\\\server\\share\\实验一",
++        "~/课程实验/计算机网络/实验一",
++        "实验一\\证据/截图.png",
++        "实验一/../秘密.txt",
++        "../秘密.txt",
++    ],
++)
++def test_safe_relative_path_rejects_absolute_drive_unc_mixed_and_parent_paths(
++    value: str,
++) -> None:
++    with pytest.raises(ValueError):
++        safe_relative_path(value)
++
++
++def test_safe_relative_path_returns_posix_path_for_a_nested_relative_path() -> None:
++    assert safe_relative_path("课程/计算机网络/实验一") == PurePosixPath("课程/计算机网络/实验一")
++
++
++def test_atomic_write_text_refuses_a_symlink_destination(tmp_path: Path) -> None:
++    target = tmp_path / "target.txt"
++    target.write_text("original", encoding="utf-8")
++    destination = tmp_path / "link.txt"
++    destination.symlink_to(target)
++
++    with pytest.raises(ValueError):
++        atomic_write_text(destination, "replacement")
++
++    assert target.read_text(encoding="utf-8") == "original"
++
++
++def test_atomic_write_text_replaces_using_a_same_directory_temporary_file(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    import csbox.core.safe_paths as safe_paths
++
++    calls: list[tuple[Path, Path]] = []
++    real_replace = safe_paths.os.replace
++
++    def replace(source: str | Path, destination: str | Path) -> None:
++        calls.append((Path(source), Path(destination)))
++        real_replace(source, destination)
++
++    monkeypatch.setattr(safe_paths.os, "replace", replace)
++    destination = tmp_path / "nested" / "output.txt"
++
++    atomic_write_text(destination, "计算机网络实验")
++
++    assert destination.read_text(encoding="utf-8") == "计算机网络实验"
++    assert calls and calls[0][1] == destination
++    assert calls[0][0].parent == destination.parent
+diff --git a/tests/test_text_layout.py b/tests/test_text_layout.py
+new file mode 100644
+index 0000000..c4d683d
+--- /dev/null
++++ b/tests/test_text_layout.py
+@@ -0,0 +1,27 @@
++from __future__ import annotations
++
++import pytest
++
++from csbox.core.display_width import display_width
++from csbox.core.text_layout import wrap_cells
++
++
++@pytest.mark.parametrize("width", [1, 2, 3])
++@pytest.mark.parametrize("text", ["计算机网络实验", "abc中文123"])
++def test_wrap_cells_never_exceeds_display_width(text: str, width: int) -> None:
++    lines = wrap_cells(text, width)
++
++    assert lines
++    assert all(display_width(line) <= width for line in lines)
++
++
++def test_wrap_cells_does_not_split_a_combining_character_from_its_base() -> None:
++    lines = wrap_cells("e\u0301abc", 1)
++
++    assert lines[0] == "e\u0301"
++    assert all(display_width(line) <= 1 for line in lines)
++
++
++def test_wrap_cells_rejects_non_positive_width() -> None:
++    with pytest.raises(ValueError):
++        wrap_cells("abc", 0)

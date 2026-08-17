@@ -1,0 +1,2119 @@
+# Review package: 002171e..849d276
+
+## Commits
+849d276 fix: drain conpty reader before close
+5d73a82 fix: harden terminal backend boundaries
+ffe30a0 feat: implement cross-platform terminal backends
+
+## Files changed
+ pyproject.toml                          |   3 +
+ src/csbox/core/shell.py                 | 195 +++++++++++++--
+ src/csbox/core/terminal.py              |  97 +++++---
+ src/csbox/core/terminal_unix.py         | 353 ++++++++++++++++++++++++++++
+ src/csbox/core/terminal_windows.py      | 323 +++++++++++++++++++++++++
+ tests/test_environment.py               |   3 +-
+ tests/test_shell_selection.py           | 215 +++++++++++++++++
+ tests/test_terminal.py                  |  29 +--
+ tests/test_terminal_unix_integration.py | 278 ++++++++++++++++++++++
+ tests/test_terminal_windows.py          | 405 ++++++++++++++++++++++++++++++++
+ 10 files changed, 1819 insertions(+), 82 deletions(-)
+
+## Diff
+diff --git a/pyproject.toml b/pyproject.toml
+index 8491bf1..a464b1b 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -43,10 +43,13 @@ src = ["src", "tests"]
+ [tool.ruff.lint]
+ select = ["E", "F", "I", "UP", "B", "SIM"]
+ 
+ [tool.ruff.format]
+ quote-style = "double"
+ indent-style = "space"
+ 
+ [tool.pytest.ini_options]
+ testpaths = ["tests"]
+ addopts = "-ra"
++markers = [
++  "pty: real pseudoterminal integration tests",
++]
+diff --git a/src/csbox/core/shell.py b/src/csbox/core/shell.py
+index 7a16d43..f914f80 100644
+--- a/src/csbox/core/shell.py
++++ b/src/csbox/core/shell.py
+@@ -1,81 +1,230 @@
+ from __future__ import annotations
+ 
+-from collections.abc import Mapping
++import os
++import platform
++import shutil
++import subprocess
++from collections.abc import Callable, Mapping, Sequence
+ from dataclasses import dataclass
+ from enum import StrEnum
+ from pathlib import PurePath
+ 
+ from csbox.core.registry import Registry
+ 
+ 
+ class ShellKind(StrEnum):
+     POWERSHELL_51 = "powershell_51"
+     POWERSHELL_7 = "powershell_7"
+     BASH = "bash"
+     ZSH = "zsh"
+     UNKNOWN = "unknown"
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+ class ShellProfile:
+     kind: ShellKind
+     display_name: str
+     executable: str
++    launch_arguments: tuple[str, ...] = ()
++    version_arguments: tuple[str, ...] = ()
++
++    @property
++    def command(self) -> tuple[str, ...]:
++        return (self.executable, *self.launch_arguments)
++
++    @property
++    def version_command(self) -> tuple[str, ...]:
++        return (self.executable, *self.version_arguments)
++
++
++PowerShell51Profile = ShellProfile(
++    ShellKind.POWERSHELL_51,
++    "Windows PowerShell 5.1",
++    "powershell.exe",
++    ("-NoLogo",),
++    (
++        "-NoLogo",
++        "-NoProfile",
++        "-NonInteractive",
++        "-Command",
++        "$PSVersionTable.PSVersion.ToString()",
++    ),
++)
++PowerShell7Profile = ShellProfile(
++    ShellKind.POWERSHELL_7,
++    "PowerShell 7",
++    "pwsh.exe",
++    ("-NoLogo",),
++    (
++        "-NoLogo",
++        "-NoProfile",
++        "-NonInteractive",
++        "-Command",
++        "$PSVersionTable.PSVersion.ToString()",
++    ),
++)
++BashProfile = ShellProfile(
++    ShellKind.BASH,
++    "Bash",
++    "bash",
++    ("--noprofile", "--norc"),
++    ("--version",),
++)
++ZshProfile = ShellProfile(
++    ShellKind.ZSH,
++    "Zsh",
++    "zsh",
++    ("-f",),
++    ("--version",),
++)
+ 
+ 
+ SHELL_PROFILES = Registry[ShellProfile]("shell-profile")
+-for _profile in (
+-    ShellProfile(ShellKind.POWERSHELL_51, "Windows PowerShell 5.1", "powershell.exe"),
+-    ShellProfile(ShellKind.POWERSHELL_7, "PowerShell 7", "pwsh.exe"),
+-    ShellProfile(ShellKind.BASH, "Bash", "bash"),
+-    ShellProfile(ShellKind.ZSH, "Zsh", "zsh"),
+-):
++for _profile in (PowerShell51Profile, PowerShell7Profile, BashProfile, ZshProfile):
+     SHELL_PROFILES.register(_profile.kind.value, _profile)
+ 
+ 
+ UNKNOWN_SHELL = ShellProfile(ShellKind.UNKNOWN, "", "")
+ 
+ 
++_SHELL_ALIASES = {
++    "powershell_51": ShellKind.POWERSHELL_51,
++    "powershell5": ShellKind.POWERSHELL_51,
++    "powershell.exe": ShellKind.POWERSHELL_51,
++    "powershell": ShellKind.POWERSHELL_51,
++    "powershell_7": ShellKind.POWERSHELL_7,
++    "powershell7": ShellKind.POWERSHELL_7,
++    "pwsh.exe": ShellKind.POWERSHELL_7,
++    "pwsh": ShellKind.POWERSHELL_7,
++    "bash": ShellKind.BASH,
++    "zsh": ShellKind.ZSH,
++}
++
++
++class ShellUnavailableError(RuntimeError):
++    """A shell-selection failure with stable Chinese user-facing guidance."""
++
++    def __init__(self, user_message: str, cause: Exception) -> None:
++        super().__init__(user_message)
++        self.user_message = user_message
++        self.cause = cause
++
++
+ def supported_shell_profiles() -> tuple[ShellProfile, ...]:
+     return tuple(profile for _, profile in SHELL_PROFILES.items())
+ 
+ 
+ def _basename(value: str) -> str:
+     normalized = value.replace("\\", "/")
+     return PurePath(normalized).name.lower()
+ 
+ 
++def _kind_for(value: str) -> ShellKind | None:
++    normalized = value.strip().lower()
++    return _SHELL_ALIASES.get(normalized) or _SHELL_ALIASES.get(_basename(normalized))
++
++
+ def detect_shell(
+     *,
+     environ: Mapping[str, str] | None = None,
+     system: str | None = None,
+     is_wsl: bool = False,
+ ) -> ShellProfile:
+     del is_wsl
+     env = dict(environ or {})
+     source = env.get("CSBOX_SHELL") or env.get("SHELL") or env.get("ComSpec") or ""
+-    executable = _basename(source)
+-    explicit = env.get("CSBOX_SHELL", "").strip().lower()
+-
+-    aliases = {
+-        "powershell_51": ShellKind.POWERSHELL_51,
+-        "powershell5": ShellKind.POWERSHELL_51,
+-        "powershell.exe": ShellKind.POWERSHELL_51,
+-        "powershell": ShellKind.POWERSHELL_51,
+-        "powershell_7": ShellKind.POWERSHELL_7,
+-        "powershell7": ShellKind.POWERSHELL_7,
+-        "pwsh.exe": ShellKind.POWERSHELL_7,
+-        "pwsh": ShellKind.POWERSHELL_7,
+-        "bash": ShellKind.BASH,
+-        "zsh": ShellKind.ZSH,
+-    }
+-    kind = aliases.get(explicit) or aliases.get(executable)
++    explicit = env.get("CSBOX_SHELL", "")
++    kind = _kind_for(explicit) or _kind_for(source)
+ 
+     if kind is None and system == "Windows" and env.get("PSVersion", "").startswith("7"):
+         kind = ShellKind.POWERSHELL_7
+     if kind is None and system == "Windows" and env.get("PSModulePath"):
+         kind = ShellKind.POWERSHELL_51
+ 
+     if kind is None:
+         return UNKNOWN_SHELL
+     return SHELL_PROFILES.get(kind.value)
++
++
++def _raise_shell_error(message: str, cause: Exception) -> None:
++    raise ShellUnavailableError(message, cause) from cause
++
++
++def _unavailable_message(profile: ShellProfile) -> str:
++    if profile is PowerShell7Profile:
++        return "未找到 pwsh.exe。请安装 PowerShell 7，或使用 --shell powershell。"
++    if profile is PowerShell51Profile:
++        return "未找到 powershell.exe。请启用 Windows PowerShell，或使用 --shell pwsh。"
++    if profile is BashProfile:
++        return "未找到 bash。请安装 Bash，或使用 --shell zsh。"
++    return "未找到 zsh。请安装 Zsh，或使用 --shell bash。"
++
++
++def _profile_for_requested(value: str) -> ShellProfile:
++    kind = _kind_for(value)
++    if kind is None:
++        cause = ValueError(f"unsupported shell: {value}")
++        _raise_shell_error(f"不支持的 Shell：{value}。可选 powershell、pwsh、bash 或 zsh。", cause)
++    return SHELL_PROFILES.get(kind.value)
++
++
++def select_shell(
++    requested: str | None,
++    config_shell: str | None,
++    system: str | None = None,
++    environ: Mapping[str, str] | None = None,
++    which: Callable[[str], str | None] | None = None,
++) -> ShellProfile:
++    """Select an available shell according to explicit, configured, and platform order."""
++
++    env = os.environ if environ is None else environ
++    os_name = platform.system() if system is None else system
++    find_command = shutil.which if which is None else which
++
++    preferred = requested or config_shell
++    if preferred:
++        profile = _profile_for_requested(preferred)
++        if find_command(profile.executable) is None:
++            cause = FileNotFoundError(profile.executable)
++            _raise_shell_error(_unavailable_message(profile), cause)
++        return profile
++
++    current = detect_shell(environ=env, system=os_name)
++    if current is not UNKNOWN_SHELL and find_command(current.executable) is not None:
++        return current
++
++    ordered_kinds: Sequence[ShellKind]
++    if os_name == "Windows":
++        ordered_kinds = (ShellKind.POWERSHELL_7, ShellKind.POWERSHELL_51)
++    else:
++        ordered_kinds = (ShellKind.BASH, ShellKind.ZSH)
++    for kind in ordered_kinds:
++        profile = SHELL_PROFILES.get(kind.value)
++        if find_command(profile.executable) is not None:
++            return profile
++
++    cause = FileNotFoundError("no supported shell executable")
++    if os_name == "Windows":
++        message = "未找到可用的 Shell。请安装 PowerShell 7，或启用 Windows PowerShell。"
++    else:
++        message = "未找到可用的 Shell。请安装 bash 或 zsh。"
++    _raise_shell_error(message, cause)
++
++
++def detect_shell_version(profile: ShellProfile) -> str | None:
++    """Probe a shell version without preventing interactive startup on failure."""
++
++    if not profile.version_command:
++        return None
++    try:
++        completed = subprocess.run(
++            list(profile.version_command),
++            capture_output=True,
++            text=True,
++            check=True,
++            timeout=1.0,
++        )
++    except (OSError, subprocess.SubprocessError):
++        return None
++    output = completed.stdout.strip() or completed.stderr.strip()
++    return output.splitlines()[0] if output else None
+diff --git a/src/csbox/core/terminal.py b/src/csbox/core/terminal.py
+index 0d1a5e3..ea03fea 100644
+--- a/src/csbox/core/terminal.py
++++ b/src/csbox/core/terminal.py
+@@ -1,81 +1,100 @@
+ from __future__ import annotations
+ 
++import platform
+ from abc import ABC, abstractmethod
+ from collections.abc import Mapping, Sequence
+ from pathlib import Path
++from typing import TYPE_CHECKING
++
++from csbox.core.events import TerminalSize
++
++if TYPE_CHECKING:
++    from csbox.core.terminal_unix import UnixPTYBackend
++    from csbox.core.terminal_windows import WindowsConPTYBackend
++
++
++DEFAULT_TERMINAL_SIZE = TerminalSize(80, 24)
++
++
++class TerminalBackendError(RuntimeError):
++    """A terminal backend failure with stable Chinese user-facing guidance."""
++
++    def __init__(self, user_message: str, cause: Exception) -> None:
++        super().__init__(user_message)
++        self.user_message = user_message
++        self.cause = cause
+ 
+ 
+ class TerminalBackend(ABC):
+     @abstractmethod
+     def spawn(
+         self,
+         command: Sequence[str],
+         *,
+         cwd: Path | None = None,
+         env: Mapping[str, str] | None = None,
++        size: TerminalSize = DEFAULT_TERMINAL_SIZE,
+     ) -> None:
+-        """Start a terminal process in a future backend implementation."""
++        """Start a process connected to a pseudoterminal."""
+ 
+     @abstractmethod
+-    def read(self, max_bytes: int = 4096) -> bytes:
+-        """Read terminal output."""
++    def read(self, max_bytes: int = 65536, timeout: float = 0.05) -> bytes | None:
++        """Return output bytes, None when idle, or b"" after EOF."""
+ 
+     @abstractmethod
+-    def write(self, data: str | bytes) -> int:
+-        """Write input to the terminal."""
++    def write(self, data: bytes) -> int:
++        """Write input bytes to the terminal."""
+ 
+     @abstractmethod
+     def resize(self, columns: int, rows: int) -> None:
+         """Resize the terminal viewport."""
+ 
+     @abstractmethod
+     def is_alive(self) -> bool:
+         """Return whether the terminal process is alive."""
+ 
+     @abstractmethod
+-    def close(self) -> None:
+-        """Close the terminal process and associated resources."""
++    def wait(self, timeout: float = 0.0) -> int | None:
++        """Wait up to timeout seconds and return the exit code when available."""
+ 
++    @property
++    @abstractmethod
++    def exit_code(self) -> int | None:
++        """Return the process exit code when available."""
+ 
+-class _ReservedTerminalBackend(TerminalBackend):
+-    def _not_implemented(self) -> None:
+-        raise NotImplementedError(f"{type(self).__name__} is not implemented")
++    @abstractmethod
++    def close(self) -> None:
++        """Close the terminal process and associated resources."""
+ 
+-    def spawn(
+-        self,
+-        command: Sequence[str],
+-        *,
+-        cwd: Path | None = None,
+-        env: Mapping[str, str] | None = None,
+-    ) -> None:
+-        del command, cwd, env
+-        self._not_implemented()
+ 
+-    def read(self, max_bytes: int = 4096) -> bytes:
+-        del max_bytes
+-        self._not_implemented()
+-        return b""
++def create_terminal_backend(system: str | None = None) -> TerminalBackend:
++    os_name = platform.system() if system is None else system
++    if os_name == "Windows":
++        from csbox.core.terminal_windows import WindowsConPTYBackend
+ 
+-    def write(self, data: str | bytes) -> int:
+-        del data
+-        self._not_implemented()
+-        return 0
++        return WindowsConPTYBackend()
++    from csbox.core.terminal_unix import UnixPTYBackend
+ 
+-    def resize(self, columns: int, rows: int) -> None:
+-        del columns, rows
+-        self._not_implemented()
++    return UnixPTYBackend()
+ 
+-    def is_alive(self) -> bool:
+-        self._not_implemented()
+-        return False
+ 
+-    def close(self) -> None:
+-        self._not_implemented()
++def __getattr__(name: str) -> type[TerminalBackend]:
++    if name == "UnixPTYBackend":
++        from csbox.core.terminal_unix import UnixPTYBackend
+ 
++        return UnixPTYBackend
++    if name == "WindowsConPTYBackend":
++        from csbox.core.terminal_windows import WindowsConPTYBackend
+ 
+-class WindowsConPTYBackend(_ReservedTerminalBackend):
+-    """Reserved adapter for a future Windows ConPTY implementation."""
++        return WindowsConPTYBackend
++    raise AttributeError(name)
+ 
+ 
+-class UnixPTYBackend(_ReservedTerminalBackend):
+-    """Reserved adapter for a future Unix PTY implementation."""
++__all__ = [
++    "TerminalBackend",
++    "TerminalBackendError",
++    "DEFAULT_TERMINAL_SIZE",
++    "UnixPTYBackend",
++    "WindowsConPTYBackend",
++    "create_terminal_backend",
++]
+diff --git a/src/csbox/core/terminal_unix.py b/src/csbox/core/terminal_unix.py
+new file mode 100644
+index 0000000..a5b2940
+--- /dev/null
++++ b/src/csbox/core/terminal_unix.py
+@@ -0,0 +1,353 @@
++from __future__ import annotations
++
++import errno
++import json
++import os
++import selectors
++import signal
++import struct
++import time
++from collections.abc import Mapping, Sequence
++from contextlib import suppress
++from pathlib import Path
++
++from csbox.core.events import TerminalSize
++from csbox.core.terminal import DEFAULT_TERMINAL_SIZE, TerminalBackend, TerminalBackendError
++
++
++class UnixPTYBackend(TerminalBackend):
++    """A real Unix pseudoterminal backed by a controlling terminal."""
++
++    _SPAWN_HANDSHAKE_TIMEOUT = 5.0
++    _WRITE_TIMEOUT = 0.25
++
++    def __init__(self) -> None:
++        self._pid: int | None = None
++        self._master_fd: int | None = None
++        self._selector: selectors.BaseSelector | None = None
++        self._exit_code: int | None = None
++        self._reaped = False
++        self._eof = False
++        self._closed = False
++
++    def spawn(
++        self,
++        command: Sequence[str],
++        *,
++        cwd: Path | None = None,
++        env: Mapping[str, str] | None = None,
++        size: TerminalSize = DEFAULT_TERMINAL_SIZE,
++    ) -> None:
++        import fcntl
++        import pty
++        import termios
++
++        if self._pid is not None:
++            raise RuntimeError("终端进程已经启动。")
++        if not command or not all(isinstance(argument, str) and argument for argument in command):
++            raise ValueError("终端启动命令不能为空，且参数必须是非空字符串。")
++
++        child_env = os.environ.copy()
++        if env is not None:
++            child_env.update(env)
++        child_env.setdefault("TERM", "xterm-256color")
++        error_read_fd, error_write_fd = self._create_cloexec_pipe()
++        try:
++            pid, master_fd = pty.fork()
++        except OSError as cause:
++            os.close(error_read_fd)
++            os.close(error_write_fd)
++            raise TerminalBackendError("无法创建 Unix PTY，请检查系统终端能力。", cause) from cause
++
++        if pid == 0:
++            os.close(error_read_fd)
++            try:
++                window_size = struct.pack("HHHH", size.rows, size.columns, 0, 0)
++                fcntl.ioctl(0, termios.TIOCSWINSZ, window_size)
++                if cwd is not None:
++                    os.chdir(cwd)
++                os.execvpe(command[0], list(command), child_env)
++            except BaseException as cause:
++                try:
++                    self._send_child_error(error_write_fd, cause)
++                finally:
++                    os._exit(127)
++
++        os.close(error_write_fd)
++        child_error = self._receive_child_error(error_read_fd, pid, master_fd)
++        if child_error is not None:
++            raise TerminalBackendError(
++                "无法启动 Unix PTY 子进程，请检查命令和工作目录。", child_error
++            ) from child_error
++
++        self._pid = pid
++        self._master_fd = master_fd
++        self._selector = selectors.DefaultSelector()
++        self._selector.register(master_fd, selectors.EVENT_READ)
++        flags = fcntl.fcntl(master_fd, fcntl.F_GETFL)
++        fcntl.fcntl(master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
++        self._closed = False
++        try:
++            self.resize(size.columns, size.rows)
++        except BaseException:
++            self.close()
++            raise
++
++    def read(self, max_bytes: int = 65536, timeout: float = 0.05) -> bytes | None:
++        if type(max_bytes) is not int or max_bytes <= 0:
++            raise ValueError("单次读取字节数必须是正整数。")
++        if timeout < 0:
++            raise ValueError("读取超时时间不能为负数。")
++        if self._eof:
++            self._reap_nonblocking()
++            return b""
++        if self._master_fd is None or self._selector is None:
++            raise RuntimeError("终端进程尚未启动。")
++
++        events = self._selector.select(timeout)
++        if not events:
++            self._reap_nonblocking()
++            return None
++        try:
++            data = os.read(self._master_fd, max_bytes)
++        except BlockingIOError:
++            return None
++        except OSError as cause:
++            if cause.errno in (errno.EIO, errno.EBADF):
++                self._mark_eof()
++                self._reap_nonblocking()
++                return b""
++            raise TerminalBackendError("读取 Unix PTY 输出失败。", cause) from cause
++        if data:
++            return data
++        self._mark_eof()
++        self._reap_nonblocking()
++        return b""
++
++    def write(self, data: bytes) -> int:
++        if not isinstance(data, bytes):
++            raise TypeError("终端输入必须是 bytes。")
++        if self._master_fd is None or self._eof:
++            raise BrokenPipeError("终端已关闭，无法写入。")
++        if not data:
++            return 0
++        deadline = time.monotonic() + self._WRITE_TIMEOUT
++        while True:
++            try:
++                return os.write(self._master_fd, data)
++            except InterruptedError:
++                continue
++            except BlockingIOError:
++                remaining = deadline - time.monotonic()
++                if remaining <= 0 or not self._wait_until_writable(remaining):
++                    return 0
++            except OSError as cause:
++                if cause.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
++                    remaining = deadline - time.monotonic()
++                    if remaining <= 0 or not self._wait_until_writable(remaining):
++                        return 0
++                    continue
++                if cause.errno in (errno.EIO, errno.EBADF):
++                    raise BrokenPipeError("终端已关闭，无法写入。") from cause
++                raise TerminalBackendError("写入 Unix PTY 失败。", cause) from cause
++
++    def resize(self, columns: int, rows: int) -> None:
++        import fcntl
++        import termios
++
++        self._validate_dimensions(columns, rows)
++        if self._master_fd is None or self._eof:
++            raise RuntimeError("终端进程尚未启动或已经关闭。")
++        window_size = struct.pack("HHHH", rows, columns, 0, 0)
++        try:
++            fcntl.ioctl(self._master_fd, termios.TIOCSWINSZ, window_size)
++        except OSError as cause:
++            raise TerminalBackendError("调整 Unix PTY 尺寸失败。", cause) from cause
++
++    def is_alive(self) -> bool:
++        self._reap_nonblocking()
++        return self._pid is not None and not self._reaped
++
++    def wait(self, timeout: float = 0.0) -> int | None:
++        if timeout < 0:
++            raise ValueError("等待超时时间不能为负数。")
++        if self._pid is None:
++            return self._exit_code
++        deadline = time.monotonic() + timeout
++        while True:
++            self._reap_nonblocking()
++            if self._reaped:
++                return self._exit_code
++            remaining = deadline - time.monotonic()
++            if remaining <= 0:
++                return None
++            time.sleep(min(0.01, remaining))
++
++    @property
++    def exit_code(self) -> int | None:
++        self._reap_nonblocking()
++        return self._exit_code
++
++    def close(self) -> None:
++        if self._closed:
++            return
++        self._closed = True
++        self._reap_nonblocking()
++        self._close_master()
++        if self.is_alive():
++            self._signal_process_group(signal.SIGHUP)
++            self.wait(timeout=0.2)
++        if self.is_alive():
++            self._signal_process_group(signal.SIGTERM)
++            self.wait(timeout=0.3)
++        if self.is_alive():
++            self._signal_process_group(signal.SIGKILL)
++            self.wait(timeout=0.5)
++
++    @staticmethod
++    def _validate_dimensions(columns: int, rows: int) -> None:
++        for name, value in (("columns", columns), ("rows", rows)):
++            if type(value) is not int:
++                raise TypeError(f"终端尺寸 {name} 必须是整数。")
++            if value <= 0:
++                raise ValueError(f"终端尺寸 {name} 必须是正数。")
++
++    def _mark_eof(self) -> None:
++        self._eof = True
++        self._close_master()
++
++    def _close_master(self) -> None:
++        master_fd = self._master_fd
++        selector = self._selector
++        self._master_fd = None
++        self._selector = None
++        if selector is not None:
++            if master_fd is not None:
++                with suppress(KeyError, ValueError):
++                    selector.unregister(master_fd)
++            selector.close()
++        if master_fd is not None:
++            try:
++                os.close(master_fd)
++            except OSError as cause:
++                if cause.errno != errno.EBADF:
++                    raise
++
++    def _reap_nonblocking(self) -> None:
++        if self._pid is None or self._reaped:
++            return
++        try:
++            waited_pid, status = os.waitpid(self._pid, os.WNOHANG)
++        except ChildProcessError:
++            self._reaped = True
++            return
++        if waited_pid == self._pid:
++            self._exit_code = os.waitstatus_to_exitcode(status)
++            self._reaped = True
++
++    def _signal_process_group(self, sig: signal.Signals) -> None:
++        if self._pid is None or self._reaped:
++            return
++        try:
++            os.killpg(self._pid, sig)
++        except ProcessLookupError:
++            self._reap_nonblocking()
++
++    @staticmethod
++    def _create_cloexec_pipe() -> tuple[int, int]:
++        if hasattr(os, "pipe2"):
++            return os.pipe2(os.O_CLOEXEC)
++        read_fd, write_fd = os.pipe()
++        os.set_inheritable(read_fd, False)
++        os.set_inheritable(write_fd, False)
++        return read_fd, write_fd
++
++    @staticmethod
++    def _send_child_error(write_fd: int, cause: BaseException) -> None:
++        filename = getattr(cause, "filename", None)
++        payload = json.dumps(
++            {
++                "errno": getattr(cause, "errno", None),
++                "filename": None if filename is None else os.fspath(filename),
++                "message": str(cause),
++                "type": type(cause).__name__,
++            },
++            ensure_ascii=False,
++        ).encode("utf-8", errors="replace")
++        view = memoryview(payload)
++        while view:
++            written = os.write(write_fd, view)
++            view = view[written:]
++
++    def _receive_child_error(
++        self,
++        read_fd: int,
++        pid: int,
++        master_fd: int,
++    ) -> Exception | None:
++        selector = selectors.DefaultSelector()
++        try:
++            selector.register(read_fd, selectors.EVENT_READ)
++            if not selector.select(self._SPAWN_HANDSHAKE_TIMEOUT):
++                cause: Exception = TimeoutError("Unix PTY child setup handshake timed out")
++                self._abort_failed_spawn(pid, master_fd)
++                return cause
++            chunks = bytearray()
++            while True:
++                chunk = os.read(read_fd, 4096)
++                if not chunk:
++                    break
++                chunks.extend(chunk)
++        finally:
++            selector.close()
++            os.close(read_fd)
++        if not chunks:
++            return None
++        self._close_failed_master(master_fd)
++        self._reap_failed_child(pid)
++        try:
++            details = json.loads(chunks.decode("utf-8"))
++            error_number = details.get("errno")
++            message = details.get("message") or details.get("type") or "child setup failed"
++            filename = details.get("filename")
++            if error_number is not None:
++                return OSError(error_number, message, filename)
++            return RuntimeError(message)
++        except (TypeError, ValueError, UnicodeError) as cause:
++            return RuntimeError(f"invalid child setup error payload: {cause}")
++
++    def _abort_failed_spawn(self, pid: int, master_fd: int) -> None:
++        self._close_failed_master(master_fd)
++        with suppress(ProcessLookupError):
++            os.kill(pid, signal.SIGKILL)
++        self._reap_failed_child(pid)
++
++    @staticmethod
++    def _close_failed_master(master_fd: int) -> None:
++        with suppress(OSError):
++            os.close(master_fd)
++
++    @staticmethod
++    def _reap_failed_child(pid: int) -> None:
++        while True:
++            try:
++                os.waitpid(pid, 0)
++                return
++            except InterruptedError:
++                continue
++            except ChildProcessError:
++                return
++
++    def _wait_until_writable(self, timeout: float) -> bool:
++        if self._master_fd is None:
++            return False
++        selector = selectors.DefaultSelector()
++        try:
++            selector.register(self._master_fd, selectors.EVENT_WRITE)
++            return bool(selector.select(timeout))
++        except OSError as cause:
++            if cause.errno in (errno.EIO, errno.EBADF):
++                raise BrokenPipeError("终端已关闭，无法写入。") from cause
++            raise TerminalBackendError("等待 Unix PTY 可写状态失败。", cause) from cause
++        finally:
++            selector.close()
+diff --git a/src/csbox/core/terminal_windows.py b/src/csbox/core/terminal_windows.py
+new file mode 100644
+index 0000000..74518f2
+--- /dev/null
++++ b/src/csbox/core/terminal_windows.py
+@@ -0,0 +1,323 @@
++from __future__ import annotations
++
++import codecs
++import os
++import threading
++import time
++from collections.abc import Mapping, Sequence
++from pathlib import Path
++from typing import Any
++
++from csbox.core.events import TerminalSize
++from csbox.core.terminal import DEFAULT_TERMINAL_SIZE, TerminalBackend, TerminalBackendError
++
++
++class WindowsConPTYBackend(TerminalBackend):
++    """A thread-safe adapter around pywinpty's high-level PtyProcess API."""
++
++    _READ_SIZE = 65536
++    _CLOSE_GRACE = 0.05
++    _READER_JOIN_TIMEOUT = 0.5
++
++    def __init__(
++        self,
++        *,
++        pty_process_factory: Any | None = None,
++        write_timeout: float = 0.1,
++    ) -> None:
++        if write_timeout <= 0:
++            raise ValueError("终端写入超时时间必须是正数。")
++        self._pty_process_factory = pty_process_factory
++        self._write_timeout = write_timeout
++        self._process: Any | None = None
++        self._reader_thread: threading.Thread | None = None
++        self._output = bytearray()
++        self._reader_done = False
++        self._reader_error: Exception | None = None
++        self._input_buffer = b""
++        self._exit_code: int | None = None
++        self._closed = False
++        self._closing = False
++        self._close_lock = threading.Lock()
++        self._state_lock = threading.RLock()
++        self._output_ready = threading.Condition()
++
++    def spawn(
++        self,
++        command: Sequence[str],
++        *,
++        cwd: Path | None = None,
++        env: Mapping[str, str] | None = None,
++        size: TerminalSize = DEFAULT_TERMINAL_SIZE,
++    ) -> None:
++        if not command or not all(isinstance(argument, str) and argument for argument in command):
++            raise ValueError("终端启动命令不能为空，且参数必须是非空字符串。")
++        with self._state_lock:
++            if self._process is not None:
++                raise RuntimeError("终端进程已经启动。")
++            factory = self._load_factory()
++            child_env = os.environ.copy()
++            if env is not None:
++                child_env.update(env)
++            try:
++                process = factory.spawn(
++                    list(command),
++                    cwd=None if cwd is None else str(cwd),
++                    env=child_env,
++                    dimensions=(size.rows, size.columns),
++                    backend="0",
++                )
++            except Exception as cause:
++                raise TerminalBackendError(
++                    "无法创建 Windows ConPTY，请检查 Windows 版本和 Shell 配置。", cause
++                ) from cause
++            self._process = process
++            self._closed = False
++            reader = threading.Thread(
++                target=self._reader_loop,
++                args=(process,),
++                name="csbox-conpty-reader",
++                daemon=True,
++            )
++            self._reader_thread = reader
++            reader.start()
++
++    def read(self, max_bytes: int = 65536, timeout: float = 0.05) -> bytes | None:
++        if type(max_bytes) is not int or max_bytes <= 0:
++            raise ValueError("单次读取字节数必须是正整数。")
++        if timeout < 0:
++            raise ValueError("读取超时时间不能为负数。")
++        if self._process is None:
++            raise RuntimeError("终端进程尚未启动。")
++
++        deadline = time.monotonic() + timeout
++        with self._output_ready:
++            while True:
++                if self._output:
++                    data = bytes(self._output[:max_bytes])
++                    del self._output[:max_bytes]
++                    return data
++                if self._reader_error is not None:
++                    cause = self._reader_error
++                    raise TerminalBackendError("读取 Windows ConPTY 输出失败。", cause) from cause
++                if self._reader_done:
++                    return b""
++                remaining = deadline - time.monotonic()
++                if remaining <= 0:
++                    return None
++                self._output_ready.wait(remaining)
++
++    def write(self, data: bytes) -> int:
++        if not isinstance(data, bytes):
++            raise TypeError("终端输入必须是 bytes。")
++        with self._state_lock:
++            process = self._require_process()
++            if self._closed:
++                raise BrokenPipeError("终端已关闭，无法写入。")
++            candidate = self._input_buffer + data
++            self._complete_utf8_length(candidate)
++            self._input_buffer = candidate
++            self._flush_complete_input(process)
++        return len(data)
++
++    def resize(self, columns: int, rows: int) -> None:
++        self._validate_dimensions(columns, rows)
++        with self._state_lock:
++            process = self._require_process()
++            if self._closed:
++                raise RuntimeError("终端进程已经关闭。")
++            try:
++                process.setwinsize(rows, columns)
++            except Exception as cause:
++                raise TerminalBackendError("调整 Windows ConPTY 尺寸失败。", cause) from cause
++
++    def is_alive(self) -> bool:
++        with self._state_lock:
++            if self._process is None or self._closed:
++                return False
++            try:
++                alive = bool(self._process.isalive())
++            except Exception as cause:
++                raise TerminalBackendError("查询 Windows ConPTY 状态失败。", cause) from cause
++            if not alive:
++                self._capture_exit_status()
++            return alive
++
++    def wait(self, timeout: float = 0.0) -> int | None:
++        if timeout < 0:
++            raise ValueError("等待超时时间不能为负数。")
++        deadline = time.monotonic() + timeout
++        while True:
++            if not self.is_alive():
++                return self.exit_code
++            remaining = deadline - time.monotonic()
++            if remaining <= 0:
++                return None
++            time.sleep(min(0.01, remaining))
++
++    @property
++    def exit_code(self) -> int | None:
++        with self._state_lock:
++            self._capture_exit_status()
++            return self._exit_code
++
++    def close(self) -> None:
++        with self._close_lock:
++            with self._state_lock:
++                if self._closed:
++                    return
++                process = self._process
++                if process is None:
++                    self._closed = True
++                    with self._output_ready:
++                        self._reader_done = True
++                        self._output_ready.notify_all()
++                    return
++
++            force = self._wait_for_natural_exit(process, self._CLOSE_GRACE)
++            reader = self._reader_thread
++            if not force and reader is not None:
++                reader.join(self._READER_JOIN_TIMEOUT)
++
++            with self._state_lock:
++                self._closing = True
++                try:
++                    process.close(force=force)
++                except Exception as cause:
++                    self._closing = False
++                    raise TerminalBackendError(
++                        "关闭 Windows ConPTY 失败，可重试清理。", cause
++                    ) from cause
++
++            if reader is not None:
++                reader.join(self._READER_JOIN_TIMEOUT)
++                if reader.is_alive():
++                    with self._state_lock:
++                        self._closing = False
++                    cause = TimeoutError("pywinpty reader did not stop after close")
++                    raise TerminalBackendError(
++                        "Windows ConPTY 读取线程未能及时停止，可重试清理。", cause
++                    ) from cause
++
++            with self._state_lock:
++                self._capture_exit_status()
++                self._closed = True
++                self._closing = False
++
++    def _load_factory(self) -> Any:
++        if self._pty_process_factory is not None:
++            return self._pty_process_factory
++        try:
++            from winpty import PtyProcess
++        except (ImportError, OSError) as cause:
++            raise TerminalBackendError(
++                "未安装 pywinpty，无法使用 Windows ConPTY。请在 Windows 上运行 uv sync。",
++                cause,
++            ) from cause
++        self._pty_process_factory = PtyProcess
++        return PtyProcess
++
++    def _reader_loop(self, process: Any) -> None:
++        reader_error: Exception | None = None
++        try:
++            while True:
++                text = process.read(self._READ_SIZE)
++                if not text:
++                    continue
++                if not isinstance(text, str):
++                    raise TypeError(f"PtyProcess.read returned {type(text).__name__}")
++                encoded = text.encode("utf-8")
++                with self._output_ready:
++                    self._output.extend(encoded)
++                    self._output_ready.notify_all()
++        except EOFError:
++            pass
++        except Exception as cause:
++            if not self._closing:
++                reader_error = cause
++        finally:
++            with self._output_ready:
++                self._reader_error = reader_error
++                self._reader_done = True
++                self._output_ready.notify_all()
++
++    def _flush_complete_input(self, process: Any) -> None:
++        deadline = time.monotonic() + self._write_timeout
++        while True:
++            complete_length = self._complete_utf8_length(self._input_buffer)
++            if complete_length == 0:
++                return
++            complete_bytes = self._input_buffer[:complete_length]
++            text = complete_bytes.decode("utf-8")
++            try:
++                written = process.write(text)
++            except Exception as cause:
++                raise TerminalBackendError("写入 Windows ConPTY 失败。", cause) from cause
++            if type(written) is not int or written < 0 or written > len(complete_bytes):
++                cause = ValueError(f"invalid PtyProcess.write result: {written!r}")
++                raise TerminalBackendError(
++                    "Windows ConPTY 返回了无效的写入字节数。", cause
++                ) from cause
++            if written == 0:
++                if time.monotonic() >= deadline:
++                    cause = BlockingIOError("PtyProcess.write made no progress")
++                    raise TerminalBackendError(
++                        "Windows ConPTY 写入暂时无法取得进展。", cause
++                    ) from cause
++                time.sleep(0.001)
++                continue
++            try:
++                complete_bytes[:written].decode("utf-8")
++                complete_bytes[written:].decode("utf-8")
++            except UnicodeDecodeError as cause:
++                raise TerminalBackendError(
++                    "Windows ConPTY 在 UTF-8 字符中间报告了部分写入，无法安全续写。", cause
++                ) from cause
++            self._input_buffer = self._input_buffer[written:]
++
++    @staticmethod
++    def _complete_utf8_length(data: bytes) -> int:
++        decoder = codecs.getincrementaldecoder("utf-8")()
++        decoder.decode(data, final=False)
++        pending, _ = decoder.getstate()
++        return len(data) - len(pending)
++
++    def _wait_for_natural_exit(self, process: Any, timeout: float) -> bool:
++        deadline = time.monotonic() + timeout
++        while True:
++            try:
++                alive = bool(process.isalive())
++            except Exception as cause:
++                raise TerminalBackendError("查询 Windows ConPTY 状态失败。", cause) from cause
++            if not alive:
++                self._capture_exit_status()
++                return False
++            remaining = deadline - time.monotonic()
++            if remaining <= 0:
++                return True
++            time.sleep(min(0.01, remaining))
++
++    def _capture_exit_status(self) -> None:
++        if self._process is None or self._exit_code is not None:
++            return
++        try:
++            status = self._process.exitstatus
++            if callable(status):
++                status = status()
++        except Exception:
++            return
++        if status is not None:
++            self._exit_code = int(status)
++
++    def _require_process(self) -> Any:
++        if self._process is None:
++            raise RuntimeError("终端进程尚未启动。")
++        return self._process
++
++    @staticmethod
++    def _validate_dimensions(columns: int, rows: int) -> None:
++        for name, value in (("columns", columns), ("rows", rows)):
++            if type(value) is not int:
++                raise TypeError(f"终端尺寸 {name} 必须是整数。")
++            if value <= 0:
++                raise ValueError(f"终端尺寸 {name} 必须是正数。")
+diff --git a/tests/test_environment.py b/tests/test_environment.py
+index 5734b4e..c093621 100644
+--- a/tests/test_environment.py
++++ b/tests/test_environment.py
+@@ -1,25 +1,26 @@
+ import os
+ 
+ from csbox.core.environment import detect_environment, detect_is_wsl, detect_terminal_size
+-from csbox.core.shell import ShellKind, detect_shell
++from csbox.core.shell import PowerShell7Profile, ShellKind, detect_shell
+ 
+ 
+ def test_detects_powershell_7_from_explicit_shell() -> None:
+     profile = detect_shell(
+         environ={"CSBOX_SHELL": "pwsh.exe"},
+         system="Windows",
+         is_wsl=False,
+     )
+ 
+     assert profile.kind is ShellKind.POWERSHELL_7
+     assert profile.executable == "pwsh.exe"
++    assert profile is PowerShell7Profile
+ 
+ 
+ def test_unknown_shell_profile_has_no_user_facing_fallback_copy() -> None:
+     profile = detect_shell(environ={}, system="Linux", is_wsl=False)
+ 
+     assert profile.kind is ShellKind.UNKNOWN
+     assert profile.display_name == ""
+ 
+ 
+ def test_detects_windows_powershell_51_from_explicit_shell() -> None:
+diff --git a/tests/test_shell_selection.py b/tests/test_shell_selection.py
+new file mode 100644
+index 0000000..7481a58
+--- /dev/null
++++ b/tests/test_shell_selection.py
+@@ -0,0 +1,215 @@
++from __future__ import annotations
++
++import subprocess
++from collections.abc import Callable
++
++import pytest
++
++from csbox.core.shell import (
++    BashProfile,
++    PowerShell7Profile,
++    PowerShell51Profile,
++    ShellKind,
++    ShellUnavailableError,
++    ZshProfile,
++    detect_shell_version,
++    select_shell,
++)
++
++
++def available(*commands: str) -> Callable[[str], str | None]:
++    paths = {command: f"/available/{command}" for command in commands}
++    return paths.get
++
++
++@pytest.mark.parametrize(
++    ("alias", "expected_kind"),
++    [
++        ("powershell", ShellKind.POWERSHELL_51),
++        ("powershell.exe", ShellKind.POWERSHELL_51),
++        ("powershell5", ShellKind.POWERSHELL_51),
++        ("powershell_51", ShellKind.POWERSHELL_51),
++        ("pwsh", ShellKind.POWERSHELL_7),
++        ("pwsh.exe", ShellKind.POWERSHELL_7),
++        ("powershell7", ShellKind.POWERSHELL_7),
++        ("powershell_7", ShellKind.POWERSHELL_7),
++        ("bash", ShellKind.BASH),
++        ("/bin/bash", ShellKind.BASH),
++        ("zsh", ShellKind.ZSH),
++        ("/usr/bin/zsh", ShellKind.ZSH),
++    ],
++)
++def test_explicit_shell_aliases_select_the_requested_profile(
++    alias: str, expected_kind: ShellKind
++) -> None:
++    command = {
++        ShellKind.POWERSHELL_51: "powershell.exe",
++        ShellKind.POWERSHELL_7: "pwsh.exe",
++        ShellKind.BASH: "bash",
++        ShellKind.ZSH: "zsh",
++    }[expected_kind]
++
++    profile = select_shell(
++        alias,
++        None,
++        system="Windows" if "power" in alias or "pwsh" in alias else "Linux",
++        environ={},
++        which=available(command),
++    )
++
++    assert profile.kind is expected_kind
++
++
++def test_requested_shell_takes_priority_over_config_and_current_shell() -> None:
++    profile = select_shell(
++        "bash",
++        "zsh",
++        system="Linux",
++        environ={"SHELL": "/bin/zsh"},
++        which=available("bash", "zsh"),
++    )
++
++    assert profile is BashProfile
++
++
++def test_selection_interface_accepts_the_documented_positional_arguments() -> None:
++    profile = select_shell("bash", None, "Linux", {}, available("bash"))
++
++    assert profile is BashProfile
++
++
++def test_config_shell_takes_priority_over_current_shell() -> None:
++    profile = select_shell(
++        None,
++        "bash",
++        system="Linux",
++        environ={"SHELL": "/bin/zsh"},
++        which=available("bash", "zsh"),
++    )
++
++    assert profile is BashProfile
++
++
++@pytest.mark.parametrize(
++    ("system", "environ", "commands", "expected"),
++    [
++        ("Windows", {}, ("powershell.exe", "pwsh.exe"), PowerShell7Profile),
++        (
++            "Windows",
++            {"ComSpec": "powershell.exe"},
++            ("powershell.exe", "pwsh.exe"),
++            PowerShell51Profile,
++        ),
++        ("Linux", {}, ("bash", "zsh"), BashProfile),
++        ("Linux", {"SHELL": "/usr/bin/zsh"}, ("bash", "zsh"), ZshProfile),
++        (
++            "Linux",
++            {"SHELL": "/bin/bash", "WSL_DISTRO_NAME": "Ubuntu"},
++            ("bash", "zsh", "pwsh.exe"),
++            BashProfile,
++        ),
++    ],
++)
++def test_auto_selection_prefers_current_shell_then_platform_order(
++    system: str,
++    environ: dict[str, str],
++    commands: tuple[str, ...],
++    expected: object,
++) -> None:
++    profile = select_shell(
++        None,
++        None,
++        system=system,
++        environ=environ,
++        which=available(*commands),
++    )
++
++    assert profile is expected
++
++
++def test_auto_selection_skips_an_unavailable_current_shell() -> None:
++    profile = select_shell(
++        None,
++        None,
++        system="Linux",
++        environ={"SHELL": "/usr/bin/zsh"},
++        which=available("bash"),
++    )
++
++    assert profile is BashProfile
++
++
++def test_unavailable_explicit_pwsh_has_chinese_guidance_and_cause() -> None:
++    with pytest.raises(ShellUnavailableError) as caught:
++        select_shell(
++            "pwsh",
++            None,
++            system="Windows",
++            environ={},
++            which=available("powershell.exe"),
++        )
++
++    assert "未找到 pwsh.exe" in caught.value.user_message
++    assert "--shell powershell" in caught.value.user_message
++    assert isinstance(caught.value.cause, FileNotFoundError)
++    assert caught.value.__cause__ is caught.value.cause
++
++
++def test_unknown_explicit_shell_has_chinese_error_and_cause() -> None:
++    with pytest.raises(ShellUnavailableError) as caught:
++        select_shell(
++            "fish",
++            None,
++            system="Linux",
++            environ={},
++            which=available("bash"),
++        )
++
++    assert "不支持的 Shell" in caught.value.user_message
++    assert isinstance(caught.value.cause, ValueError)
++
++
++def test_no_available_shell_has_chinese_installation_guidance() -> None:
++    with pytest.raises(ShellUnavailableError) as caught:
++        select_shell(None, None, system="Linux", environ={}, which=available())
++
++    assert "未找到可用的 Shell" in caught.value.user_message
++    assert "bash" in caught.value.user_message
++    assert isinstance(caught.value.cause, FileNotFoundError)
++
++
++@pytest.mark.parametrize(
++    ("profile", "expected_arguments"),
++    [
++        (PowerShell51Profile, ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive"]),
++        (PowerShell7Profile, ["pwsh.exe", "-NoLogo", "-NoProfile", "-NonInteractive"]),
++        (BashProfile, ["bash", "--version"]),
++        (ZshProfile, ["zsh", "--version"]),
++    ],
++)
++def test_version_probe_uses_argument_arrays_and_a_short_timeout(
++    monkeypatch: pytest.MonkeyPatch,
++    profile: object,
++    expected_arguments: list[str],
++) -> None:
++    calls: list[tuple[list[str], float]] = []
++
++    def fake_run(arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
++        calls.append((arguments, kwargs["timeout"]))  # type: ignore[arg-type]
++        return subprocess.CompletedProcess(arguments, 0, stdout="7.4.6\n", stderr="")
++
++    monkeypatch.setattr(subprocess, "run", fake_run)
++
++    assert detect_shell_version(profile) == "7.4.6"  # type: ignore[arg-type]
++    assert calls[0][0][: len(expected_arguments)] == expected_arguments
++    assert calls[0][1] <= 2.0
++
++
++def test_version_probe_failure_is_non_fatal(monkeypatch: pytest.MonkeyPatch) -> None:
++    def fail(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
++        del args, kwargs
++        raise subprocess.TimeoutExpired(["bash", "--version"], timeout=1)
++
++    monkeypatch.setattr(subprocess, "run", fail)
++
++    assert detect_shell_version(BashProfile) is None
+diff --git a/tests/test_terminal.py b/tests/test_terminal.py
+index 6fa6904..54829b2 100644
+--- a/tests/test_terminal.py
++++ b/tests/test_terminal.py
+@@ -1,27 +1,18 @@
+ import inspect
+ 
+-import pytest
+-
+-from csbox.core.terminal import TerminalBackend, UnixPTYBackend, WindowsConPTYBackend
++from csbox.core.terminal import (
++    TerminalBackend,
++    UnixPTYBackend,
++    WindowsConPTYBackend,
++    create_terminal_backend,
++)
+ 
+ 
+ def test_terminal_backend_is_an_abstract_interface() -> None:
+     assert inspect.isabstract(TerminalBackend)
+ 
+ 
+-@pytest.mark.parametrize("backend_type", [WindowsConPTYBackend, UnixPTYBackend])
+-def test_reserved_terminal_adapters_are_explicitly_unimplemented(backend_type: type) -> None:
+-    backend = backend_type()
+-
+-    with pytest.raises(NotImplementedError, match="not implemented"):
+-        backend.spawn(["bash"])
+-    with pytest.raises(NotImplementedError, match="not implemented"):
+-        backend.read()
+-    with pytest.raises(NotImplementedError, match="not implemented"):
+-        backend.write("demo")
+-    with pytest.raises(NotImplementedError, match="not implemented"):
+-        backend.resize(80, 24)
+-    with pytest.raises(NotImplementedError, match="not implemented"):
+-        backend.is_alive()
+-    with pytest.raises(NotImplementedError, match="not implemented"):
+-        backend.close()
++def test_factory_selects_the_platform_backend_without_spawning() -> None:
++    assert isinstance(create_terminal_backend(system="Linux"), UnixPTYBackend)
++    assert isinstance(create_terminal_backend(system="Darwin"), UnixPTYBackend)
++    assert isinstance(create_terminal_backend(system="Windows"), WindowsConPTYBackend)
+diff --git a/tests/test_terminal_unix_integration.py b/tests/test_terminal_unix_integration.py
+new file mode 100644
+index 0000000..1d4646b
+--- /dev/null
++++ b/tests/test_terminal_unix_integration.py
+@@ -0,0 +1,278 @@
++from __future__ import annotations
++
++import os
++import pty
++import shutil
++import time
++from collections.abc import Iterator
++from pathlib import Path
++
++import pytest
++
++from csbox.core.events import TerminalSize
++from csbox.core.terminal import TerminalBackendError, UnixPTYBackend
++
++pytestmark = [
++    pytest.mark.pty,
++    pytest.mark.skipif(os.name == "nt", reason="Unix PTY integration only"),
++]
++
++
++@pytest.fixture
++def backend() -> Iterator[UnixPTYBackend]:
++    instance = UnixPTYBackend()
++    try:
++        yield instance
++    finally:
++        instance.close()
++
++
++def read_until(
++    backend: UnixPTYBackend,
++    target: bytes,
++    *,
++    timeout: float = 5.0,
++) -> bytes:
++    deadline = time.monotonic() + timeout
++    output = bytearray()
++    while time.monotonic() < deadline:
++        chunk = backend.read(timeout=min(0.05, max(0.0, deadline - time.monotonic())))
++        if chunk is None:
++            continue
++        if chunk == b"":
++            break
++        output.extend(chunk)
++        if target in output:
++            return bytes(output)
++    pytest.fail(f"timed out waiting for {target!r}; output={bytes(output)!r}")
++
++
++def read_to_eof(backend: UnixPTYBackend, *, timeout: float = 5.0) -> bytes:
++    deadline = time.monotonic() + timeout
++    output = bytearray()
++    while time.monotonic() < deadline:
++        chunk = backend.read(timeout=min(0.05, max(0.0, deadline - time.monotonic())))
++        if chunk is None:
++            continue
++        if chunk == b"":
++            return bytes(output)
++        output.extend(chunk)
++    pytest.fail(f"timed out waiting for EOF; output tail={bytes(output[-200:])!r}")
++
++
++def bash_command() -> list[str]:
++    bash = shutil.which("bash")
++    if bash is None:
++        pytest.skip("bash is unavailable")
++    return [bash, "--noprofile", "--norc"]
++
++
++def test_real_pty_preserves_unicode_ansi_cwd_and_resize(
++    backend: UnixPTYBackend, tmp_path: Path
++) -> None:
++    backend.spawn(bash_command(), cwd=tmp_path, size=TerminalSize(80, 24))
++
++    unicode_command = "printf '\\033[31m红色中文\\033[0m\\n'\n".encode()
++    backend.write(unicode_command)
++    output = read_until(backend, b"\x1b[0m")
++    assert b"\x1b[31m" in output
++    assert "红色中文".encode() in output
++
++    backend.write(b"pwd\n")
++    assert os.fsencode(tmp_path) in read_until(backend, os.fsencode(tmp_path))
++
++    backend.resize(100, 30)
++    backend.write(b"stty size\nexit\n")
++    assert b"30 100" in read_until(backend, b"30 100")
++    read_to_eof(backend)
++    assert backend.wait(timeout=1.0) == 0
++    assert backend.exit_code == 0
++
++
++def test_spawn_reports_and_reaps_an_invalid_command(backend: UnixPTYBackend) -> None:
++    command = "/definitely/missing/csbox-command"
++
++    with pytest.raises(TerminalBackendError) as caught:
++        backend.spawn([command], size=TerminalSize(80, 24))
++
++    assert "无法启动" in caught.value.user_message
++    assert isinstance(caught.value.cause, FileNotFoundError)
++    assert caught.value.__cause__ is caught.value.cause
++    assert not backend.is_alive()
++
++
++def test_spawn_reports_and_reaps_an_invalid_cwd(backend: UnixPTYBackend, tmp_path: Path) -> None:
++    missing_cwd = tmp_path / "missing"
++
++    with pytest.raises(TerminalBackendError) as caught:
++        backend.spawn(
++            [shutil.which("sh") or "/bin/sh", "-c", "exit 0"],
++            cwd=missing_cwd,
++            size=TerminalSize(80, 24),
++        )
++
++    assert "无法启动" in caught.value.user_message
++    assert isinstance(caught.value.cause, FileNotFoundError)
++    assert caught.value.__cause__ is caught.value.cause
++    assert not backend.is_alive()
++
++
++def test_child_observes_initial_size_before_its_first_output(
++    backend: UnixPTYBackend, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    real_fork = pty.fork
++
++    def delay_only_the_parent() -> tuple[int, int]:
++        pid, master_fd = real_fork()
++        if pid != 0:
++            time.sleep(0.1)
++        return pid, master_fd
++
++    monkeypatch.setattr(pty, "fork", delay_only_the_parent)
++    shell = shutil.which("sh") or "/bin/sh"
++
++    backend.spawn([shell, "-c", "stty size"], size=TerminalSize(123, 41))
++    output = read_to_eof(backend)
++
++    assert b"41 123" in output
++    assert backend.wait(timeout=1.0) == 0
++
++
++def test_read_distinguishes_no_data_from_eof(backend: UnixPTYBackend) -> None:
++    shell = shutil.which("sh") or "/bin/sh"
++    backend.spawn([shell, "-c", "sleep 0.3"], size=TerminalSize(80, 24))
++
++    assert backend.read(timeout=0.01) is None
++    read_to_eof(backend)
++    assert backend.read(timeout=0.01) == b""
++
++
++def test_ctrl_c_interrupts_a_foreground_command(backend: UnixPTYBackend) -> None:
++    backend.spawn(bash_command(), size=TerminalSize(80, 24))
++    backend.write(b"stty -echo\n")
++    time.sleep(0.1)
++    while backend.read(timeout=0.01) not in (None, b""):
++        pass
++
++    started = time.monotonic()
++    backend.write(b"sleep 30\n")
++    time.sleep(0.1)
++    backend.write(b"\x03")
++    backend.write(b"printf 'CSBOX_CTRL_C_OK\\n'\nexit\n")
++
++    assert b"CSBOX_CTRL_C_OK" in read_until(backend, b"CSBOX_CTRL_C_OK")
++    assert time.monotonic() - started < 5.0
++    read_to_eof(backend)
++    assert backend.wait(timeout=1.0) == 0
++
++
++def test_long_output_completes_without_deadlock(backend: UnixPTYBackend) -> None:
++    bash = shutil.which("bash")
++    if bash is None:
++        pytest.skip("bash is unavailable")
++    backend.spawn(
++        [bash, "-c", "for ((i=0; i<12000; i++)); do printf 'line-%05d\\n' \"$i\"; done"],
++        size=TerminalSize(80, 24),
++    )
++
++    output = read_to_eof(backend, timeout=10.0)
++
++    assert b"line-00000" in output
++    assert b"line-11999" in output
++    assert backend.wait(timeout=1.0) == 0
++
++
++def test_write_retries_eagain_after_the_master_becomes_writable(
++    backend: UnixPTYBackend, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    backend.spawn(bash_command(), size=TerminalSize(80, 24))
++    real_write = os.write
++    injected = False
++
++    def eagain_once(fd: int, data: bytes) -> int:
++        nonlocal injected
++        if not injected:
++            injected = True
++            raise BlockingIOError(11, "temporarily unavailable")
++        return real_write(fd, data)
++
++    monkeypatch.setattr(os, "write", eagain_once)
++
++    assert backend.write(b"printf 'EAGAIN_OK\\n'\nexit\n") > 0
++    assert b"EAGAIN_OK" in read_until(backend, b"EAGAIN_OK")
++    read_to_eof(backend)
++    assert backend.wait(timeout=1.0) == 0
++
++
++def test_large_paste_completes_through_nonblocking_backpressure(
++    backend: UnixPTYBackend,
++) -> None:
++    payload = b"x" * (512 * 1024)
++    shell = shutil.which("sh") or "/bin/sh"
++    python = shutil.which("python") or shutil.which("python3")
++    if python is None:
++        pytest.skip("python is unavailable")
++    reader = "; ".join(
++        (
++            "import sys",
++            "data=sys.stdin.buffer.read(524288)",
++            "sys.stdout.write(f'PASTE={len(data)}\\n')",
++        )
++    )
++    backend.spawn(
++        [
++            shell,
++            "-c",
++            f"stty raw -echo; printf 'PASTE_READY\\n'; sleep 0.1; {python} -c \"{reader}\"",
++        ],
++        size=TerminalSize(80, 24),
++    )
++    read_until(backend, b"PASTE_READY")
++
++    deadline = time.monotonic() + 10.0
++    offset = 0
++    while offset < len(payload) and time.monotonic() < deadline:
++        written = backend.write(payload[offset:])
++        assert written > 0
++        offset += written
++
++    assert offset == len(payload)
++    assert b"PASTE=524288" in read_until(backend, b"PASTE=524288", timeout=10.0)
++    read_to_eof(backend)
++    assert backend.wait(timeout=1.0) == 0
++
++
++def test_wait_returns_exit_code_and_reaps_child(backend: UnixPTYBackend) -> None:
++    shell = shutil.which("sh") or "/bin/sh"
++    backend.spawn([shell, "-c", "exit 7"], size=TerminalSize(80, 24))
++
++    read_to_eof(backend)
++
++    assert backend.wait(timeout=1.0) == 7
++    assert backend.exit_code == 7
++    assert not backend.is_alive()
++
++
++def test_wait_times_out_and_close_is_idempotent(backend: UnixPTYBackend) -> None:
++    shell = shutil.which("sh") or "/bin/sh"
++    backend.spawn([shell, "-c", "sleep 30"], size=TerminalSize(80, 24))
++
++    assert backend.wait(timeout=0.01) is None
++    assert backend.is_alive()
++
++    backend.close()
++    backend.close()
++
++    assert not backend.is_alive()
++    assert backend.exit_code is not None
++
++
++@pytest.mark.parametrize(("columns", "rows"), [(0, 24), (80, 0), (-1, 24), (80, -1)])
++def test_resize_rejects_invalid_dimensions(
++    backend: UnixPTYBackend, columns: int, rows: int
++) -> None:
++    shell = shutil.which("sh") or "/bin/sh"
++    backend.spawn([shell, "-c", "sleep 30"], size=TerminalSize(80, 24))
++
++    with pytest.raises(ValueError, match="正数"):
++        backend.resize(columns, rows)
+diff --git a/tests/test_terminal_windows.py b/tests/test_terminal_windows.py
+new file mode 100644
+index 0000000..1928aa3
+--- /dev/null
++++ b/tests/test_terminal_windows.py
+@@ -0,0 +1,405 @@
++from __future__ import annotations
++
++import builtins
++import inspect
++import os
++import subprocess
++import sys
++import threading
++import time
++from collections import deque
++from collections.abc import Iterator, Mapping, Sequence
++from pathlib import Path
++from typing import ClassVar
++
++import pytest
++
++from csbox.core.events import TerminalSize
++from csbox.core.terminal import TerminalBackendError
++from csbox.core.terminal_windows import WindowsConPTYBackend
++
++
++class FakePtyProcess:
++    """Contract fake for pywinpty 3.0.5's high-level PtyProcess API."""
++
++    next_process: ClassVar[FakePtyProcess | None] = None
++    spawn_calls: ClassVar[list[dict[str, object]]] = []
++    instances: ClassVar[list[FakePtyProcess]] = []
++
++    def __init__(
++        self,
++        *,
++        frames: Sequence[str | BaseException] = (),
++        alive: bool = True,
++        exitstatus: int | None = None,
++        write_results: Sequence[int | BaseException] = (),
++        close_failures: Sequence[BaseException] = (),
++        read_gate: threading.Event | None = None,
++    ) -> None:
++        self.frames = deque(frames)
++        self.alive = alive
++        self.exitstatus = exitstatus
++        self.write_results = deque(write_results)
++        self.close_failures = deque(close_failures)
++        self.writes: list[str] = []
++        self.sizes: list[tuple[int, int]] = []
++        self.close_calls = 0
++        self.close_forces: list[bool] = []
++        self.closed = False
++        self.read_gate = read_gate
++        self.read_started = threading.Event()
++        self._condition = threading.Condition()
++        type(self).instances.append(self)
++
++    @classmethod
++    def spawn(
++        cls,
++        argv: Sequence[str],
++        *,
++        cwd: str | None,
++        env: Mapping[str, str] | None,
++        dimensions: tuple[int, int],
++        backend: object,
++    ) -> FakePtyProcess:
++        # Mirrors pywinpty 3.0.5 ptyprocess.py:93-94.
++        resolved_backend = backend or os.environ.get("PYWINPTY_BACKEND")
++        resolved_backend = int(resolved_backend) if resolved_backend is not None else None
++        cls.spawn_calls.append(
++            {
++                "argv": list(argv),
++                "cwd": cwd,
++                "env": None if env is None else dict(env),
++                "dimensions": dimensions,
++                "backend": backend,
++                "resolved_backend": resolved_backend,
++            }
++        )
++        assert cls.next_process is not None
++        return cls.next_process
++
++    def read(self, size: int = 1024) -> str:
++        if self.read_gate is not None:
++            self.read_started.set()
++            self.read_gate.wait()
++        with self._condition:
++            while not self.frames and self.alive and not self.closed:
++                self._condition.wait()
++            if self.frames:
++                frame = self.frames.popleft()
++            else:
++                raise EOFError("Pty is closed")
++        if isinstance(frame, BaseException):
++            raise frame
++        if len(frame) > size:
++            with self._condition:
++                self.frames.appendleft(frame[size:])
++        return frame[:size]
++
++    def write(self, data: str) -> int:
++        self.writes.append(data)
++        if self.write_results:
++            result = self.write_results.popleft()
++            if isinstance(result, BaseException):
++                raise result
++            return result
++        return len(data.encode("utf-8"))
++
++    def setwinsize(self, rows: int, columns: int) -> None:
++        self.sizes.append((rows, columns))
++
++    def isalive(self) -> bool:
++        return self.alive
++
++    def close(self, force: bool = False) -> None:
++        self.close_calls += 1
++        self.close_forces.append(force)
++        if self.close_failures:
++            failure = self.close_failures.popleft()
++            raise failure
++        with self._condition:
++            self.frames.clear()
++            self.alive = False
++            self.closed = True
++            if self.read_gate is not None:
++                self.read_gate.set()
++            self._condition.notify_all()
++
++    def feed(self, frame: str | BaseException) -> None:
++        with self._condition:
++            self.frames.append(frame)
++            self._condition.notify_all()
++
++
++@pytest.fixture(autouse=True)
++def reset_fake() -> Iterator[None]:
++    FakePtyProcess.next_process = None
++    FakePtyProcess.spawn_calls = []
++    FakePtyProcess.instances = []
++    yield
++    for process in FakePtyProcess.instances:
++        if not process.closed:
++            process.close_failures.clear()
++            process.close(force=True)
++
++
++def make_backend(
++    process: FakePtyProcess, *, write_timeout: float | None = None
++) -> WindowsConPTYBackend:
++    FakePtyProcess.next_process = process
++    if write_timeout is None:
++        return WindowsConPTYBackend(pty_process_factory=FakePtyProcess)
++    return WindowsConPTYBackend(pty_process_factory=FakePtyProcess, write_timeout=write_timeout)
++
++
++def spawn_backend(backend: WindowsConPTYBackend, tmp_path: Path) -> None:
++    backend.spawn(
++        ["pwsh.exe", "-NoLogo"],
++        cwd=tmp_path,
++        env={"CSBOX_TEST": "值"},
++        size=TerminalSize(100, 30),
++    )
++
++
++def test_fake_matches_pywinpty_305_read_write_and_close_signatures() -> None:
++    read_parameters = inspect.signature(FakePtyProcess.read).parameters
++    write_parameters = inspect.signature(FakePtyProcess.write).parameters
++    close_parameters = inspect.signature(FakePtyProcess.close).parameters
++
++    assert tuple(read_parameters) == ("self", "size")
++    assert read_parameters["size"].default == 1024
++    assert tuple(write_parameters) == ("self", "data")
++    assert tuple(close_parameters) == ("self", "force")
++    assert close_parameters["force"].default is False
++
++
++def test_spawn_forces_conpty_despite_hostile_backend_environment(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    monkeypatch.setenv("PYWINPTY_BACKEND", "1")
++    process = FakePtyProcess()
++    backend = make_backend(process)
++
++    spawn_backend(backend, tmp_path)
++
++    call = FakePtyProcess.spawn_calls[0]
++    assert call["dimensions"] == (30, 100)
++    assert call["backend"] == "0"
++    assert call["resolved_backend"] == 0
++
++
++def test_spawn_merges_environment_overrides_with_parent_environment(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    monkeypatch.setenv("PATH", "C:\\Windows\\System32")
++    monkeypatch.setenv("SystemRoot", "C:\\Windows")
++    backend = make_backend(FakePtyProcess())
++
++    spawn_backend(backend, tmp_path)
++
++    spawned_env = FakePtyProcess.spawn_calls[0]["env"]
++    assert isinstance(spawned_env, dict)
++    assert spawned_env["PATH"] == "C:\\Windows\\System32"
++    assert spawned_env["SystemRoot"] == "C:\\Windows"
++    assert spawned_env["CSBOX_TEST"] == "值"
++
++
++def test_background_reader_encodes_utf8_and_returns_none_without_data(tmp_path: Path) -> None:
++    process = FakePtyProcess()
++    backend = make_backend(process)
++    spawn_backend(backend, tmp_path)
++
++    started = time.monotonic()
++    assert backend.read(timeout=0.01) is None
++    assert time.monotonic() - started < 0.2
++
++    process.feed("红色中文")
++    assert backend.read(timeout=0.5) == "红色中文".encode()
++
++
++def test_read_respects_max_bytes_without_losing_utf8_data(tmp_path: Path) -> None:
++    process = FakePtyProcess(frames=["红色"])
++    backend = make_backend(process)
++    spawn_backend(backend, tmp_path)
++
++    first = backend.read(max_bytes=4, timeout=0.5)
++    second = backend.read(max_bytes=4, timeout=0.5)
++
++    assert first is not None
++    assert second is not None
++    assert first + second == "红色".encode()
++    assert len(first) <= 4
++    assert len(second) <= 4
++
++
++def test_write_buffers_split_utf8_until_a_complete_character(tmp_path: Path) -> None:
++    process = FakePtyProcess()
++    backend = make_backend(process)
++    spawn_backend(backend, tmp_path)
++    encoded = "中\n".encode()
++
++    assert backend.write(encoded[:2]) == 2
++    assert process.writes == []
++    assert backend.write(encoded[2:]) == len(encoded[2:])
++    assert process.writes == ["中\n"]
++
++
++def test_write_retries_partial_progress_without_losing_bytes(tmp_path: Path) -> None:
++    process = FakePtyProcess(write_results=[1, 2])
++    backend = make_backend(process)
++    spawn_backend(backend, tmp_path)
++
++    assert backend.write(b"abc") == 3
++    assert process.writes == ["abc", "bc"]
++
++
++def test_write_zero_progress_is_bounded_and_preserves_cause(tmp_path: Path) -> None:
++    process = FakePtyProcess(write_results=[0] * 100)
++    backend = make_backend(process, write_timeout=0.01)
++    spawn_backend(backend, tmp_path)
++
++    started = time.monotonic()
++    with pytest.raises(TerminalBackendError) as caught:
++        backend.write(b"blocked")
++
++    assert time.monotonic() - started < 0.2
++    assert isinstance(caught.value.cause, BlockingIOError)
++    assert process.writes
++
++
++def test_resize_uses_rows_before_columns(tmp_path: Path) -> None:
++    process = FakePtyProcess()
++    backend = make_backend(process)
++    spawn_backend(backend, tmp_path)
++
++    backend.resize(120, 40)
++
++    assert process.sizes == [(40, 120)]
++
++
++def test_eof_error_becomes_eof_and_captures_exit_status(tmp_path: Path) -> None:
++    process = FakePtyProcess(frames=[EOFError()], alive=False, exitstatus=9)
++    backend = make_backend(process)
++    spawn_backend(backend, tmp_path)
++
++    assert backend.read(timeout=0.5) == b""
++    assert backend.exit_code == 9
++    assert backend.wait(timeout=0.01) == 9
++    assert not backend.is_alive()
++
++
++def test_close_waits_for_delayed_final_frame_before_closing_dead_process(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    read_gate = threading.Event()
++    process = FakePtyProcess(frames=["最后一帧"], alive=False, exitstatus=0, read_gate=read_gate)
++    backend = make_backend(process)
++    spawn_backend(backend, tmp_path)
++    assert process.read_started.wait(0.5)
++
++    reader = backend._reader_thread
++    assert reader is not None
++    real_join = reader.join
++    join_close_states: list[bool] = []
++
++    def release_delayed_frame_while_joining(timeout: float | None = None) -> None:
++        join_close_states.append(process.closed)
++        if not process.closed:
++            read_gate.set()
++        real_join(timeout)
++
++    monkeypatch.setattr(reader, "join", release_delayed_frame_while_joining)
++
++    backend.close()
++    backend.close()
++
++    assert join_close_states[0] is False
++    assert process.close_calls == 1
++    assert process.close_forces == [False]
++    assert backend.read(timeout=0.1) == "最后一帧".encode()
++    assert backend.read(timeout=0.1) == b""
++    assert backend.exit_code == 0
++
++
++def test_close_dead_process_has_finite_bound_when_reader_never_finishes(
++    tmp_path: Path,
++) -> None:
++    read_gate = threading.Event()
++    process = FakePtyProcess(
++        frames=["无法读取的尾帧"], alive=False, exitstatus=0, read_gate=read_gate
++    )
++    backend = make_backend(process)
++    spawn_backend(backend, tmp_path)
++    assert process.read_started.wait(0.5)
++
++    started = time.monotonic()
++    backend.close()
++
++    assert time.monotonic() - started < 1.5
++    assert process.close_forces == [False]
++    assert backend.read(timeout=0.1) == b""
++
++
++def test_close_forces_a_live_process_after_a_bounded_grace_period(tmp_path: Path) -> None:
++    process = FakePtyProcess(alive=True)
++    backend = make_backend(process)
++    spawn_backend(backend, tmp_path)
++
++    started = time.monotonic()
++    backend.close()
++
++    assert time.monotonic() - started < 1.0
++    assert process.close_forces == [True]
++
++
++def test_close_failure_is_retryable_and_does_not_mark_backend_closed(tmp_path: Path) -> None:
++    process = FakePtyProcess(alive=True, close_failures=[OSError("busy")])
++    backend = make_backend(process)
++    spawn_backend(backend, tmp_path)
++
++    with pytest.raises(TerminalBackendError) as caught:
++        backend.close()
++
++    assert caught.value.cause.args == ("busy",)
++    assert backend.is_alive()
++    backend.close()
++    assert process.close_calls == 2
++    assert backend.read(timeout=0.1) == b""
++
++
++def test_invalid_resize_and_invalid_utf8_input_are_rejected(tmp_path: Path) -> None:
++    backend = make_backend(FakePtyProcess())
++    spawn_backend(backend, tmp_path)
++
++    with pytest.raises(ValueError, match="正数"):
++        backend.resize(0, 24)
++    with pytest.raises(UnicodeDecodeError):
++        backend.write(b"\xff")
++
++
++def test_missing_pywinpty_has_chinese_guidance_and_preserves_cause(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    real_import = builtins.__import__
++
++    def fail_winpty(name: str, *args: object, **kwargs: object) -> object:
++        if name == "winpty":
++            raise ModuleNotFoundError("No module named 'winpty'")
++        return real_import(name, *args, **kwargs)
++
++    monkeypatch.setattr(builtins, "__import__", fail_winpty)
++    backend = WindowsConPTYBackend()
++
++    with pytest.raises(TerminalBackendError) as caught:
++        backend.spawn(["pwsh.exe"])
++
++    assert "未安装 pywinpty" in caught.value.user_message
++    assert isinstance(caught.value.cause, ModuleNotFoundError)
++    assert caught.value.__cause__ is caught.value.cause
++
++
++def test_importing_terminal_core_on_linux_does_not_import_winpty() -> None:
++    code = "import sys; import csbox.core.terminal; assert 'winpty' not in sys.modules"
++
++    completed = subprocess.run([sys.executable, "-c", code], check=False)
++
++    assert completed.returncode == 0

@@ -1,0 +1,602 @@
+# Review package: 807007a..HEAD
+
+## Commits
+b3d2feb fix: add schema version to lab list JSON
+e31df1b docs: record Task 1 implementation report
+a71b816 chore: refresh CI actions and version source
+
+## Files changed
+ .github/workflows/ci.yml          |   5 +-
+ .superpowers/sdd/task-1-report.md | 153 ++++++++++++++++++++++++++++++++++++++
+ pyproject.toml                    |   2 +-
+ src/csbox/__init__.py             |   9 ++-
+ src/csbox/cli/main.py             |  37 ++++++++-
+ src/csbox/core/schema.py          |  10 +++
+ tests/test_check_cli.py           |   4 +-
+ tests/test_lab_cli.py             |   6 +-
+ tests/test_pack_cli.py            |   4 +-
+ tests/test_schema.py              |  19 +++++
+ tests/test_versioning.py          |  18 +++++
+ uv.lock                           |   2 +-
+ 12 files changed, 256 insertions(+), 13 deletions(-)
+
+## Diff
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 4e52714..f84d90a 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -4,32 +4,33 @@ on:
+   push:
+     branches: [main]
+   pull_request:
+ 
+ permissions:
+   contents: read
+ 
+ jobs:
+   test:
+     name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
++    # Node 24 actions require GitHub Actions runner v2.327.1 or newer.
+     runs-on: ${{ matrix.os }}
+     strategy:
+       fail-fast: false
+       matrix:
+         os: [ubuntu-latest, windows-latest]
+         python-version: ["3.11", "3.14"]
+     steps:
+       - name: Check out repository
+-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
++        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b # v7.0.1
+ 
+       - name: Install uv and Python
+-        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
++        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+         with:
+           enable-cache: true
+           python-version: ${{ matrix.python-version }}
+ 
+       - name: Sync locked environment
+         run: uv sync --locked
+ 
+       - name: Run tests
+         run: uv run pytest
+ 
+diff --git a/.superpowers/sdd/task-1-report.md b/.superpowers/sdd/task-1-report.md
+new file mode 100644
+index 0000000..d15dd35
+--- /dev/null
++++ b/.superpowers/sdd/task-1-report.md
+@@ -0,0 +1,153 @@
++# CSBox v0.2 Task 1 Report
++
++## Status
++
++完成。Task 1 的 CI Node 24 action pins、单一运行时版本来源、CLI `--version` 和 `schema_version` 基础均已实现；未实现后续 API、check 规则扩展或 pack 功能。
++
++## Files
++
++- `.github/workflows/ci.yml`: 更新 immutable action pins 到 `actions/checkout` v7.0.1 和 `astral-sh/setup-uv` v9.0.0，并注明 Node 24 所需 runner 最低版本；保留 2×2 OS/Python matrix。
++- `pyproject.toml`: 项目版本更新为 `0.2.0`。
++- `uv.lock`: 重新锁定项目 metadata 到 `0.2.0`。
++- `src/csbox/__init__.py`: 使用 `importlib.metadata.version("csbox")`，metadata 不存在时使用明确的 `0.2.0.dev0` fallback。
++- `src/csbox/core/schema.py`: 新增 `SCHEMA_VERSION = 1` 与 `with_schema_version(payload)`，保证 schema 字段位于 JSON payload 首位并覆盖输入中的旧值。
++- `src/csbox/cli/main.py`: 新增 CLI `--version`；`check --json` 与 `pack --json` 使用 schema helper，原有字段保持不变。
++- `tests/test_versioning.py`: 版本单一来源和 CLI 版本输出测试。
++- `tests/test_schema.py`: schema 常量、插入位置和覆盖行为测试。
++- `tests/test_check_cli.py`, `tests/test_pack_cli.py`: JSON 输出的 schema 字段回归断言。
++
++## Commits
++
++- `a71b816a7ad46b38c45a91968e2581ba36c0e5ef` — `chore: refresh CI actions and version source`
++- 本报告随后单独提交。
++
++## TDD evidence
++
++### RED
++
++Commands:
++
++```text
++uv run pytest tests/test_versioning.py tests/test_schema.py tests/test_check_cli.py tests/test_pack_cli.py -q
++```
++
++Output: collection failed with `ModuleNotFoundError: No module named 'csbox.core.schema'`。
++
++```text
++uv run pytest tests/test_versioning.py -q
++```
++
++Output: `2 failed`；版本仍为 `0.1.0`，CLI `--version` 尚未注册。
++
++补充的 schema 顺序/覆盖测试在第一次实现后仍按预期失败：输入的 `schema_version: 99` 未被覆盖，结果为 `1 failed`。
++
++### GREEN
++
++Focused command:
++
++```text
++uv lock && uv run pytest tests/test_versioning.py tests/test_schema.py tests/test_cli.py tests/test_check_cli.py tests/test_pack_cli.py -q
++```
++
++Output:
++
++```text
++Resolved 29 packages in 1.11s
++Updated csbox v0.1.0 -> v0.2.0
++9 passed in 0.30s
++```
++
++修正 schema 字段顺序/覆盖行为后再次运行 focused suite：`9 passed in 0.26s`。
++
++## Verification
++
++```text
++uv run pytest -q
++```
++
++`295 passed, 1 skipped in 5.21s`。唯一 skip 是 Linux 本地无法执行的 Windows 原生 ConPTY smoke。
++
++```text
++uv run ruff check .
++```
++
++`All checks passed!`
++
++```text
++uv run ruff format --check .
++```
++
++`119 files already formatted`
++
++```text
++uv lock --check && git diff --check
++```
++
++通过。
++
++```text
++uv run csbox --version
++```
++
++输出 `0.2.0`。
++
++## Self-review
++
++- 版本 release 值只由 `pyproject.toml` 提供；运行时从 installed metadata 读取，源码树 fallback 仅用于 metadata 不存在的开发场景。
++- `with_schema_version` 返回新 dict，不修改调用方 payload；schema 字段固定为整数 `1`、位于首位，并覆盖输入中的同名字段。
++- 只改变 `check --json` 和 `pack --json` 的机器输出前缀，未改动已有业务字段、plain/TUI 输出或 2×2 CI matrix。
++- action 使用 brief 指定的 immutable SHA，并保留对应版本注释。
++- 未读取、输出或修改 secrets；未执行破坏性 git 命令；未创建 worktree、远程分支或提交远程。
++
++## Concerns
++
++- 本地 Linux 无法替代 Windows 原生 ConPTY 验证；现有全量测试保持该测试为明确 skip，Windows CI 将覆盖它。
++- 报告提交会在实现提交之后形成单独 commit，不影响 Task 1 实现 commit 的可审阅性。
++
++## Fix
++
++- Finding: `lab list --json` emitted a bare list, violating the global machine-readable JSON contract requiring `schema_version: 1`.
++- Files: `src/csbox/cli/main.py`, `tests/test_lab_cli.py`.
++- Change: JSON output is now `{"schema_version":1,"sessions":[...]}`; plain output and all session fields remain unchanged. Tests include a focused schema assertion and updated session access.
++
++Focused command:
++
++```text
++uv run pytest tests/test_lab_cli.py -q
++```
++
++Exact passing output:
++
++```text
++....                                                                     [100%]
++4 passed in 0.16s
++```
++
++Covering verification:
++
++```text
++uv run pytest -q
++```
++
++Exact passing output:
++
++```text
++........................................................................ [ 24%]
++........................................................................ [ 48%]
++........................................................................ [ 72%]
++........................................................................ [ 97%]
++.......s                                                                 [100%]
++=========================== short test summary info ============================
++SKIPPED [1] tests/test_windows_pty_integration.py:78: Windows 原生 ConPTY smoke 只在 Windows CI 执行。
++295 passed, 1 skipped in 5.25s
++```
++
++```text
++uv run ruff check .
++All checks passed!
++
++uv run ruff format --check .
++119 files already formatted
++
++git diff --check
++```
+diff --git a/pyproject.toml b/pyproject.toml
+index fee7f52..ff9357b 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -1,17 +1,17 @@
+ [build-system]
+ requires = ["hatchling>=1.25"]
+ build-backend = "hatchling.build"
+ 
+ [project]
+ name = "csbox"
+-version = "0.1.0"
++version = "0.2.0"
+ description = "计算机实验与项目交付工具"
+ readme = "README.md"
+ requires-python = ">=3.11"
+ dependencies = [
+   "Pillow>=10,<13",
+   "pydantic>=2.7,<3",
+   "pyte>=0.8,<1",
+   "rich>=13.7,<15",
+   "textual>=0.58,<1",
+   "typer>=0.12,<1",
+diff --git a/src/csbox/__init__.py b/src/csbox/__init__.py
+index 165686a..4287268 100644
+--- a/src/csbox/__init__.py
++++ b/src/csbox/__init__.py
+@@ -1,3 +1,10 @@
+ """CSBox: 计算机实验与项目交付工具。"""
+ 
+-__version__ = "0.1.0"
++from importlib.metadata import PackageNotFoundError, version
++
++try:
++    __version__ = version("csbox")
++except PackageNotFoundError:
++    __version__ = "0.2.0.dev0"
++
++__all__ = ["__version__"]
+diff --git a/src/csbox/cli/main.py b/src/csbox/cli/main.py
+index f9f94e1..3113370 100644
+--- a/src/csbox/cli/main.py
++++ b/src/csbox/cli/main.py
+@@ -1,44 +1,63 @@
+ from __future__ import annotations
+ 
+ import json
+ from pathlib import Path
+ from typing import Annotated
+ 
+ import typer
+ from rich.console import Console
+ 
++from csbox import __version__
+ from csbox.check.service import create_check_service
+ from csbox.core.display_width import display_width, truncate_cells
+ from csbox.core.environment import detect_environment
++from csbox.core.schema import with_schema_version
+ from csbox.lab.service import create_lab_service
+ from csbox.locales import Translator, load_locale
+ from csbox.pack.service import PackServiceError, create_pack_service
+ 
+ _locale = load_locale()
+ app = typer.Typer(
+     add_completion=False,
+     help=_locale("cli.help"),
+     invoke_without_command=True,
+     name="csbox",
+     no_args_is_help=False,
+ )
+ lab_app = typer.Typer(help="实验录制、回放和证据导出。", no_args_is_help=True)
+ app.add_typer(lab_app, name="lab")
+ 
+ 
+ def _yes_no(translator: Translator, value: bool) -> str:
+     return translator("doctor.yes" if value else "doctor.no")
+ 
+ 
++def _version_callback(value: bool) -> bool:
++    if value:
++        typer.echo(__version__)
++        raise typer.Exit()
++    return value
++
++
+ @app.callback()
+-def _run_default(ctx: typer.Context) -> None:
++def _run_default(
++    ctx: typer.Context,
++    version: bool = typer.Option(
++        False,
++        "--version",
++        callback=_version_callback,
++        is_eager=True,
++        help="显示 CSBox 版本。",
++    ),
++) -> None:
++    del version
+     if ctx.invoked_subcommand is not None:
+         return
+     from csbox.tui.app import CSBoxApp, real_home_data_source
+ 
+     environment = detect_environment()
+     data_source = real_home_data_source(Path.cwd())
+     CSBoxApp(data_source=data_source, environment=environment, locale=_locale).run()
+ 
+ 
+ @app.command(help=_locale("cli.doctor.help"))
+@@ -81,21 +100,21 @@ def check_project(
+     except Exception as error:
+         Console(markup=False).print(f"项目检查失败：{error}")
+         raise typer.Exit(code=1) from error
+ 
+     if json_output:
+         payload = report.model_dump(mode="json")
+         payload["findings"] = [_safe_finding_payload(item) for item in payload["findings"]]
+         payload["status"] = report.status.value
+         payload["exitCode"] = report.exit_code
+         Console(markup=False, soft_wrap=True).print(
+-            json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
++            json.dumps(with_schema_version(payload), ensure_ascii=False, separators=(",", ":"))
+         )
+     elif plain:
+         _print_check_plain(report)
+     else:
+         from csbox.locales import load_locale
+         from csbox.tui.app import CheckApp
+ 
+         CheckApp(report=report, locale=load_locale()).run()
+     if report.exit_code:
+         raise typer.Exit(code=report.exit_code)
+@@ -150,21 +169,27 @@ def lab_list(
+             "startedAt": summary.metadata.started_at.isoformat(),
+             "captures": summary.capture_count,
+             "platform": summary.metadata.platform,
+             "shell": summary.metadata.shell,
+             "cwd": str(summary.metadata.cwd),
+         }
+         for summary in sessions
+     ]
+     if json_output:
+         console = Console(markup=False, soft_wrap=True)
+-        console.print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
++        console.print(
++            json.dumps(
++                with_schema_version({"sessions": payload}),
++                ensure_ascii=False,
++                separators=(",", ":"),
++            )
++        )
+         return
+     console = Console(markup=False)
+     if not payload:
+         console.print("暂无实验记录。")
+         return
+     for item in payload:
+         console.print(_format_lab_list_line(item, console.width))
+ 
+ 
+ def _format_lab_list_line(item: dict[str, object], width: int) -> str:
+@@ -260,21 +285,25 @@ def pack_project(
+             project_root,
+             destination=output,
+             verify=verify,
+             force=force,
+         )
+     except (OSError, PackServiceError) as error:
+         Console(markup=False).print(f"项目打包失败：{error}")
+         raise typer.Exit(code=1) from error
+     if json_output:
+         Console(markup=False, soft_wrap=True).print(
+-            json.dumps(report.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":"))
++            json.dumps(
++                with_schema_version(report.model_dump(mode="json")),
++                ensure_ascii=False,
++                separators=(",", ":"),
++            )
+         )
+         return
+     console = Console(markup=False)
+     console.print(f"打包完成：{report.destination}")
+     console.print(
+         f"文件数：{len(report.entries)}  源文件大小：{report.source_bytes}  "
+         f"ZIP 大小：{report.archive_bytes}"
+     )
+     console.print(f"排除项：{len(report.excluded)}  已校验：{'是' if report.verified else '否'}")
+ 
+diff --git a/src/csbox/core/schema.py b/src/csbox/core/schema.py
+new file mode 100644
+index 0000000..a9e427a
+--- /dev/null
++++ b/src/csbox/core/schema.py
+@@ -0,0 +1,10 @@
++from collections.abc import Mapping
++
++SCHEMA_VERSION = 1
++
++
++def with_schema_version(payload: Mapping[str, object]) -> dict[str, object]:
++    return {
++        "schema_version": SCHEMA_VERSION,
++        **{key: value for key, value in payload.items() if key != "schema_version"},
++    }
+diff --git a/tests/test_check_cli.py b/tests/test_check_cli.py
+index 2260bbe..15c670b 100644
+--- a/tests/test_check_cli.py
++++ b/tests/test_check_cli.py
+@@ -11,21 +11,23 @@ from csbox.cli.main import app
+ 
+ def test_check_plain_and_json_are_machine_stable(tmp_path: Path) -> None:
+     (tmp_path / "README.md").write_text("# demo\n")
+ 
+     plain = CliRunner().invoke(app, ["check", str(tmp_path), "--plain"])
+     structured = CliRunner().invoke(app, ["check", str(tmp_path), "--json"])
+ 
+     assert plain.exit_code == 0
+     assert "README" in plain.stdout
+     assert structured.exit_code == 0
+-    assert json.loads(structured.stdout)["root"] == str(tmp_path)
++    payload = json.loads(structured.stdout)
++    assert payload["schema_version"] == 1
++    assert payload["root"] == str(tmp_path)
+ 
+ 
+ def test_check_build_flag_is_forwarded_to_service(monkeypatch, tmp_path: Path) -> None:
+     cli_module = importlib.import_module("csbox.cli.main")
+ 
+     calls: list[bool] = []
+ 
+     class FakeService:
+         def run(self, root: Path, *, build: bool = False):
+             calls.append(build)
+diff --git a/tests/test_lab_cli.py b/tests/test_lab_cli.py
+index 8615936..dca1766 100644
+--- a/tests/test_lab_cli.py
++++ b/tests/test_lab_cli.py
+@@ -43,21 +43,23 @@ class FakeLabService:
+ 
+ 
+ def test_lab_list_json_is_stable_and_has_no_ansi(monkeypatch, tmp_path: Path) -> None:
+     service = FakeLabService(tmp_path)
+     cli_module = importlib.import_module("csbox.cli.main")
+     monkeypatch.setattr(cli_module, "create_lab_service", lambda: service)
+ 
+     result = CliRunner().invoke(app, ["lab", "list", "--json"])
+ 
+     assert result.exit_code == 0
+-    assert json.loads(result.stdout) == []
++    payload = json.loads(result.stdout)
++    assert payload["schema_version"] == 1
++    assert payload["sessions"] == []
+     assert "\x1b[" not in result.stdout
+ 
+ 
+ def test_lab_start_and_export_are_service_commands(monkeypatch, tmp_path: Path) -> None:
+     service = FakeLabService(tmp_path)
+     cli_module = importlib.import_module("csbox.cli.main")
+     monkeypatch.setattr(cli_module, "create_lab_service", lambda: service)
+ 
+     started = CliRunner().invoke(app, ["lab", "start", "实验", "--shell", "bash"])
+     exported = CliRunner().invoke(
+@@ -105,21 +107,21 @@ def test_lab_list_json_does_not_wrap_long_fields(monkeypatch, tmp_path: Path) ->
+                 capture_count=2,
+             ),
+         ),
+     )
+     cli_module = importlib.import_module("csbox.cli.main")
+     monkeypatch.setattr(cli_module, "create_lab_service", lambda: service)
+ 
+     result = CliRunner().invoke(app, ["lab", "list", "--json"])
+ 
+     assert result.exit_code == 0
+-    assert json.loads(result.stdout)[0]["captures"] == 2
++    assert json.loads(result.stdout)["sessions"][0]["captures"] == 2
+ 
+ 
+ def test_lab_list_plain_truncates_cjk_name_and_path_by_display_cells(
+     monkeypatch, tmp_path: Path
+ ) -> None:
+     long_name = "实验" * 120
+     long_cwd = Path("C:/Users/测试用户/桌面/实验一") / ("课程实验" * 40)
+     metadata = SessionMetadata(
+         id="long-session",
+         name=long_name,
+diff --git a/tests/test_pack_cli.py b/tests/test_pack_cli.py
+index 2fc077c..6b7b092 100644
+--- a/tests/test_pack_cli.py
++++ b/tests/test_pack_cli.py
+@@ -37,12 +37,14 @@ def test_pack_json_routes_to_service(monkeypatch, tmp_path: Path) -> None:
+             str(tmp_path),
+             "--output",
+             str(tmp_path / "out.zip"),
+             "--verify",
+             "--force",
+             "--json",
+         ],
+     )
+ 
+     assert result.exit_code == 0
+-    assert json.loads(result.stdout)["verified"] is True
++    payload = json.loads(result.stdout)
++    assert payload["schema_version"] == 1
++    assert payload["verified"] is True
+     assert calls == [(tmp_path, True, True)]
+diff --git a/tests/test_schema.py b/tests/test_schema.py
+new file mode 100644
+index 0000000..47299ff
+--- /dev/null
++++ b/tests/test_schema.py
+@@ -0,0 +1,19 @@
++from csbox.core.schema import SCHEMA_VERSION, with_schema_version
++
++
++def test_machine_payload_has_schema_version() -> None:
++    assert SCHEMA_VERSION == 1
++    assert with_schema_version({"status": "PASS"}) == {
++        "schema_version": 1,
++        "status": "PASS",
++    }
++
++
++def test_schema_version_overwrites_incoming_value() -> None:
++    payload = with_schema_version({"schema_version": 99, "status": "PASS"})
++
++    assert list(payload) == ["schema_version", "status"]
++    assert payload == {
++        "schema_version": 1,
++        "status": "PASS",
++    }
+diff --git a/tests/test_versioning.py b/tests/test_versioning.py
+new file mode 100644
+index 0000000..efa2a02
+--- /dev/null
++++ b/tests/test_versioning.py
+@@ -0,0 +1,18 @@
++from importlib.metadata import version
++
++from typer.testing import CliRunner
++
++from csbox import __version__
++from csbox.cli.main import app
++
++
++def test_version_is_single_runtime_source() -> None:
++    assert __version__ == version("csbox")
++    assert __version__ == "0.2.0"
++
++
++def test_cli_version_prints_runtime_version() -> None:
++    result = CliRunner().invoke(app, ["--version"])
++
++    assert result.exit_code == 0
++    assert result.stdout.strip() == "0.2.0"
+diff --git a/uv.lock b/uv.lock
+index 79840f1..6772ca2 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -24,21 +24,21 @@ wheels = [
+ name = "colorama"
+ version = "0.4.6"
+ source = { registry = "https://pypi.org/simple" }
+ sdist = { url = "https://files.pythonhosted.org/packages/d8/53/6f443c9a4a8358a93a6792e2acffb9d9d5cb0a5cfd8802644b7b1c9a02e4/colorama-0.4.6.tar.gz", hash = "sha256:08695f5cb7ed6e0531a20572697297273c47b8cae5a63ffc6d6ed5c201be6e44", size = 27697, upload-time = "2022-10-25T02:36:22.414Z" }
+ wheels = [
+     { url = "https://files.pythonhosted.org/packages/d1/d6/3965ed04c63042e047cb6a3e6ed1a63a35087b6a609aa3a15ed8ac56c221/colorama-0.4.6-py2.py3-none-any.whl", hash = "sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6", size = 25335, upload-time = "2022-10-25T02:36:20.889Z" },
+ ]
+ 
+ [[package]]
+ name = "csbox"
+-version = "0.1.0"
++version = "0.2.0"
+ source = { editable = "." }
+ dependencies = [
+     { name = "pillow" },
+     { name = "pydantic" },
+     { name = "pyte" },
+     { name = "pywinpty", marker = "sys_platform == 'win32'" },
+     { name = "rich" },
+     { name = "textual" },
+     { name = "typer" },
+     { name = "wcwidth" },

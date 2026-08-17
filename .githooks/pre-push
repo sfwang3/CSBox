@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${CSBOX_CLEAN_PUBLISH:-}" == "1" ]]; then
+  exit 0
+fi
+
+cat >&2 <<'MESSAGE'
+CSBox pre-push guard: direct pushes are disabled for the full local development history.
+Use clean publish: ./scripts/push_clean.sh "publish: ...".
+MESSAGE
+exit 1

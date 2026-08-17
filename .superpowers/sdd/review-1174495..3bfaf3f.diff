@@ -1,0 +1,1797 @@
+# Review package: 1174495..3bfaf3f
+
+## Commits
+3bfaf3f feat: add terminal replay and evidence export
+
+## Files changed
+ src/csbox/lab/exporter.py          | 193 +++++++++++++++
+ src/csbox/lab/fonts.py             | 106 ++++++++
+ src/csbox/lab/recorder.py          |  17 +-
+ src/csbox/lab/renderer.py          | 147 ++++++++++++
+ src/csbox/lab/replay.py            | 481 +++++++++++++++++++++++++++++++++++++
+ src/csbox/lab/screen.py            |  52 ++++
+ tests/fixtures/sessions/mixed.cast |   7 +
+ tests/test_lab_export.py           | 163 +++++++++++++
+ tests/test_renderer.py             | 211 ++++++++++++++++
+ tests/test_replay.py               | 210 ++++++++++++++++
+ 10 files changed, 1586 insertions(+), 1 deletion(-)
+
+## Diff
+diff --git a/src/csbox/lab/exporter.py b/src/csbox/lab/exporter.py
+new file mode 100644
+index 0000000..1b66f6a
+--- /dev/null
++++ b/src/csbox/lab/exporter.py
+@@ -0,0 +1,193 @@
++from __future__ import annotations
++
++import re
++import shutil
++import unicodedata
++from dataclasses import dataclass
++from pathlib import Path
++
++from csbox.lab.captures import CaptureStore
++from csbox.lab.models import CaptureRecord, SessionPaths
++from csbox.lab.renderer import RenderTheme, TerminalEvidenceRenderer
++
++
++class LabExportError(RuntimeError):
++    """A lab session cannot be exported without risking user data."""
++
++
++@dataclass(frozen=True, slots=True)
++class LabExportResult:
++    destination: Path
++    evidence: tuple[Path, ...]
++    markdown: Path
++    cast: Path
++    commands: Path | None
++    warnings: tuple[str, ...] = ()
++
++
++class LabExporter:
++    """Export captures, their source cast, and stable Chinese Markdown."""
++
++    def __init__(
++        self,
++        renderer: TerminalEvidenceRenderer,
++        *,
++        theme: RenderTheme | None = None,
++    ) -> None:
++        self.renderer = renderer
++        self.theme = theme or RenderTheme.dark()
++
++    def export(
++        self,
++        session: SessionPaths | Path | str,
++        destination: Path | str,
++        *,
++        force: bool = False,
++    ) -> LabExportResult:
++        paths = session if isinstance(session, SessionPaths) else SessionPaths(session)
++        output = Path(destination)
++        if not paths.cast.is_file():
++            raise LabExportError(f"找不到实验录制文件：{paths.cast}")
++        if output.exists() and output.resolve() == paths.root.resolve():
++            raise LabExportError("导出目录不能覆盖原始实验目录。")
++        self._prepare_destination(output, force=force)
++        evidence_directory = output / "evidence"
++        self._prepare_evidence_directory(evidence_directory)
++
++        capture_result = CaptureStore(paths.captures).load()
++        rendered: list[Path] = []
++        markdown_entries: list[str] = []
++        commands: list[str] = []
++        for index, capture in enumerate(capture_result.captures, start=1):
++            title = _display_title(capture.title, index)
++            slug = _safe_slug(capture.title, index)
++            image_path = evidence_directory / f"{index:02d}-{slug}.png"
++            _reject_symlink(image_path)
++            self.renderer.render(capture.snapshot, image_path, self.theme)
++            rendered.append(image_path)
++            markdown_entries.append(_markdown_entry(index, title, capture, image_path.name))
++            command = _known_command(capture.command)
++            if command is not None:
++                commands.append(command)
++
++        markdown_path = output / "evidence.md"
++        cast_path = output / "session.cast"
++        commands_path = output / "commands.txt"
++        for path in (markdown_path, cast_path, commands_path):
++            _reject_symlink(path)
++        markdown = "## 实验记录\n"
++        if markdown_entries:
++            markdown += "\n" + "\n\n".join(markdown_entries) + "\n"
++        markdown_path.write_text(markdown, encoding="utf-8", newline="\n")
++        shutil.copyfile(paths.cast, cast_path)
++        exported_commands: Path | None = None
++        if commands:
++            commands_path.write_text("\n".join(commands) + "\n", encoding="utf-8", newline="\n")
++            exported_commands = commands_path
++        elif force and commands_path.is_file():
++            commands_path.unlink()
++
++        return LabExportResult(
++            destination=output,
++            evidence=tuple(rendered),
++            markdown=markdown_path,
++            cast=cast_path,
++            commands=exported_commands,
++            warnings=capture_result.warnings,
++        )
++
++    @staticmethod
++    def _prepare_destination(destination: Path, *, force: bool) -> None:
++        if destination.is_symlink():
++            raise LabExportError("导出目录不能是符号链接。")
++        if destination.exists():
++            if not destination.is_dir():
++                raise LabExportError(f"导出路径不是目录：{destination}")
++            if not force:
++                raise LabExportError(f"导出目录已存在；如需覆盖请使用 force：{destination}")
++            return
++        destination.mkdir(parents=True)
++
++    @staticmethod
++    def _prepare_evidence_directory(destination: Path) -> None:
++        if destination.is_symlink():
++            raise LabExportError("evidence 目录不能是符号链接。")
++        if destination.exists() and not destination.is_dir():
++            raise LabExportError(f"evidence 路径不是目录：{destination}")
++        destination.mkdir(exist_ok=True)
++
++
++def _markdown_entry(
++    index: int,
++    title: str,
++    capture: CaptureRecord,
++    image_name: str,
++) -> str:
++    return (
++        f"### {index}. {title}\n\n"
++        "时间：\n"
++        f"{capture.created_at:%H:%M:%S}\n\n"
++        "结果：\n\n"
++        f"![实验记录](evidence/{image_name})"
++    )
++
++
++def _display_title(title: str, index: int) -> str:
++    normalized = " ".join(title.split())
++    return normalized or f"实验记录 {index}"
++
++
++def _safe_slug(title: str, index: int) -> str:
++    normalized = unicodedata.normalize("NFKC", title)
++    characters: list[str] = []
++    for character in normalized:
++        if unicodedata.category(character).startswith("C"):
++            continue
++        if character in '<>:"/\\|?*' or character.isspace():
++            characters.append("-")
++        else:
++            characters.append(character)
++    slug = re.sub(r"-+", "-", "".join(characters)).strip(" .-_")
++    while ".." in slug:
++        slug = slug.replace("..", ".")
++    slug = slug[:80].rstrip(" .-_")
++    if not slug:
++        slug = f"实验记录-{index}"
++    if slug.split(".", maxsplit=1)[0].upper() in {
++        "CON",
++        "PRN",
++        "AUX",
++        "NUL",
++        "COM1",
++        "COM2",
++        "COM3",
++        "COM4",
++        "COM5",
++        "COM6",
++        "COM7",
++        "COM8",
++        "COM9",
++        "LPT1",
++        "LPT2",
++        "LPT3",
++        "LPT4",
++        "LPT5",
++        "LPT6",
++        "LPT7",
++        "LPT8",
++        "LPT9",
++    }:
++        slug = f"_{slug}"
++    return slug
++
++
++def _known_command(command: str | None) -> str | None:
++    if command is None or any(character in command for character in "\r\n\0"):
++        return None
++    stripped = command.strip()
++    return stripped or None
++
++
++def _reject_symlink(path: Path) -> None:
++    if path.is_symlink():
++        raise LabExportError(f"拒绝覆盖符号链接：{path}")
+diff --git a/src/csbox/lab/fonts.py b/src/csbox/lab/fonts.py
+new file mode 100644
+index 0000000..d2fcfa0
+--- /dev/null
++++ b/src/csbox/lab/fonts.py
+@@ -0,0 +1,106 @@
++from __future__ import annotations
++
++import os
++from collections.abc import Iterable
++from dataclasses import dataclass
++from pathlib import Path
++
++from PIL import ImageFont
++
++
++class FontResolutionError(RuntimeError):
++    """No system font combination can render terminal evidence safely."""
++
++
++@dataclass(frozen=True, slots=True)
++class ResolvedFonts:
++    ascii: Path
++    cjk: Path
++
++
++class FontResolver:
++    """Resolve a deterministic monospace/CJK system-font pair."""
++
++    def __init__(
++        self,
++        explicit: Path | str | None = None,
++        candidates: Iterable[Path | str] | None = None,
++    ) -> None:
++        self.explicit = Path(explicit).expanduser() if explicit is not None else None
++        supplied = tuple(Path(candidate).expanduser() for candidate in candidates or ())
++        search = supplied if candidates is not None else _default_candidates()
++        ordered = ((self.explicit,) if self.explicit is not None else ()) + search
++        self.candidates = tuple(dict.fromkeys(ordered))
++        self._resolved: ResolvedFonts | None = None
++
++    def resolve(self) -> ResolvedFonts:
++        if self._resolved is not None:
++            return self._resolved
++        available = tuple(path for path in self.candidates if path.is_file())
++        ascii_font = next((path for path in available if _is_ascii_monospace(path)), None)
++        if ascii_font is None:
++            raise FontResolutionError(
++                "找不到可用的等宽字体，请在配置 render.font 中填写字体文件路径。"
++            )
++        cjk_font = next((path for path in available if _has_cjk_coverage(path)), None)
++        if cjk_font is None:
++            raise FontResolutionError(
++                "找不到支持中文的字体，请安装 Noto CJK/微软雅黑，"
++                "或在配置 render.font 中填写支持中文的字体文件路径。"
++            )
++        self._resolved = ResolvedFonts(ascii=ascii_font, cjk=cjk_font)
++        return self._resolved
++
++
++def _default_candidates() -> tuple[Path, ...]:
++    windows_root = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"
++    wsl_windows = Path("/mnt/c/Windows/Fonts")
++    roots_and_names = (
++        (windows_root, "CascadiaMono.ttf"),
++        (windows_root, "CascadiaCode.ttf"),
++        (windows_root, "consola.ttf"),
++        (windows_root, "msyh.ttc"),
++        (windows_root, "simsun.ttc"),
++        (Path("/usr/share/fonts/truetype/dejavu"), "DejaVuSansMono.ttf"),
++        (Path("/usr/share/fonts/truetype/noto"), "NotoSansMono-Regular.ttf"),
++        (Path("/usr/share/fonts/opentype/noto"), "NotoSansMonoCJK-Regular.ttc"),
++        (Path("/usr/share/fonts/opentype/noto"), "NotoSansCJK-Regular.ttc"),
++        (Path("/usr/share/fonts/truetype/noto"), "NotoSansCJK-Regular.ttc"),
++        (wsl_windows, "CascadiaMono.ttf"),
++        (wsl_windows, "CascadiaCode.ttf"),
++        (wsl_windows, "consola.ttf"),
++        (wsl_windows, "msyh.ttc"),
++        (wsl_windows, "simsun.ttc"),
++    )
++    return tuple(root / name for root, name in roots_and_names)
++
++
++def _load_font(path: Path, size: int = 16) -> ImageFont.FreeTypeFont | None:
++    try:
++        return ImageFont.truetype(str(path), size=size)
++    except (OSError, ValueError):
++        return None
++
++
++def _is_ascii_monospace(path: Path) -> bool:
++    font = _load_font(path)
++    if font is None or not _has_glyph(font, "A"):
++        return False
++    advances = [font.getlength(character) for character in ("i", "M", "0", " ")]
++    return max(advances) - min(advances) < 0.01
++
++
++def _has_cjk_coverage(path: Path) -> bool:
++    font = _load_font(path)
++    return font is not None and all(_has_glyph(font, character) for character in "中文项目")
++
++
++def _has_glyph(font: ImageFont.FreeTypeFont, character: str) -> bool:
++    return _glyph_signature(font, character) != _glyph_signature(font, "\u0378")
++
++
++def _glyph_signature(
++    font: ImageFont.FreeTypeFont, character: str
++) -> tuple[tuple[int, int], tuple[int, int, int, int] | None, bytes]:
++    mask = font.getmask(character, mode="L")
++    return mask.size, mask.getbbox(), bytes(mask)
+diff --git a/src/csbox/lab/recorder.py b/src/csbox/lab/recorder.py
+index 2fbba38..69cea34 100644
+--- a/src/csbox/lab/recorder.py
++++ b/src/csbox/lab/recorder.py
+@@ -16,27 +16,32 @@ from csbox.core.events import TerminalEvent, TerminalEventType, TerminalSize
+ 
+ class RecorderError(RuntimeError):
+     """A recording could not accept or durably write an event."""
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+ class CastEvent:
+     interval: float
+     code: str
+     data: str
++    # Byte position immediately after this event's source line.  A replay
++    # checkpoint can resume reading at this position without decoding the
++    # already-applied prefix again.
++    cast_offset: int = 0
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+ class CastReadResult:
+     header: dict[str, Any]
+     events: tuple[CastEvent, ...]
+     warnings: tuple[str, ...]
++    data_offset: int = 0
+ 
+ 
+ _STOP: Final = object()
+ _CAST_CODES: Final = frozenset({"o", "i", "r", "m", "x"})
+ 
+ 
+ class AsciicastV3Recorder:
+     """Append asciicast v3 lines on a bounded background writer."""
+ 
+     def __init__(
+@@ -235,22 +240,25 @@ def _encode_event(event: TerminalEvent, decoders: dict[TerminalEventType, Any])
+ class AsciicastV3Reader:
+     def __init__(self, path: Path | str) -> None:
+         self.path = Path(path)
+ 
+     def read(self) -> CastReadResult:
+         raw_lines = self.path.read_bytes().splitlines(keepends=True)
+         warnings: list[str] = []
+         header: dict[str, Any] | None = None
+         events: list[CastEvent] = []
+         pending_unknown_interval = 0.0
++        cast_offset = 0
++        data_offset = 0
+ 
+         for line_number, raw_line in enumerate(raw_lines, start=1):
++            cast_offset += len(raw_line)
+             complete_line = raw_line.endswith((b"\n", b"\r"))
+             stripped = raw_line.strip()
+             if not stripped or stripped.startswith(b"#"):
+                 continue
+             try:
+                 value = json.loads(stripped)
+             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                 if header is None:
+                     raise RecorderError(
+                         f"invalid asciicast v3 header on line {line_number}"
+@@ -259,42 +267,49 @@ class AsciicastV3Reader:
+                     warnings.append(f"truncated cast line {line_number} ignored")
+                 else:
+                     warnings.append(f"corrupt cast line {line_number} ignored")
+                 continue
+ 
+             if header is None:
+                 if not _is_valid_v3_header(value):
+                     raise RecorderError(f"invalid asciicast v3 header on line {line_number}")
+                 assert isinstance(value, dict)
+                 header = value
++                data_offset = cast_offset
+                 continue
+ 
+             parsed = _parse_cast_event(value)
+             if parsed is None:
+                 warnings.append(f"invalid cast event on line {line_number} ignored")
+                 continue
+             if parsed.code not in _CAST_CODES:
+                 warnings.append(f"unknown event code {parsed.code!r} on line {line_number} ignored")
+                 pending_unknown_interval += parsed.interval
+                 continue
+             events.append(
+                 CastEvent(
+                     interval=parsed.interval + pending_unknown_interval,
+                     code=parsed.code,
+                     data=parsed.data,
++                    cast_offset=cast_offset,
+                 )
+             )
+             pending_unknown_interval = 0.0
+ 
+         if header is None:
+             raise RecorderError("asciicast v3 header is missing")
+-        return CastReadResult(header=header, events=tuple(events), warnings=tuple(warnings))
++        return CastReadResult(
++            header=header,
++            events=tuple(events),
++            warnings=tuple(warnings),
++            data_offset=data_offset,
++        )
+ 
+ 
+ def _parse_cast_event(value: object) -> CastEvent | None:
+     if not isinstance(value, list) or len(value) != 3:
+         return None
+     interval, code, data = value
+     if (
+         isinstance(interval, bool)
+         or not isinstance(interval, int | float)
+         or not math.isfinite(interval)
+diff --git a/src/csbox/lab/renderer.py b/src/csbox/lab/renderer.py
+new file mode 100644
+index 0000000..f5dd663
+--- /dev/null
++++ b/src/csbox/lab/renderer.py
+@@ -0,0 +1,147 @@
++from __future__ import annotations
++
++import math
++from dataclasses import dataclass
++from pathlib import Path
++from typing import Final
++
++from PIL import Image, ImageDraw, ImageFont
++
++from csbox.lab.fonts import FontResolver, ResolvedFonts
++from csbox.lab.screen import TerminalCell, TerminalSnapshot
++
++RGB = tuple[int, int, int]
++
++_DARK_PALETTE: Final[dict[str, RGB]] = {
++    "black": (0, 0, 0),
++    "red": (205, 49, 49),
++    "green": (13, 188, 121),
++    "brown": (229, 229, 16),
++    "yellow": (229, 229, 16),
++    "blue": (36, 114, 200),
++    "magenta": (188, 63, 188),
++    "cyan": (17, 168, 205),
++    "white": (229, 229, 229),
++    "brightblack": (102, 102, 102),
++    "brightred": (241, 76, 76),
++    "brightgreen": (35, 209, 139),
++    "brightyellow": (245, 245, 67),
++    "brightblue": (59, 142, 234),
++    "brightmagenta": (214, 112, 214),
++    "brightcyan": (41, 184, 219),
++    "brightwhite": (255, 255, 255),
++}
++
++_LIGHT_PALETTE: Final[dict[str, RGB]] = {
++    **_DARK_PALETTE,
++    "black": (32, 32, 32),
++    "white": (232, 232, 232),
++    "brightwhite": (255, 255, 255),
++}
++
++
++@dataclass(frozen=True, slots=True)
++class RenderTheme:
++    background: RGB
++    foreground: RGB
++    palette: dict[str, RGB]
++
++    @classmethod
++    def dark(cls) -> RenderTheme:
++        return cls(background=(12, 12, 12), foreground=(204, 204, 204), palette=_DARK_PALETTE)
++
++    @classmethod
++    def light(cls) -> RenderTheme:
++        return cls(background=(250, 250, 250), foreground=(32, 32, 32), palette=_LIGHT_PALETTE)
++
++    def resolve_color(self, value: str, *, background: bool = False) -> RGB:
++        if value == "default":
++            return self.background if background else self.foreground
++        normalized = value.lower().removeprefix("#")
++        if len(normalized) == 6:
++            try:
++                return tuple(bytes.fromhex(normalized))  # type: ignore[return-value]
++            except ValueError:
++                pass
++        return self.palette.get(value.lower(), self.background if background else self.foreground)
++
++
++class TerminalEvidenceRenderer:
++    """Render immutable terminal snapshots on a fixed Pillow cell grid."""
++
++    def __init__(
++        self,
++        font_resolver: FontResolver | None = None,
++        *,
++        font_size: int = 18,
++        padding: int = 8,
++    ) -> None:
++        if font_size <= 0:
++            raise ValueError("font_size must be positive")
++        if padding < 0:
++            raise ValueError("padding must not be negative")
++        self.font_size = font_size
++        self.padding = padding
++        self.fonts: ResolvedFonts = (font_resolver or FontResolver()).resolve()
++        self._ascii_font = ImageFont.truetype(str(self.fonts.ascii), size=font_size)
++        self._cjk_font = ImageFont.truetype(str(self.fonts.cjk), size=font_size)
++        ascii_advance = self._ascii_font.getlength("M")
++        cjk_half_advance = self._cjk_font.getlength("中") / 2
++        self.cell_width = max(1, math.ceil(ascii_advance), math.ceil(cjk_half_advance))
++        ascii_ascent, ascii_descent = self._ascii_font.getmetrics()
++        cjk_ascent, cjk_descent = self._cjk_font.getmetrics()
++        self.cell_height = max(ascii_ascent + ascii_descent, cjk_ascent + cjk_descent)
++
++    def render(
++        self,
++        snapshot: TerminalSnapshot,
++        destination: Path | str,
++        theme: RenderTheme | None = None,
++    ) -> Path:
++        if not isinstance(snapshot, TerminalSnapshot):
++            raise TypeError("snapshot must be a TerminalSnapshot")
++        selected_theme = theme or RenderTheme.dark()
++        path = Path(destination)
++        path.parent.mkdir(parents=True, exist_ok=True)
++        size = (
++            snapshot.columns * self.cell_width + self.padding * 2,
++            snapshot.rows * self.cell_height + self.padding * 2,
++        )
++        image = Image.new("RGB", size, selected_theme.background)
++        draw = ImageDraw.Draw(image)
++        for row_index, row in enumerate(snapshot.cells):
++            for column_index, cell in enumerate(row):
++                if cell.width == 0:
++                    continue
++                self._draw_cell(draw, row_index, column_index, cell, selected_theme)
++        image.save(path, format="PNG")
++        return path
++
++    def _draw_cell(
++        self,
++        draw: ImageDraw.ImageDraw,
++        row: int,
++        column: int,
++        cell: TerminalCell,
++        theme: RenderTheme,
++    ) -> None:
++        x = self.padding + column * self.cell_width
++        y = self.padding + row * self.cell_height
++        span = self.cell_width * max(1, cell.width)
++        foreground = theme.resolve_color(cell.foreground)
++        background = theme.resolve_color(cell.background, background=True)
++        if cell.reverse:
++            foreground, background = background, foreground
++        draw.rectangle(
++            (x, y, x + span - 1, y + self.cell_height - 1),
++            fill=background,
++        )
++        if cell.character:
++            font = self._cjk_font if cell.width == 2 else self._ascii_font
++            draw.text((x, y), cell.character, font=font, fill=foreground)
++        if cell.underline:
++            underline_y = y + self.cell_height - 2
++            draw.line((x, underline_y, x + span - 1, underline_y), fill=foreground, width=1)
++        if cell.strikethrough:
++            strike_y = y + self.cell_height // 2
++            draw.line((x, strike_y, x + span - 1, strike_y), fill=foreground, width=1)
+diff --git a/src/csbox/lab/replay.py b/src/csbox/lab/replay.py
+new file mode 100644
+index 0000000..6324712
+--- /dev/null
++++ b/src/csbox/lab/replay.py
+@@ -0,0 +1,481 @@
++from __future__ import annotations
++
++import hashlib
++import json
++import math
++import os
++import tempfile
++from collections.abc import Callable, Mapping
++from contextlib import suppress
++from dataclasses import dataclass
++from pathlib import Path
++from typing import Any, Final
++
++from csbox.core.events import TerminalEvent, TerminalEventType, TerminalSize
++from csbox.lab.recorder import AsciicastV3Reader, CastEvent, CastReadResult
++from csbox.lab.screen import TerminalCell, TerminalCursor, TerminalEmulator, TerminalSnapshot
++
++CHECKPOINT_VERSION: Final = 1
++CHECKPOINT_SECONDS: Final = 5.0
++CHECKPOINT_EVENTS: Final = 500
++
++EmulatorFactory = Callable[..., TerminalEmulator]
++
++
++class CheckpointStoreError(RuntimeError):
++    """A derived replay checkpoint index could not be persisted."""
++
++
++@dataclass(frozen=True, slots=True)
++class Checkpoint:
++    """State after ``event_index`` cast events have been applied."""
++
++    event_index: int
++    cast_offset: int
++    relative_time: float
++    snapshot: TerminalSnapshot
++
++
++@dataclass(frozen=True, slots=True)
++class _ReplayEvent:
++    relative_time: float
++    cast: CastEvent
++
++
++class CheckpointStore:
++    """Load and atomically replace a versioned, rebuildable replay index."""
++
++    def __init__(self, path: Path | str) -> None:
++        self.path = Path(path)
++
++    def load(self, cast_path: Path | str) -> tuple[Checkpoint, ...] | None:
++        source = Path(cast_path)
++        try:
++            value = json.loads(self.path.read_text(encoding="utf-8"))
++            if not isinstance(value, Mapping) or value.get("version") != CHECKPOINT_VERSION:
++                return None
++            if value.get("cast") != _cast_fingerprint(source):
++                return None
++            raw_checkpoints = value.get("checkpoints")
++            if not isinstance(raw_checkpoints, list):
++                return None
++            checksum = value.get("checksum")
++            if not isinstance(checksum, str) or checksum != _checkpoint_checksum(raw_checkpoints):
++                return None
++            checkpoints = tuple(_checkpoint_from_json(item) for item in raw_checkpoints)
++            if not checkpoints:
++                return None
++            return checkpoints
++        except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
++            return None
++
++    def save(self, cast_path: Path | str, checkpoints: tuple[Checkpoint, ...]) -> None:
++        if not checkpoints:
++            raise ValueError("at least one checkpoint is required")
++        serialized_checkpoints = [_checkpoint_to_json(checkpoint) for checkpoint in checkpoints]
++        document = {
++            "version": CHECKPOINT_VERSION,
++            "cast": _cast_fingerprint(Path(cast_path)),
++            "checkpoints": serialized_checkpoints,
++            "checksum": _checkpoint_checksum(serialized_checkpoints),
++        }
++        payload = (json.dumps(document, ensure_ascii=False, indent=2) + "\n").encode()
++        try:
++            self.path.parent.mkdir(parents=True, exist_ok=True)
++            _atomic_write(self.path, payload)
++        except OSError as exc:
++            raise CheckpointStoreError(f"could not persist replay checkpoints: {exc}") from exc
++
++
++class ReplayService:
++    """Deterministically seek an asciicast using domain snapshot checkpoints."""
++
++    def __init__(
++        self,
++        cast_path: Path | str,
++        *,
++        checkpoint_store: CheckpointStore | None = None,
++        emulator_factory: EmulatorFactory = TerminalEmulator,
++    ) -> None:
++        self.cast_path = Path(cast_path)
++        self.checkpoint_store = checkpoint_store or CheckpointStore(
++            self.cast_path.with_name("checkpoints.json")
++        )
++        self._emulator_factory = emulator_factory
++        read_result = AsciicastV3Reader(self.cast_path).read()
++        self.warnings = read_result.warnings
++        self._columns, self._rows = _header_dimensions(read_result.header)
++        self._events = _timed_events(read_result.events)
++        self.duration = self._events[-1].relative_time if self._events else 0.0
++        checkpoints = self.checkpoint_store.load(self.cast_path)
++        if not _checkpoints_match(checkpoints, read_result, self._events):
++            checkpoints = self._build_checkpoints(read_result)
++            self.checkpoint_store.save(self.cast_path, checkpoints)
++        assert checkpoints is not None
++        self.checkpoints = checkpoints
++
++    def seek(self, relative_time: float) -> TerminalSnapshot:
++        if isinstance(relative_time, bool) or not isinstance(relative_time, int | float):
++            raise TypeError("relative_time must be a number")
++        if not math.isfinite(relative_time):
++            raise ValueError("relative_time must be finite")
++        target = max(0.0, float(relative_time))
++        checkpoint = max(
++            (item for item in self.checkpoints if item.relative_time <= target),
++            key=lambda item: (item.relative_time, item.event_index),
++        )
++        emulator = self._emulator_factory(
++            columns=checkpoint.snapshot.columns,
++            rows=checkpoint.snapshot.rows,
++        )
++        emulator.restore(checkpoint.snapshot)
++        for event_index, replay_event in enumerate(
++            self._events[checkpoint.event_index :],
++            start=checkpoint.event_index,
++        ):
++            if replay_event.relative_time > target:
++                break
++            event = _terminal_event(event_index, replay_event)
++            if event is not None:
++                emulator.apply(event)
++        return emulator.snapshot()
++
++    def _build_checkpoints(self, read_result: CastReadResult) -> tuple[Checkpoint, ...]:
++        emulator = self._emulator_factory(columns=self._columns, rows=self._rows)
++        checkpoints = [
++            Checkpoint(
++                event_index=0,
++                cast_offset=read_result.data_offset,
++                relative_time=0.0,
++                snapshot=emulator.snapshot(),
++            )
++        ]
++        last_checkpoint_time = 0.0
++        last_checkpoint_index = 0
++        for event_index, replay_event in enumerate(self._events, start=1):
++            event = _terminal_event(event_index - 1, replay_event)
++            if event is not None:
++                emulator.apply(event)
++            if (
++                replay_event.relative_time - last_checkpoint_time >= CHECKPOINT_SECONDS
++                or event_index - last_checkpoint_index >= CHECKPOINT_EVENTS
++            ):
++                checkpoints.append(
++                    Checkpoint(
++                        event_index=event_index,
++                        cast_offset=replay_event.cast.cast_offset,
++                        relative_time=replay_event.relative_time,
++                        snapshot=emulator.snapshot(),
++                    )
++                )
++                last_checkpoint_time = replay_event.relative_time
++                last_checkpoint_index = event_index
++        return tuple(checkpoints)
++
++
++def _timed_events(events: tuple[CastEvent, ...]) -> tuple[_ReplayEvent, ...]:
++    relative_time = 0.0
++    replay_events: list[_ReplayEvent] = []
++    for event in events:
++        relative_time += event.interval
++        replay_events.append(_ReplayEvent(relative_time=relative_time, cast=event))
++    return tuple(replay_events)
++
++
++def _terminal_event(event_index: int, replay_event: _ReplayEvent) -> TerminalEvent | None:
++    cast = replay_event.cast
++    if cast.code == "o":
++        event_type = TerminalEventType.OUTPUT
++        payload: bytes | str | TerminalSize | int | None = cast.data.encode("utf-8")
++    elif cast.code == "i":
++        event_type = TerminalEventType.INPUT
++        payload = cast.data.encode("utf-8")
++    elif cast.code == "r":
++        dimensions = cast.data.lower().split("x", maxsplit=1)
++        if len(dimensions) != 2:
++            return None
++        try:
++            payload = TerminalSize(columns=int(dimensions[0]), rows=int(dimensions[1]))
++        except (TypeError, ValueError):
++            return None
++        event_type = TerminalEventType.RESIZE
++    elif cast.code == "m":
++        event_type = TerminalEventType.MARK
++        payload = cast.data
++    elif cast.code == "x":
++        event_type = TerminalEventType.EXIT
++        try:
++            payload = int(cast.data)
++        except ValueError:
++            payload = None
++    else:
++        return None
++    return TerminalEvent(
++        sequence=event_index + 1,
++        monotonic_time=replay_event.relative_time,
++        relative_time=replay_event.relative_time,
++        type=event_type,
++        payload=payload,
++    )
++
++
++def _header_dimensions(header: Mapping[str, Any]) -> tuple[int, int]:
++    term = header["term"]
++    assert isinstance(term, Mapping)
++    columns = term["cols"]
++    rows = term["rows"]
++    assert type(columns) is int and type(rows) is int
++    return columns, rows
++
++
++def _checkpoints_match(
++    checkpoints: tuple[Checkpoint, ...] | None,
++    read_result: CastReadResult,
++    events: tuple[_ReplayEvent, ...],
++) -> bool:
++    if not checkpoints:
++        return False
++    if tuple(checkpoint.event_index for checkpoint in checkpoints) != _checkpoint_indices(events):
++        return False
++    previous_index = -1
++    previous_time = -1.0
++    for checkpoint in checkpoints:
++        if checkpoint.event_index <= previous_index or checkpoint.relative_time < previous_time:
++            return False
++        if checkpoint.event_index < 0 or checkpoint.event_index > len(events):
++            return False
++        expected_time = (
++            0.0 if checkpoint.event_index == 0 else events[checkpoint.event_index - 1].relative_time
++        )
++        expected_offset = (
++            read_result.data_offset
++            if checkpoint.event_index == 0
++            else events[checkpoint.event_index - 1].cast.cast_offset
++        )
++        if checkpoint.relative_time != expected_time or checkpoint.cast_offset != expected_offset:
++            return False
++        previous_index = checkpoint.event_index
++        previous_time = checkpoint.relative_time
++    initial = checkpoints[0]
++    columns, rows = _header_dimensions(read_result.header)
++    return (
++        initial.event_index == 0
++        and initial.relative_time == 0.0
++        and initial.snapshot.columns == columns
++        and initial.snapshot.rows == rows
++    )
++
++
++def _checkpoint_indices(events: tuple[_ReplayEvent, ...]) -> tuple[int, ...]:
++    indices = [0]
++    last_checkpoint_time = 0.0
++    last_checkpoint_index = 0
++    for event_index, event in enumerate(events, start=1):
++        if (
++            event.relative_time - last_checkpoint_time >= CHECKPOINT_SECONDS
++            or event_index - last_checkpoint_index >= CHECKPOINT_EVENTS
++        ):
++            indices.append(event_index)
++            last_checkpoint_time = event.relative_time
++            last_checkpoint_index = event_index
++    return tuple(indices)
++
++
++def _cast_fingerprint(path: Path) -> dict[str, int | str]:
++    data = path.read_bytes()
++    return {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
++
++
++def _checkpoint_checksum(checkpoints: list[object]) -> str:
++    canonical = json.dumps(
++        checkpoints,
++        ensure_ascii=False,
++        sort_keys=True,
++        separators=(",", ":"),
++    ).encode()
++    return hashlib.sha256(canonical).hexdigest()
++
++
++def _checkpoint_to_json(checkpoint: Checkpoint) -> dict[str, Any]:
++    return {
++        "eventIndex": checkpoint.event_index,
++        "castOffset": checkpoint.cast_offset,
++        "relativeTime": checkpoint.relative_time,
++        "snapshot": _snapshot_to_json(checkpoint.snapshot),
++    }
++
++
++def _checkpoint_from_json(value: object) -> Checkpoint:
++    if not isinstance(value, Mapping):
++        raise ValueError("checkpoint must be an object")
++    event_index = value.get("eventIndex")
++    cast_offset = value.get("castOffset")
++    relative_time = value.get("relativeTime")
++    if type(event_index) is not int or event_index < 0:
++        raise ValueError("invalid checkpoint event index")
++    if type(cast_offset) is not int or cast_offset < 0:
++        raise ValueError("invalid checkpoint cast offset")
++    if (
++        isinstance(relative_time, bool)
++        or not isinstance(relative_time, int | float)
++        or not math.isfinite(relative_time)
++        or relative_time < 0
++    ):
++        raise ValueError("invalid checkpoint relative time")
++    return Checkpoint(
++        event_index=event_index,
++        cast_offset=cast_offset,
++        relative_time=float(relative_time),
++        snapshot=_snapshot_from_json(value.get("snapshot")),
++    )
++
++
++def _snapshot_to_json(snapshot: TerminalSnapshot) -> dict[str, Any]:
++    return {
++        "rows": snapshot.rows,
++        "columns": snapshot.columns,
++        "cells": [
++            [
++                {
++                    "character": cell.character,
++                    "width": cell.width,
++                    "foreground": cell.foreground,
++                    "background": cell.background,
++                    "bold": cell.bold,
++                    "italic": cell.italic,
++                    "underline": cell.underline,
++                    "strikethrough": cell.strikethrough,
++                    "reverse": cell.reverse,
++                }
++                for cell in row
++            ]
++            for row in snapshot.cells
++        ],
++        "cursor": {
++            "row": snapshot.cursor.row,
++            "column": snapshot.cursor.column,
++            "visible": snapshot.cursor.visible,
++        },
++        "relativeTime": snapshot.relative_time,
++    }
++
++
++def _snapshot_from_json(value: object) -> TerminalSnapshot:
++    if not isinstance(value, Mapping):
++        raise ValueError("snapshot must be an object")
++    rows = value.get("rows")
++    columns = value.get("columns")
++    raw_cells = value.get("cells")
++    cursor = value.get("cursor")
++    relative_time = value.get("relativeTime")
++    if type(rows) is not int or rows <= 0 or type(columns) is not int or columns <= 0:
++        raise ValueError("invalid snapshot dimensions")
++    if not isinstance(raw_cells, list) or len(raw_cells) != rows:
++        raise ValueError("invalid snapshot rows")
++    cells = tuple(
++        tuple(_cell_from_json(cell) for cell in row)
++        for row in raw_cells
++        if isinstance(row, list) and len(row) == columns
++    )
++    if len(cells) != rows:
++        raise ValueError("invalid snapshot columns")
++    if not isinstance(cursor, Mapping):
++        raise ValueError("invalid snapshot cursor")
++    cursor_row = cursor.get("row")
++    cursor_column = cursor.get("column")
++    cursor_visible = cursor.get("visible")
++    if (
++        type(cursor_row) is not int
++        or not 0 <= cursor_row < rows
++        or type(cursor_column) is not int
++        or not 0 <= cursor_column < columns
++        or type(cursor_visible) is not bool
++    ):
++        raise ValueError("invalid snapshot cursor")
++    if (
++        isinstance(relative_time, bool)
++        or not isinstance(relative_time, int | float)
++        or not math.isfinite(relative_time)
++        or relative_time < 0
++    ):
++        raise ValueError("invalid snapshot relative time")
++    snapshot = TerminalSnapshot(
++        rows=rows,
++        columns=columns,
++        cells=cells,
++        cursor=TerminalCursor(cursor_row, cursor_column, cursor_visible),
++        relative_time=float(relative_time),
++    )
++    # Reuse the adapter's public validation boundary without importing a
++    # private helper: restore rejects malformed wide-cell geometry.
++    TerminalEmulator(columns=columns, rows=rows).restore(snapshot)
++    return snapshot
++
++
++def _cell_from_json(value: object) -> TerminalCell:
++    if not isinstance(value, Mapping):
++        raise ValueError("cell must be an object")
++    character = value.get("character")
++    width = value.get("width")
++    foreground = value.get("foreground")
++    background = value.get("background")
++    flags = [
++        value.get("bold"),
++        value.get("italic"),
++        value.get("underline"),
++        value.get("strikethrough"),
++        value.get("reverse"),
++    ]
++    if (
++        not isinstance(character, str)
++        or type(width) is not int
++        or width not in {0, 1, 2}
++        or not isinstance(foreground, str)
++        or not isinstance(background, str)
++        or any(type(flag) is not bool for flag in flags)
++    ):
++        raise ValueError("invalid terminal cell")
++    return TerminalCell(
++        character=character,
++        width=width,
++        foreground=foreground,
++        background=background,
++        bold=flags[0],
++        italic=flags[1],
++        underline=flags[2],
++        strikethrough=flags[3],
++        reverse=flags[4],
++    )
++
++
++def _atomic_write(path: Path, data: bytes) -> None:
++    descriptor, temporary_name = tempfile.mkstemp(
++        dir=path.parent,
++        prefix=f".{path.name}.",
++        suffix=".tmp",
++    )
++    temporary = Path(temporary_name)
++    try:
++        with os.fdopen(descriptor, "wb") as stream:
++            stream.write(data)
++            stream.flush()
++            os.fsync(stream.fileno())
++        os.replace(temporary, path)
++        _fsync_directory(path.parent)
++    except BaseException:
++        with suppress(OSError):
++            temporary.unlink(missing_ok=True)
++        raise
++
++
++def _fsync_directory(directory: Path) -> None:
++    try:
++        descriptor = os.open(directory, os.O_RDONLY)
++    except OSError:
++        return
++    try:
++        os.fsync(descriptor)
++    except OSError:
++        pass
++    finally:
++        os.close(descriptor)
+diff --git a/src/csbox/lab/screen.py b/src/csbox/lab/screen.py
+index b0d5a4e..177b60b 100644
+--- a/src/csbox/lab/screen.py
++++ b/src/csbox/lab/screen.py
+@@ -70,20 +70,45 @@ class TerminalEmulator:
+             assert isinstance(event.payload, TerminalSize)
+             self._screen.resize(lines=event.payload.rows, columns=event.payload.columns)
+             self._relative_time = event.relative_time
+ 
+     handle = apply
+     __call__ = apply
+ 
+     def snapshot(self) -> TerminalSnapshot:
+         return _snapshot_from_pyte(self._screen, self._relative_time)
+ 
++    def restore(self, snapshot: TerminalSnapshot) -> None:
++        """Replace emulator state with an immutable domain snapshot."""
++
++        _validate_snapshot(snapshot)
++        screen = _CSBoxScreen(snapshot.columns, snapshot.rows)
++        for row_index, row in enumerate(snapshot.cells):
++            for column_index, cell in enumerate(row):
++                screen.buffer[row_index][column_index] = screen.default_char._replace(
++                    data=cell.character,
++                    fg=cell.foreground,
++                    bg=cell.background,
++                    bold=cell.bold,
++                    italics=cell.italic,
++                    underscore=cell.underline,
++                    strikethrough=cell.strikethrough,
++                    reverse=cell.reverse,
++                )
++        screen.cursor.y = snapshot.cursor.row
++        screen.cursor.x = snapshot.cursor.column
++        screen.cursor.hidden = not snapshot.cursor.visible
++        screen.dirty = set(range(snapshot.rows))
++        self._screen = screen
++        self._stream = pyte.ByteStream(screen)
++        self._relative_time = snapshot.relative_time
++
+ 
+ def _snapshot_from_pyte(screen: pyte.Screen, relative_time: float) -> TerminalSnapshot:
+     """The one boundary where pyte quirks become stable domain values."""
+ 
+     rows = screen.lines
+     columns = screen.columns
+     cells = tuple(_row_from_pyte(screen, row, columns) for row in range(rows))
+     # pyte can temporarily place x one cell beyond the edge after drawing a
+     # double-width glyph in the final column. Do not leak that internal state.
+     cursor = TerminalCursor(
+@@ -93,20 +118,47 @@ def _snapshot_from_pyte(screen: pyte.Screen, relative_time: float) -> TerminalSn
+     )
+     return TerminalSnapshot(
+         rows=rows,
+         columns=columns,
+         cells=cells,
+         cursor=cursor,
+         relative_time=relative_time,
+     )
+ 
+ 
++def _validate_snapshot(snapshot: TerminalSnapshot) -> None:
++    if not isinstance(snapshot, TerminalSnapshot):
++        raise TypeError("snapshot must be a TerminalSnapshot")
++    if snapshot.rows <= 0 or snapshot.columns <= 0:
++        raise ValueError("snapshot dimensions must be positive")
++    if len(snapshot.cells) != snapshot.rows or any(
++        len(row) != snapshot.columns for row in snapshot.cells
++    ):
++        raise ValueError("snapshot cell geometry does not match its dimensions")
++    if not 0 <= snapshot.cursor.row < snapshot.rows:
++        raise ValueError("snapshot cursor row is outside the terminal")
++    if not 0 <= snapshot.cursor.column < snapshot.columns:
++        raise ValueError("snapshot cursor column is outside the terminal")
++    for row in snapshot.cells:
++        for column, cell in enumerate(row):
++            if cell.width not in {0, 1, 2}:
++                raise ValueError("snapshot contains an invalid cell width")
++            if cell.width == 2 and (
++                column + 1 >= snapshot.columns
++                or row[column + 1].width != 0
++                or row[column + 1].character != ""
++            ):
++                raise ValueError("snapshot contains an incomplete wide cell")
++            if cell.width == 0 and (column == 0 or row[column - 1].width != 2):
++                raise ValueError("snapshot contains an orphan continuation cell")
++
++
+ def _cell_from_pyte(character: Any) -> TerminalCell:
+     # pyte uses an empty character for the continuation cell of a wide glyph.
+     data = str(character.data)
+     width = 0 if data == "" else display_width(data)
+     return TerminalCell(
+         character=data,
+         width=width,
+         foreground=str(character.fg),
+         background=str(character.bg),
+         bold=bool(character.bold),
+diff --git a/tests/fixtures/sessions/mixed.cast b/tests/fixtures/sessions/mixed.cast
+new file mode 100644
+index 0000000..a708bdc
+--- /dev/null
++++ b/tests/fixtures/sessions/mixed.cast
+@@ -0,0 +1,7 @@
++{"version":3,"term":{"cols":6,"rows":2,"type":"xterm-256color"}}
++[1.0,"o","A"]
++[1.0,"z","future-event"]
++[1.0,"o","B"]
++[1.0,"r","8x3"]
++[1.0,"o","\r\n中文"]
++[1.0,"x","0"]
+diff --git a/tests/test_lab_export.py b/tests/test_lab_export.py
+new file mode 100644
+index 0000000..de78035
+--- /dev/null
++++ b/tests/test_lab_export.py
+@@ -0,0 +1,163 @@
++from __future__ import annotations
++
++from datetime import UTC, datetime
++from pathlib import Path
++
++import pytest
++
++from csbox.core.events import TerminalEvent, TerminalEventType
++from csbox.lab.captures import CaptureStore
++from csbox.lab.exporter import LabExporter, LabExportError
++from csbox.lab.fonts import FontResolver
++from csbox.lab.models import SessionPaths
++from csbox.lab.renderer import RenderTheme, TerminalEvidenceRenderer
++from csbox.lab.screen import TerminalEmulator, TerminalSnapshot
++
++FIXTURE_CAST = Path(__file__).parent / "fixtures" / "sessions" / "mixed.cast"
++ASCII_FONT_CANDIDATES = (
++    Path("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"),
++    Path("/mnt/c/Windows/Fonts/CascadiaMono.ttf"),
++    Path("C:/Windows/Fonts/consola.ttf"),
++)
++CJK_FONT_CANDIDATES = (
++    Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
++    Path("/usr/share/fonts/opentype/noto/NotoSansMonoCJK-Regular.ttc"),
++    Path("/mnt/c/Windows/Fonts/msyh.ttc"),
++    Path("C:/Windows/Fonts/msyh.ttc"),
++)
++
++
++def installed_font(candidates: tuple[Path, ...], purpose: str) -> Path:
++    for candidate in candidates:
++        if candidate.is_file():
++            return candidate
++    pytest.skip(f"system {purpose} test font is unavailable")
++
++
++def rendered_snapshot(text: str, relative_time: float) -> TerminalSnapshot:
++    emulator = TerminalEmulator(columns=16, rows=2)
++    emulator.apply(
++        TerminalEvent(
++            sequence=1,
++            monotonic_time=relative_time,
++            relative_time=relative_time,
++            type=TerminalEventType.OUTPUT,
++            payload=text.encode(),
++        )
++    )
++    return emulator.snapshot()
++
++
++@pytest.fixture
++def session_with_captures(tmp_path: Path) -> SessionPaths:
++    paths = SessionPaths(tmp_path / "session")
++    paths.root.mkdir()
++    paths.cast.write_bytes(FIXTURE_CAST.read_bytes())
++    ids = iter(("capture-1", "capture-2"))
++    times = iter(
++        (
++            datetime(2026, 8, 10, 14, 23, 41, tzinfo=UTC),
++            datetime(2026, 8, 10, 14, 24, 10, tzinfo=UTC),
++        )
++    )
++    store = CaptureStore(
++        paths.captures,
++        id_factory=lambda: next(ids),
++        clock=lambda: next(times),
++    )
++    store.create_capture(
++        rendered_snapshot("ip addr", 1.0),
++        cwd=tmp_path,
++        command="ip addr",
++        title="查看网络接口",
++    )
++    store.create_capture(
++        rendered_snapshot("实验完成", 2.0),
++        cwd=tmp_path,
++        command=None,
++        title="../../课程/实验二:*?",
++    )
++    return paths
++
++
++@pytest.fixture
++def exporter() -> LabExporter:
++    fonts = (
++        installed_font(ASCII_FONT_CANDIDATES, "ASCII monospace"),
++        installed_font(CJK_FONT_CANDIDATES, "CJK"),
++    )
++    renderer = TerminalEvidenceRenderer(FontResolver(candidates=fonts), font_size=16)
++    return LabExporter(renderer, theme=RenderTheme.dark())
++
++
++def test_export_writes_ordered_safe_pngs_cast_commands_and_stable_chinese_markdown(
++    tmp_path: Path,
++    session_with_captures: SessionPaths,
++    exporter: LabExporter,
++) -> None:
++    destination = tmp_path / "导出" / "网络实验"
++
++    result = exporter.export(session_with_captures, destination)
++
++    assert result.destination == destination
++    assert [path.name for path in result.evidence] == [
++        "01-查看网络接口.png",
++        "02-课程-实验二.png",
++    ]
++    assert all(path.parent == destination / "evidence" for path in result.evidence)
++    assert all(path.is_file() for path in result.evidence)
++    assert result.cast.read_bytes() == session_with_captures.cast.read_bytes()
++    markdown = result.markdown.read_text(encoding="utf-8")
++    assert markdown.startswith(
++        "## 实验记录\n\n"
++        "### 1. 查看网络接口\n\n"
++        "时间：\n"
++        "14:23:41\n\n"
++        "结果：\n\n"
++        "![实验记录](evidence/01-查看网络接口.png)\n"
++    )
++    assert "### 2. ../../课程/实验二:*?" in markdown
++    assert "![实验记录](evidence/02-课程-实验二.png)" in markdown
++    assert "命令：" not in markdown
++    assert result.commands is not None
++    assert result.commands.read_text(encoding="utf-8") == "ip addr\n"
++    assert "unknown" not in result.commands.read_text(encoding="utf-8").lower()
++    assert not (tmp_path / "课程").exists()
++
++
++def test_export_omits_commands_file_when_every_capture_command_is_unknown(
++    tmp_path: Path, exporter: LabExporter
++) -> None:
++    paths = SessionPaths(tmp_path / "session")
++    paths.root.mkdir()
++    paths.cast.write_bytes(FIXTURE_CAST.read_bytes())
++    CaptureStore(paths.captures).create_capture(
++        rendered_snapshot("done", 1.0),
++        cwd=tmp_path,
++        command=None,
++        title="完成",
++    )
++
++    result = exporter.export(paths.root, tmp_path / "export")
++
++    assert result.commands is None
++    assert not (result.destination / "commands.txt").exists()
++
++
++def test_export_refuses_existing_destination_without_force_and_force_is_explicit(
++    tmp_path: Path,
++    session_with_captures: SessionPaths,
++    exporter: LabExporter,
++) -> None:
++    destination = tmp_path / "existing"
++    destination.mkdir()
++    marker = destination / "keep.txt"
++    marker.write_text("user data", encoding="utf-8")
++
++    with pytest.raises(LabExportError, match="已存在|覆盖"):
++        exporter.export(session_with_captures, destination)
++
++    assert marker.read_text(encoding="utf-8") == "user data"
++    forced = exporter.export(session_with_captures, destination, force=True)
++    assert forced.markdown.is_file()
++    assert marker.read_text(encoding="utf-8") == "user data"
+diff --git a/tests/test_renderer.py b/tests/test_renderer.py
+new file mode 100644
+index 0000000..107ea32
+--- /dev/null
++++ b/tests/test_renderer.py
+@@ -0,0 +1,211 @@
++from __future__ import annotations
++
++from pathlib import Path
++
++import pytest
++from PIL import Image, ImageDraw
++
++from csbox.lab.fonts import FontResolutionError, FontResolver
++from csbox.lab.renderer import RenderTheme, TerminalEvidenceRenderer
++from csbox.lab.screen import TerminalCell, TerminalCursor, TerminalSnapshot
++
++ASCII_FONT_CANDIDATES = (
++    Path("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"),
++    Path("/mnt/c/Windows/Fonts/CascadiaMono.ttf"),
++    Path("C:/Windows/Fonts/consola.ttf"),
++)
++CJK_FONT_CANDIDATES = (
++    Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
++    Path("/usr/share/fonts/opentype/noto/NotoSansMonoCJK-Regular.ttc"),
++    Path("/mnt/c/Windows/Fonts/msyh.ttc"),
++    Path("C:/Windows/Fonts/msyh.ttc"),
++)
++
++
++def installed_font(candidates: tuple[Path, ...], purpose: str) -> Path:
++    for candidate in candidates:
++        if candidate.is_file():
++            return candidate
++    pytest.skip(f"system {purpose} test font is unavailable")
++
++
++@pytest.fixture
++def font_paths() -> tuple[Path, Path]:
++    return (
++        installed_font(ASCII_FONT_CANDIDATES, "ASCII monospace"),
++        installed_font(CJK_FONT_CANDIDATES, "CJK"),
++    )
++
++
++def snapshot(*rows: tuple[TerminalCell, ...]) -> TerminalSnapshot:
++    return TerminalSnapshot(
++        rows=len(rows),
++        columns=len(rows[0]),
++        cells=rows,
++        cursor=TerminalCursor(),
++        relative_time=1.0,
++    )
++
++
++def test_renderer_has_grid_dimensions_dark_light_backgrounds_and_chinese_path(
++    tmp_path: Path, font_paths: tuple[Path, Path]
++) -> None:
++    terminal = snapshot(
++        (TerminalCell(character="A"), TerminalCell(), TerminalCell()),
++        (TerminalCell(), TerminalCell(), TerminalCell()),
++    )
++    renderer = TerminalEvidenceRenderer(
++        FontResolver(candidates=font_paths), font_size=18, padding=5
++    )
++
++    dark_path = renderer.render(terminal, tmp_path / "证据" / "深色截图.png", RenderTheme.dark())
++    light_path = renderer.render(terminal, tmp_path / "证据" / "浅色截图.png", RenderTheme.light())
++
++    expected_size = (
++        terminal.columns * renderer.cell_width + renderer.padding * 2,
++        terminal.rows * renderer.cell_height + renderer.padding * 2,
++    )
++    with Image.open(dark_path) as image:
++        assert image.size == expected_size
++        assert image.convert("RGB").getpixel((0, 0)) == RenderTheme.dark().background
++    with Image.open(light_path) as image:
++        assert image.size == expected_size
++        assert image.convert("RGB").getpixel((0, 0)) == RenderTheme.light().background
++    assert dark_path.name == "深色截图.png"
++
++
++def test_renderer_uses_cell_origins_for_ascii_cjk_and_combining_text(
++    tmp_path: Path,
++    font_paths: tuple[Path, Path],
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    terminal = snapshot(
++        (
++            TerminalCell(character="A"),
++            TerminalCell(character="中", width=2),
++            TerminalCell(character="", width=0),
++            TerminalCell(character="e\u0301"),
++        )
++    )
++    renderer = TerminalEvidenceRenderer(
++        FontResolver(candidates=font_paths), font_size=20, padding=7
++    )
++    text_calls: list[tuple[tuple[float, float], str]] = []
++    original_text = ImageDraw.ImageDraw.text
++
++    def observe_text(
++        draw: ImageDraw.ImageDraw,
++        xy: tuple[float, float],
++        text: str,
++        *args: object,
++        **kwargs: object,
++    ) -> None:
++        text_calls.append((xy, text))
++        original_text(draw, xy, text, *args, **kwargs)
++
++    monkeypatch.setattr(ImageDraw.ImageDraw, "text", observe_text)
++
++    renderer.render(terminal, tmp_path / "layout.png", RenderTheme.dark())
++
++    assert text_calls == [
++        ((renderer.padding, renderer.padding), "A"),
++        ((renderer.padding + renderer.cell_width, renderer.padding), "中"),
++        ((renderer.padding + renderer.cell_width * 3, renderer.padding), "e\u0301"),
++    ]
++
++
++def test_reverse_swaps_cell_colors_and_underline_uses_cell_span(
++    tmp_path: Path,
++    font_paths: tuple[Path, Path],
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    terminal = snapshot(
++        (
++            TerminalCell(
++                character="R",
++                foreground="red",
++                background="blue",
++                underline=True,
++                reverse=True,
++            ),
++        )
++    )
++    renderer = TerminalEvidenceRenderer(FontResolver(candidates=font_paths), padding=3)
++    theme = RenderTheme.dark()
++    rectangles: list[tuple[tuple[int, int, int, int], tuple[int, int, int]]] = []
++    texts: list[tuple[str, tuple[int, int, int]]] = []
++    lines: list[tuple[tuple[int, int, int, int], tuple[int, int, int]]] = []
++    original_rectangle = ImageDraw.ImageDraw.rectangle
++    original_text = ImageDraw.ImageDraw.text
++    original_line = ImageDraw.ImageDraw.line
++
++    def observe_rectangle(
++        draw: ImageDraw.ImageDraw,
++        xy: tuple[int, int, int, int],
++        *args: object,
++        **kwargs: object,
++    ) -> None:
++        rectangles.append((xy, kwargs["fill"]))
++        original_rectangle(draw, xy, *args, **kwargs)
++
++    def observe_text(
++        draw: ImageDraw.ImageDraw,
++        xy: tuple[float, float],
++        text: str,
++        *args: object,
++        **kwargs: object,
++    ) -> None:
++        texts.append((text, kwargs["fill"]))
++        original_text(draw, xy, text, *args, **kwargs)
++
++    def observe_line(
++        draw: ImageDraw.ImageDraw,
++        xy: tuple[int, int, int, int],
++        *args: object,
++        **kwargs: object,
++    ) -> None:
++        lines.append((xy, kwargs["fill"]))
++        original_line(draw, xy, *args, **kwargs)
++
++    monkeypatch.setattr(ImageDraw.ImageDraw, "rectangle", observe_rectangle)
++    monkeypatch.setattr(ImageDraw.ImageDraw, "text", observe_text)
++    monkeypatch.setattr(ImageDraw.ImageDraw, "line", observe_line)
++
++    renderer.render(terminal, tmp_path / "attributes.png", theme)
++
++    assert rectangles[-1] == (
++        (
++            renderer.padding,
++            renderer.padding,
++            renderer.padding + renderer.cell_width - 1,
++            renderer.padding + renderer.cell_height - 1,
++        ),
++        theme.resolve_color("red", background=True),
++    )
++    assert texts[-1] == ("R", theme.resolve_color("blue"))
++    assert lines[-1] == (
++        (
++            renderer.padding,
++            renderer.padding + renderer.cell_height - 2,
++            renderer.padding + renderer.cell_width - 1,
++            renderer.padding + renderer.cell_height - 2,
++        ),
++        theme.resolve_color("blue"),
++    )
++
++
++def test_font_resolver_is_deterministic_and_requires_real_cjk_coverage(
++    font_paths: tuple[Path, Path],
++) -> None:
++    ascii_font, cjk_font = font_paths
++    resolver = FontResolver(explicit=ascii_font, candidates=(cjk_font,))
++
++    first = resolver.resolve()
++    second = resolver.resolve()
++
++    assert first == second
++    assert first.ascii == ascii_font
++    assert first.cjk == cjk_font
++
++    with pytest.raises(FontResolutionError, match="中文.*字体|字体.*中文"):
++        FontResolver(candidates=(ascii_font,)).resolve()
+diff --git a/tests/test_replay.py b/tests/test_replay.py
+new file mode 100644
+index 0000000..a1ea63c
+--- /dev/null
++++ b/tests/test_replay.py
+@@ -0,0 +1,210 @@
++from __future__ import annotations
++
++import json
++from pathlib import Path
++
++import pytest
++
++from csbox.core.events import TerminalEvent, TerminalEventType, TerminalSize
++from csbox.lab.recorder import AsciicastV3Reader
++from csbox.lab.replay import CHECKPOINT_VERSION, CheckpointStore, ReplayService
++from csbox.lab.screen import TerminalEmulator, TerminalSnapshot
++
++FIXTURES = Path(__file__).parent / "fixtures" / "sessions"
++
++
++def row_text(snapshot: TerminalSnapshot, row: int) -> str:
++    return "".join(cell.character for cell in snapshot.cells[row] if cell.width != 0)
++
++
++def test_seek_is_deterministic_across_boundaries_resize_exit_and_backward_seek(
++    tmp_path: Path,
++) -> None:
++    cast_path = tmp_path / "mixed.cast"
++    cast_path.write_bytes((FIXTURES / "mixed.cast").read_bytes())
++    service = ReplayService(
++        cast_path,
++        checkpoint_store=CheckpointStore(tmp_path / "checkpoints.json"),
++    )
++
++    at_zero = service.seek(0)
++    between_events = service.seek(2.5)
++    after_resize = service.seek(4.0)
++    after_exit = service.seek(99.0)
++    backward = service.seek(1.0)
++
++    assert (at_zero.rows, at_zero.columns, row_text(at_zero, 0).strip()) == (2, 6, "")
++    assert row_text(between_events, 0).startswith("A")
++    assert "B" not in row_text(between_events, 0)
++    assert (after_resize.rows, after_resize.columns) == (3, 8)
++    assert row_text(after_resize, 0).startswith("AB")
++    assert row_text(after_exit, 1).startswith("中文")
++    assert backward == service.seek(1.0)
++    assert row_text(backward, 0).startswith("A")
++    assert "B" not in row_text(backward, 0)
++    assert service.duration == pytest.approx(6.0)
++    assert any("unknown event" in warning for warning in service.warnings)
++
++
++def test_empty_cast_returns_the_initial_terminal_snapshot(tmp_path: Path) -> None:
++    cast_path = tmp_path / "empty.cast"
++    cast_path.write_text(
++        '{"version":3,"term":{"cols":7,"rows":3,"type":"xterm-256color"}}\n',
++        encoding="utf-8",
++    )
++
++    snapshot = ReplayService(cast_path).seek(500)
++
++    assert (snapshot.rows, snapshot.columns, snapshot.relative_time) == (3, 7, 0.0)
++    assert all(not row_text(snapshot, row).strip() for row in range(3))
++
++
++def test_reader_exposes_resume_offsets_and_time_checkpoint_is_persisted(tmp_path: Path) -> None:
++    cast_path = tmp_path / "session.cast"
++    cast_path.write_bytes((FIXTURES / "mixed.cast").read_bytes())
++    checkpoints_path = tmp_path / "checkpoints.json"
++
++    read_result = AsciicastV3Reader(cast_path).read()
++    ReplayService(cast_path, checkpoint_store=CheckpointStore(checkpoints_path)).seek(6.0)
++    payload = json.loads(checkpoints_path.read_text(encoding="utf-8"))
++
++    assert read_result.data_offset == len(cast_path.read_bytes().splitlines(keepends=True)[0])
++    assert all(event.cast_offset > read_result.data_offset for event in read_result.events)
++    assert payload["version"] == CHECKPOINT_VERSION
++    checkpoint = next(item for item in payload["checkpoints"] if item["relativeTime"] == 5.0)
++    assert checkpoint["eventIndex"] == 4
++    assert cast_path.read_bytes()[checkpoint["castOffset"] :].startswith(b'[1.0,"x"')
++
++
++def test_event_count_checkpoint_bounds_tail_replay(tmp_path: Path) -> None:
++    cast_path = tmp_path / "long.cast"
++    lines = ['{"version":3,"term":{"cols":8,"rows":2}}']
++    lines.extend('[0.001,"o","."]' for _ in range(501))
++    cast_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
++    checkpoints_path = tmp_path / "checkpoints.json"
++
++    ReplayService(cast_path, checkpoint_store=CheckpointStore(checkpoints_path)).seek(1.0)
++    payload = json.loads(checkpoints_path.read_text(encoding="utf-8"))
++
++    checkpoint = next(item for item in payload["checkpoints"] if item["eventIndex"] == 500)
++    assert checkpoint["relativeTime"] == pytest.approx(0.5)
++    assert cast_path.read_bytes()[checkpoint["castOffset"] :].startswith(b'[0.001,"o","."]')
++
++
++def test_late_seek_restores_nearest_checkpoint_instead_of_replaying_from_zero(
++    tmp_path: Path,
++) -> None:
++    cast_path = tmp_path / "session.cast"
++    cast_path.write_bytes((FIXTURES / "mixed.cast").read_bytes())
++    store = CheckpointStore(tmp_path / "checkpoints.json")
++    ReplayService(cast_path, checkpoint_store=store).seek(6.0)
++    created: list[CountingEmulator] = []
++
++    class CountingEmulator(TerminalEmulator):
++        def __init__(self, *, columns: int, rows: int) -> None:
++            super().__init__(columns=columns, rows=rows)
++            self.applied: list[TerminalEvent] = []
++            self.restored = 0
++            created.append(self)
++
++        def apply(self, event: TerminalEvent) -> None:
++            self.applied.append(event)
++            super().apply(event)
++
++        def restore(self, snapshot: TerminalSnapshot) -> None:
++            self.restored += 1
++            super().restore(snapshot)
++
++    snapshot = ReplayService(
++        cast_path,
++        checkpoint_store=store,
++        emulator_factory=CountingEmulator,
++    ).seek(6.0)
++
++    assert row_text(snapshot, 1).startswith("中文")
++    assert len(created) == 1
++    assert created[0].restored == 1
++    assert len(created[0].applied) == 1
++    assert created[0].applied[0].type is TerminalEventType.EXIT
++
++
++def test_invalid_or_stale_checkpoint_index_is_rebuilt_without_touching_cast(
++    tmp_path: Path,
++) -> None:
++    cast_path = tmp_path / "session.cast"
++    cast_path.write_bytes((FIXTURES / "mixed.cast").read_bytes())
++    original_cast = cast_path.read_bytes()
++    checkpoints_path = tmp_path / "checkpoints.json"
++    checkpoints_path.write_text('{"version":999,"checkpoints":[]}', encoding="utf-8")
++
++    first_service = ReplayService(cast_path, checkpoint_store=CheckpointStore(checkpoints_path))
++    first_service.seek(6.0)
++    rebuilt = json.loads(checkpoints_path.read_text(encoding="utf-8"))
++    assert rebuilt["version"] == CHECKPOINT_VERSION
++
++    rebuilt["checkpoints"][-1]["snapshot"]["cells"][1][0]["character"] = "坏"
++    checkpoints_path.write_text(json.dumps(rebuilt, ensure_ascii=False), encoding="utf-8")
++    repaired = ReplayService(cast_path, checkpoint_store=CheckpointStore(checkpoints_path))
++    assert row_text(repaired.seek(6.0), 1).startswith("中文")
++
++    cast_path.write_text(cast_path.read_text(encoding="utf-8") + '[1.0,"o","!"]\n')
++    changed_cast = cast_path.read_bytes()
++    second_service = ReplayService(cast_path, checkpoint_store=CheckpointStore(checkpoints_path))
++
++    assert row_text(second_service.seek(7.0), 1).startswith("中文!")
++    assert original_cast != changed_cast
++    assert cast_path.read_bytes() == changed_cast
++    refreshed = json.loads(checkpoints_path.read_text(encoding="utf-8"))
++    assert refreshed["cast"]["size"] == len(changed_cast)
++
++
++def test_checkpoint_store_uses_same_directory_atomic_replace(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    cast_path = tmp_path / "session.cast"
++    cast_path.write_bytes((FIXTURES / "mixed.cast").read_bytes())
++    checkpoint_path = tmp_path / "state" / "checkpoints.json"
++    replaced: list[tuple[Path, Path]] = []
++    real_replace = __import__("os").replace
++
++    def observe_replace(source: str | Path, destination: str | Path) -> None:
++        replaced.append((Path(source), Path(destination)))
++        real_replace(source, destination)
++
++    monkeypatch.setattr("csbox.lab.replay.os.replace", observe_replace)
++
++    ReplayService(cast_path, checkpoint_store=CheckpointStore(checkpoint_path)).seek(6.0)
++
++    assert replaced
++    assert replaced[-1][0].parent == checkpoint_path.parent
++    assert replaced[-1][1] == checkpoint_path
++    assert not list(checkpoint_path.parent.glob("*.tmp"))
++
++
++def test_terminal_emulator_restores_a_domain_snapshot_and_continues_streaming() -> None:
++    source = TerminalEmulator(columns=6, rows=2)
++    source.apply(
++        TerminalEvent(
++            sequence=1,
++            monotonic_time=10.0,
++            relative_time=2.0,
++            type=TerminalEventType.OUTPUT,
++            payload=(b"\x1b[31;4;7mA" + "中".encode() + b"\x1b[0m\x1b[?25l"),
++        )
++    )
++    expected = source.snapshot()
++    restored = TerminalEmulator(columns=1, rows=1)
++
++    restored.restore(expected)
++
++    assert restored.snapshot() == expected
++    restored.apply(
++        TerminalEvent(
++            sequence=2,
++            monotonic_time=11.0,
++            relative_time=3.0,
++            type=TerminalEventType.RESIZE,
++            payload=TerminalSize(columns=8, rows=3),
++        )
++    )
++    assert (restored.rows, restored.columns, restored.snapshot().relative_time) == (3, 8, 3.0)

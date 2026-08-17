@@ -1,0 +1,562 @@
+# Review package: b09edc1..HEAD
+
+## Commits
+fe5970a feat: add API domain models and secret redaction
+
+## Files changed
+ src/csbox/api/__init__.py   |  32 +++++++++-
+ src/csbox/api/errors.py     |  38 +++++++++++
+ src/csbox/api/models.py     | 102 ++++++++++++++++++++++++++++++
+ src/csbox/api/redaction.py  | 150 ++++++++++++++++++++++++++++++++++++++++++++
+ tests/test_api_models.py    |  92 +++++++++++++++++++++++++++
+ tests/test_api_redaction.py |  94 +++++++++++++++++++++++++++
+ 6 files changed, 507 insertions(+), 1 deletion(-)
+
+## Diff
+diff --git a/src/csbox/api/__init__.py b/src/csbox/api/__init__.py
+index c4c97f5..9e7c0fc 100644
+--- a/src/csbox/api/__init__.py
++++ b/src/csbox/api/__init__.py
+@@ -1,5 +1,35 @@
+ """API testing and evidence extension boundaries."""
+ 
++from csbox.api.errors import ApiConfigError, ApiPersistenceError, ApiTransportError
++from csbox.api.models import (
++    ApiAssertion,
++    ApiAssertionResult,
++    ApiEvidence,
++    ApiRequest,
++    ApiResponse,
++    ApiRun,
++    ApiRunResult,
++    ApiScenario,
++    ApiStep,
++)
++from csbox.api.redaction import RedactionPolicy, Redactor
+ from csbox.api.registry import EVIDENCE_PROVIDERS, EVIDENCE_RENDERERS
+ 
+-__all__ = ["EVIDENCE_PROVIDERS", "EVIDENCE_RENDERERS"]
++__all__ = [
++    "ApiAssertion",
++    "ApiAssertionResult",
++    "ApiConfigError",
++    "ApiEvidence",
++    "ApiPersistenceError",
++    "ApiRequest",
++    "ApiResponse",
++    "ApiRun",
++    "ApiRunResult",
++    "ApiScenario",
++    "ApiStep",
++    "ApiTransportError",
++    "EVIDENCE_PROVIDERS",
++    "EVIDENCE_RENDERERS",
++    "RedactionPolicy",
++    "Redactor",
++]
+diff --git a/src/csbox/api/errors.py b/src/csbox/api/errors.py
+new file mode 100644
+index 0000000..a0a7349
+--- /dev/null
++++ b/src/csbox/api/errors.py
+@@ -0,0 +1,38 @@
++from __future__ import annotations
++
++
++class ApiDomainError(Exception):
++    """A stable, user-safe API domain failure.
++
++    ``debug_message`` is intentionally kept out of the exception string so
++    default CLI, logs, and persistence paths cannot accidentally expose a raw
++    transport/configuration value.
++    """
++
++    def __init__(self, user_message: str, *, debug_message: str | None = None) -> None:
++        super().__init__(user_message)
++        self.user_message = user_message
++        self.debug_message = debug_message
++
++    def __str__(self) -> str:
++        return self.user_message
++
++
++class ApiConfigError(ApiDomainError):
++    """The scenario or API configuration cannot be used safely."""
++
++
++class ApiTransportError(ApiDomainError):
++    """The request could not be sent or its response could not be read."""
++
++
++class ApiPersistenceError(ApiDomainError):
++    """A redacted API run could not be persisted or loaded."""
++
++
++__all__ = [
++    "ApiConfigError",
++    "ApiDomainError",
++    "ApiPersistenceError",
++    "ApiTransportError",
++]
+diff --git a/src/csbox/api/models.py b/src/csbox/api/models.py
+new file mode 100644
+index 0000000..df43f9d
+--- /dev/null
++++ b/src/csbox/api/models.py
+@@ -0,0 +1,102 @@
++from __future__ import annotations
++
++from datetime import datetime
++from typing import Any, Literal
++
++from pydantic import BaseModel, ConfigDict, Field
++
++ApiMethod = Literal["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
++ApiAssertionStatus = Literal["PASS", "FAIL", "SKIP"]
++
++
++class _ApiModel(BaseModel):
++    """Base for public API domain objects with a deliberately closed schema."""
++
++    model_config = ConfigDict(extra="forbid", strict=True)
++
++
++class ApiRequest(_ApiModel):
++    method: ApiMethod
++    url: str
++    headers: dict[str, str] = Field(default_factory=dict)
++    query: dict[str, str] = Field(default_factory=dict)
++    json_body: Any | None = None
++    body: str | None = None
++    form: dict[str, str] = Field(default_factory=dict)
++    timeout_seconds: float | None = None
++    follow_redirects: bool = False
++    verify_tls: bool = True
++
++
++class ApiResponse(_ApiModel):
++    status_code: int = Field(ge=0, le=999)
++    headers: dict[str, str] = Field(default_factory=dict)
++    body: str = ""
++    url: str
++    elapsed_ms: float = Field(default=0.0, ge=0.0)
++    truncated: bool = False
++
++
++class ApiAssertion(_ApiModel):
++    kind: str
++    expected: Any | None = None
++    location: str | None = None
++    operator: str | None = None
++
++
++class ApiAssertionResult(_ApiModel):
++    assertion: ApiAssertion
++    status: ApiAssertionStatus
++    message: str
++    actual: Any | None = None
++
++
++class ApiStep(_ApiModel):
++    name: str
++    request: ApiRequest
++    assertions: tuple[ApiAssertion, ...] = ()
++
++
++class ApiScenario(_ApiModel):
++    name: str
++    steps: tuple[ApiStep, ...]
++    source: str | None = None
++
++
++class ApiRunResult(_ApiModel):
++    step_name: str
++    response: ApiResponse | None = None
++    assertions: tuple[ApiAssertionResult, ...] = ()
++    error: str | None = None
++    elapsed_ms: float = Field(default=0.0, ge=0.0)
++
++
++class ApiRun(_ApiModel):
++    id: str
++    scenario: ApiScenario
++    started_at: datetime
++    results: tuple[ApiRunResult, ...] = ()
++    ended_at: datetime | None = None
++    elapsed_ms: float = Field(default=0.0, ge=0.0)
++
++
++class ApiEvidence(_ApiModel):
++    title: str
++    request: ApiRequest
++    response: ApiResponse | None = None
++    result: ApiRunResult | None = None
++
++
++__all__ = [
++    "ApiAssertion",
++    "ApiAssertionResult",
++    "ApiAssertionStatus",
++    "ApiEvidence",
++    "ApiMethod",
++    "ApiRequest",
++    "ApiResponse",
++    "ApiRun",
++    "ApiRunResult",
++    "ApiScenario",
++    "ApiStep",
++]
+diff --git a/src/csbox/api/redaction.py b/src/csbox/api/redaction.py
+new file mode 100644
+index 0000000..69561fc
+--- /dev/null
++++ b/src/csbox/api/redaction.py
+@@ -0,0 +1,150 @@
++from __future__ import annotations
++
++from collections.abc import Iterable, Mapping
++from dataclasses import dataclass
++from typing import Any
++from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
++
++REDACTION_MARKER = "••••••••"
++
++_DEFAULT_SECRET_FIELDS = frozenset(
++    {
++        "password",
++        "passwd",
++        "token",
++        "access_token",
++        "refresh_token",
++        "jwt",
++        "secret",
++        "api_key",
++        "apikey",
++        "client_secret",
++        "authorization",
++        "cookie",
++        "set-cookie",
++        "proxy-authorization",
++    }
++)
++
++
++@dataclass(frozen=True, slots=True)
++class RedactionPolicy:
++    """Names and exact values which must never leave the API domain raw."""
++
++    secret_fields: frozenset[str] = _DEFAULT_SECRET_FIELDS
++    secret_values: tuple[str, ...] = ()
++
++    @classmethod
++    def default(
++        cls,
++        *,
++        secret_values: Iterable[str] = (),
++        additional_secret_fields: Iterable[str] = (),
++    ) -> RedactionPolicy:
++        fields = _DEFAULT_SECRET_FIELDS | frozenset(
++            field.casefold() for field in additional_secret_fields
++        )
++        values = tuple(value for value in secret_values if value)
++        return cls(secret_fields=fields, secret_values=values)
++
++
++class Redactor:
++    """Return deep redacted copies without mutating caller-owned values."""
++
++    def __init__(self, policy: RedactionPolicy) -> None:
++        self.policy = policy
++        self._secret_fields = frozenset(field.casefold() for field in policy.secret_fields)
++        self._secret_values = tuple(
++            sorted({value for value in policy.secret_values if value}, key=len, reverse=True)
++        )
++
++    @classmethod
++    def with_configured_values(cls, values: Iterable[str]) -> Redactor:
++        return cls(RedactionPolicy.default(secret_values=values))
++
++    def headers(self, headers: Mapping[str, str]) -> dict[str, str]:
++        """Return a redacted copy of headers with case-insensitive names."""
++
++        redacted: dict[str, str] = {}
++        for name, value in headers.items():
++            normalized_name = name.casefold()
++            if normalized_name == "authorization":
++                redacted[name] = self._authorization(value)
++            elif normalized_name in self._secret_fields:
++                redacted[name] = REDACTION_MARKER
++            else:
++                redacted[name] = self.text(value)
++        return redacted
++
++    def json_value(self, value: Any) -> Any:
++        """Return a recursively redacted copy of a JSON-compatible value."""
++
++        if isinstance(value, Mapping):
++            return {
++                str(key): (
++                    REDACTION_MARKER
++                    if str(key).casefold() in self._secret_fields
++                    else self.json_value(nested_value)
++                )
++                for key, nested_value in value.items()
++            }
++        if isinstance(value, list):
++            return [self.json_value(item) for item in value]
++        if isinstance(value, tuple):
++            return tuple(self.json_value(item) for item in value)
++        if isinstance(value, str):
++            return self.text(value)
++        return value
++
++    def text(self, value: str) -> str:
++        """Replace configured secrets longest-first without changing the input."""
++
++        redacted = value
++        for secret in self._secret_values:
++            redacted = redacted.replace(secret, REDACTION_MARKER)
++        return redacted
++
++    def url(self, value: str) -> str:
++        """Return a copy with credential passwords and secret query values masked."""
++
++        try:
++            parsed = urlsplit(value)
++            query = [
++                (
++                    name,
++                    REDACTION_MARKER
++                    if name.casefold() in self._secret_fields
++                    else self.text(query_value),
++                )
++                for name, query_value in parse_qsl(parsed.query, keep_blank_values=True)
++            ]
++            netloc = self._redacted_netloc(parsed)
++            redacted = urlunsplit(
++                (parsed.scheme, netloc, parsed.path, urlencode(query, doseq=True), parsed.fragment)
++            )
++        except ValueError:
++            return self.text(value)
++        return self.text(redacted)
++
++    def _authorization(self, value: str) -> str:
++        scheme, separator, _credential = value.partition(" ")
++        if scheme.casefold() == "bearer" and separator:
++            return f"Bearer {REDACTION_MARKER}"
++        return REDACTION_MARKER
++
++    def _redacted_netloc(self, parsed: Any) -> str:
++        if parsed.hostname is None:
++            return parsed.netloc
++        host = parsed.hostname
++        if ":" in host and not host.startswith("["):
++            host = f"[{host}]"
++        if parsed.port is not None:
++            host = f"{host}:{parsed.port}"
++        if parsed.username is None:
++            return host
++        username = quote(parsed.username, safe="")
++        password = "" if parsed.password is None else f":{REDACTION_MARKER}"
++        return f"{username}{password}@{host}"
++
++
++__all__ = ["REDACTION_MARKER", "RedactionPolicy", "Redactor"]
+diff --git a/tests/test_api_models.py b/tests/test_api_models.py
+new file mode 100644
+index 0000000..17eff40
+--- /dev/null
++++ b/tests/test_api_models.py
+@@ -0,0 +1,92 @@
++from __future__ import annotations
++
++from datetime import UTC, datetime
++
++import pytest
++from pydantic import ValidationError
++
++from csbox.api.errors import ApiConfigError, ApiPersistenceError, ApiTransportError
++from csbox.api.models import (
++    ApiAssertion,
++    ApiAssertionResult,
++    ApiEvidence,
++    ApiRequest,
++    ApiResponse,
++    ApiRun,
++    ApiRunResult,
++    ApiScenario,
++    ApiStep,
++)
++from csbox.api.redaction import Redactor
++
++SECRET = "CSBOX_SECRET_SENTINEL_9f4d"
++
++
++def test_api_domain_models_are_strict_and_form_a_serializable_run() -> None:
++    request = ApiRequest(
++        method="GET",
++        url="https://example.test/health",
++        headers={"Accept": "application/json"},
++    )
++    response = ApiResponse(
++        status_code=200,
++        headers={"Content-Type": "application/json"},
++        body='{"status":"ok"}',
++        url=request.url,
++    )
++    assertion = ApiAssertion(kind="status", expected=200)
++    result = ApiAssertionResult(assertion=assertion, status="PASS", message="状态码符合预期")
++    step = ApiStep(name="health", request=request, assertions=(assertion,))
++    scenario = ApiScenario(name="health check", steps=(step,))
++    run_result = ApiRunResult(step_name="health", response=response, assertions=(result,))
++    run = ApiRun(
++        id="run-001",
++        scenario=scenario,
++        started_at=datetime(2026, 8, 11, 0, 0, tzinfo=UTC),
++        results=(run_result,),
++    )
++    evidence = ApiEvidence(title="health", request=request, response=response, result=run_result)
++
++    assert run.results[0].response.status_code == 200
++    assert evidence.title == "health"
++    with pytest.raises(ValidationError):
++        ApiRequest.model_validate({"method": "GET", "url": request.url, "unknown": True})
++    with pytest.raises(ValidationError):
++        ApiRequest.model_validate({"method": "GET", "url": request.url, "headers": []})
++
++
++def test_redacted_model_json_never_serializes_a_secret() -> None:
++    redactor = Redactor.with_configured_values([SECRET])
++    request = ApiRequest(
++        method="POST",
++        url=redactor.url(f"https://user:{SECRET}@example.test/a?token={SECRET}"),
++        headers=redactor.headers({"Authorization": f"Bearer {SECRET}"}),
++        json_body=redactor.json_value({"nested": [{"password": SECRET}]}),
++    )
++    response = ApiResponse(
++        status_code=200,
++        headers=redactor.headers({"Set-Cookie": f"session={SECRET}"}),
++        body=redactor.text(f"body={SECRET}"),
++        url=request.url,
++    )
++    result = ApiRunResult(step_name="redacted", response=response)
++    run = ApiRun(
++        id="run-redacted",
++        scenario=ApiScenario(
++            name="redacted",
++            steps=(ApiStep(name="redacted", request=request),),
++        ),
++        started_at=datetime(2026, 8, 11, tzinfo=UTC),
++        results=(result,),
++    )
++
++    assert SECRET not in run.model_dump_json()
++
++
++@pytest.mark.parametrize("error_type", [ApiConfigError, ApiTransportError, ApiPersistenceError])
++def test_domain_error_strings_hide_debug_secret(error_type: type[Exception]) -> None:
++    error = error_type("接口配置无效，请检查后重试。", debug_message=f"value={SECRET}")
++
++    assert error.user_message == "接口配置无效，请检查后重试。"
++    assert error.debug_message == f"value={SECRET}"
++    assert SECRET not in str(error)
+diff --git a/tests/test_api_redaction.py b/tests/test_api_redaction.py
+new file mode 100644
+index 0000000..903faae
+--- /dev/null
++++ b/tests/test_api_redaction.py
+@@ -0,0 +1,94 @@
++from __future__ import annotations
++
++from urllib.parse import parse_qs, urlsplit
++
++import pytest
++
++from csbox.api.redaction import RedactionPolicy, Redactor
++
++SECRET = "CSBOX_SECRET_SENTINEL_9f4d"
++MASK = "••••••••"
++SECRET_FIELDS = (
++    "password",
++    "passwd",
++    "token",
++    "access_token",
++    "refresh_token",
++    "jwt",
++    "secret",
++    "api_key",
++    "apikey",
++    "client_secret",
++)
++
++
++def _redactor() -> Redactor:
++    return Redactor(
++        RedactionPolicy.default(
++            secret_values=(SECRET, f"prefix-{SECRET}"),
++            additional_secret_fields=("x-extra-secret",),
++        )
++    )
++
++
++def test_redactor_headers_is_case_insensitive_and_never_mutates_input() -> None:
++    headers = {
++        "authorization": f"Bearer {SECRET}",
++        "Cookie": f"session={SECRET}",
++        "set-cookie": f"session={SECRET}",
++        "Proxy-Authorization": f"Basic {SECRET}",
++        "X-Extra-Secret": SECRET,
++        "X-Trace": f"prefix-{SECRET}",
++    }
++
++    redacted = _redactor().headers(headers)
++
++    assert headers["authorization"] == f"Bearer {SECRET}"
++    assert redacted["authorization"] == f"Bearer {MASK}"
++    assert redacted["Cookie"] == MASK
++    assert redacted["set-cookie"] == MASK
++    assert redacted["Proxy-Authorization"] == MASK
++    assert redacted["X-Extra-Secret"] == MASK
++    assert redacted["X-Trace"] == MASK
++    assert SECRET not in repr(redacted)
++
++
++@pytest.mark.parametrize("field", SECRET_FIELDS)
++def test_redactor_json_value_masks_all_default_secret_fields(field: str) -> None:
++    payload = {
++        field: SECRET,
++        "nested": [{"safe": "value"}, {field.upper(): SECRET}],
++        "items": [SECRET, {"x-extra-secret": SECRET}],
++    }
++
++    redacted = _redactor().json_value(payload)
++
++    assert payload["nested"][1][field.upper()] == SECRET
++    assert redacted[field] == MASK
++    assert redacted["nested"][1][field.upper()] == MASK
++    assert redacted["items"][0] == MASK
++    assert redacted["items"][1]["x-extra-secret"] == MASK
++    assert SECRET not in repr(redacted)
++
++
++def test_redactor_replaces_configured_values_longest_first_in_text() -> None:
++    text = f"prefix-{SECRET} then {SECRET}"
++
++    redacted = _redactor().text(text)
++
++    assert redacted == f"{MASK} then {MASK}"
++    assert SECRET not in redacted
++
++
++def test_redactor_url_hides_credentials_and_sensitive_query_values() -> None:
++    url = f"https://user:{SECRET}@example.test/a?token={SECRET}&safe=ok&access_token={SECRET}"
++
++    redacted = _redactor().url(url)
++    parsed = urlsplit(redacted)
++
++    assert parsed.username == "user"
++    assert parsed.password == MASK
++    assert parse_qs(parsed.query)["token"] == [MASK]
++    assert parse_qs(parsed.query)["access_token"] == [MASK]
++    assert parse_qs(parsed.query)["safe"] == ["ok"]
++    assert SECRET not in redacted

@@ -1,0 +1,1400 @@
+# Review package: 849d276..b82bdf2
+
+## Commits
+b82bdf2 feat: add lab session recording and captures
+
+## Files changed
+ src/csbox/lab/captures.py     | 214 ++++++++++++++++++++++++++++++++++
+ src/csbox/lab/dispatcher.py   |  49 ++++++++
+ src/csbox/lab/models.py       |  95 +++++++++++++++
+ src/csbox/lab/recorder.py     | 262 ++++++++++++++++++++++++++++++++++++++++++
+ src/csbox/lab/screen.py       | 176 ++++++++++++++++++++++++++++
+ tests/test_captures.py        | 165 ++++++++++++++++++++++++++
+ tests/test_recorder.py        | 168 +++++++++++++++++++++++++++
+ tests/test_session_models.py  |  64 +++++++++++
+ tests/test_terminal_screen.py | 135 ++++++++++++++++++++++
+ 9 files changed, 1328 insertions(+)
+
+## Diff
+diff --git a/src/csbox/lab/captures.py b/src/csbox/lab/captures.py
+new file mode 100644
+index 0000000..239f4b1
+--- /dev/null
++++ b/src/csbox/lab/captures.py
+@@ -0,0 +1,214 @@
++from __future__ import annotations
++
++import json
++import os
++import tempfile
++import threading
++import uuid
++from collections.abc import Callable
++from contextlib import suppress
++from dataclasses import dataclass
++from datetime import UTC, datetime
++from pathlib import Path
++
++from pydantic import ValidationError
++
++from csbox.lab.models import CaptureRecord
++from csbox.lab.screen import TerminalSnapshot
++
++
++class CaptureStoreError(RuntimeError):
++    """Capture metadata could not be read or persisted."""
++
++
++@dataclass(frozen=True, slots=True)
++class CaptureReadResult:
++    captures: tuple[CaptureRecord, ...]
++    warnings: tuple[str, ...] = ()
++
++
++class _InvalidDocument(ValueError):
++    pass
++
++
++class CaptureStore:
++    """Atomically persist recoverable capture sidecar data."""
++
++    def __init__(
++        self,
++        path: Path | str,
++        *,
++        id_factory: Callable[[], str] | None = None,
++        clock: Callable[[], datetime] | None = None,
++    ) -> None:
++        self.path = Path(path)
++        self.backup_path = self.path.with_suffix(self.path.suffix + ".bak")
++        self._id_factory = id_factory or (lambda: str(uuid.uuid4()))
++        self._clock = clock or (lambda: datetime.now(UTC))
++        self._lock = threading.RLock()
++
++    def load(self) -> CaptureReadResult:
++        with self._lock:
++            if not self.path.exists():
++                if not self.backup_path.exists():
++                    return CaptureReadResult(())
++                return self._recover_backup(("primary captures file is missing",))
++
++            try:
++                captures, warnings = _read_document(self.path)
++            except (OSError, UnicodeError, json.JSONDecodeError, _InvalidDocument) as exc:
++                warning = f"primary captures file is invalid: {exc}"
++                if self.backup_path.exists():
++                    return self._recover_backup((warning,))
++                return CaptureReadResult((), (warning,))
++            return CaptureReadResult(_sort_captures(captures), tuple(warnings))
++
++    def create_capture(
++        self,
++        snapshot: TerminalSnapshot,
++        timestamp: float | None = None,
++        *,
++        cwd: Path | str,
++        command: str | None = None,
++        title: str = "",
++    ) -> CaptureRecord:
++        if not isinstance(snapshot, TerminalSnapshot):
++            raise TypeError("snapshot must be a TerminalSnapshot")
++        captured_at = snapshot.relative_time if timestamp is None else timestamp
++        capture = CaptureRecord(
++            id=self._id_factory(),
++            title=title,
++            createdAt=self._clock(),
++            timestamp=captured_at,
++            rows=snapshot.rows,
++            columns=snapshot.columns,
++            cwd=Path(cwd),
++            command=command,
++            snapshot=snapshot,
++        )
++        with self._lock:
++            previous = self.load().captures
++            self._persist((*previous, capture), previous)
++        return capture
++
++    create = create_capture
++
++    def edit_title(self, capture_id: str, title: str) -> CaptureRecord:
++        with self._lock:
++            previous = self.load().captures
++            updated: list[CaptureRecord] = []
++            edited: CaptureRecord | None = None
++            for capture in previous:
++                if capture.capture_id == capture_id:
++                    edited = capture.model_copy(update={"title": title})
++                    updated.append(edited)
++                else:
++                    updated.append(capture)
++            if edited is None:
++                raise KeyError(capture_id)
++            self._persist(tuple(updated), previous)
++            return edited
++
++    def delete(self, capture_id: str) -> bool:
++        with self._lock:
++            previous = self.load().captures
++            remaining = tuple(capture for capture in previous if capture.capture_id != capture_id)
++            if len(remaining) == len(previous):
++                return False
++            self._persist(remaining, previous)
++            return True
++
++    def _recover_backup(self, preceding_warnings: tuple[str, ...]) -> CaptureReadResult:
++        try:
++            captures, backup_warnings = _read_document(self.backup_path)
++        except (OSError, UnicodeError, json.JSONDecodeError, _InvalidDocument) as exc:
++            return CaptureReadResult(
++                (), (*preceding_warnings, f"backup captures file is invalid: {exc}")
++            )
++        warnings = (
++            *preceding_warnings,
++            "captures recovered from backup",
++            *backup_warnings,
++        )
++        return CaptureReadResult(_sort_captures(captures), warnings)
++
++    def _persist(
++        self,
++        captures: tuple[CaptureRecord, ...],
++        previous: tuple[CaptureRecord, ...],
++    ) -> None:
++        sorted_captures = _sort_captures(captures)
++        new_payload = _serialize_document(sorted_captures)
++        had_document = self.path.exists() or self.backup_path.exists()
++        backup_payload = (
++            _serialize_document(_sort_captures(previous)) if had_document else new_payload
++        )
++        try:
++            self.path.parent.mkdir(parents=True, exist_ok=True)
++            _atomic_write(self.backup_path, backup_payload)
++            _atomic_write(self.path, new_payload)
++        except OSError as exc:
++            raise CaptureStoreError(f"could not persist captures: {exc}") from exc
++
++
++def _read_document(path: Path) -> tuple[tuple[CaptureRecord, ...], list[str]]:
++    value = json.loads(path.read_text(encoding="utf-8"))
++    if not isinstance(value, dict) or value.get("version") != 1:
++        raise _InvalidDocument("expected captures schema version 1")
++    raw_captures = value.get("captures")
++    if not isinstance(raw_captures, list):
++        raise _InvalidDocument("captures must be a list")
++
++    captures: list[CaptureRecord] = []
++    warnings: list[str] = []
++    for index, raw_capture in enumerate(raw_captures, start=1):
++        try:
++            captures.append(CaptureRecord.model_validate(raw_capture))
++        except (ValidationError, TypeError, ValueError) as exc:
++            warnings.append(f"invalid capture {index} ignored: {exc}")
++    return tuple(captures), warnings
++
++
++def _sort_captures(captures: tuple[CaptureRecord, ...]) -> tuple[CaptureRecord, ...]:
++    return tuple(sorted(captures, key=lambda capture: (capture.timestamp, capture.created_at)))
++
++
++def _serialize_document(captures: tuple[CaptureRecord, ...]) -> bytes:
++    value = {
++        "version": 1,
++        "captures": [capture.model_dump(mode="json", by_alias=True) for capture in captures],
++    }
++    return (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode()
++
++
++def _atomic_write(path: Path, data: bytes) -> None:
++    descriptor, temporary_name = tempfile.mkstemp(
++        dir=path.parent,
++        prefix=f".{path.name}.",
++        suffix=".tmp",
++    )
++    temporary = Path(temporary_name)
++    try:
++        with os.fdopen(descriptor, "wb") as stream:
++            stream.write(data)
++            stream.flush()
++            os.fsync(stream.fileno())
++        os.replace(temporary, path)
++        _fsync_directory(path.parent)
++    except BaseException:
++        with suppress(OSError):
++            temporary.unlink(missing_ok=True)
++        raise
++
++
++def _fsync_directory(directory: Path) -> None:
++    try:
++        descriptor = os.open(directory, os.O_RDONLY)
++    except OSError:
++        return
++    try:
++        os.fsync(descriptor)
++    except OSError:
++        pass
++    finally:
++        os.close(descriptor)
+diff --git a/src/csbox/lab/dispatcher.py b/src/csbox/lab/dispatcher.py
+new file mode 100644
+index 0000000..465c9fa
+--- /dev/null
++++ b/src/csbox/lab/dispatcher.py
+@@ -0,0 +1,49 @@
++from __future__ import annotations
++
++from collections.abc import Iterable
++from typing import Protocol
++
++from csbox.core.events import TerminalEvent
++
++
++class TerminalEventSink(Protocol):
++    def handle(self, event: TerminalEvent) -> None: ...
++
++
++class DispatchError(RuntimeError):
++    def __init__(self, sink_index: int, sink: object) -> None:
++        self.sink_index = sink_index
++        self.sink = sink
++        super().__init__(f"terminal event sink {sink_index} failed")
++
++
++class TerminalEventDispatcher:
++    """Synchronously fan out events in explicit registration order."""
++
++    def __init__(self, sinks: Iterable[TerminalEventSink] = ()) -> None:
++        self._sinks: list[TerminalEventSink] = []
++        for sink in sinks:
++            self.register(sink)
++
++    @property
++    def sinks(self) -> tuple[TerminalEventSink, ...]:
++        return tuple(self._sinks)
++
++    def register(self, sink: TerminalEventSink) -> None:
++        if not callable(getattr(sink, "handle", None)):
++            raise TypeError("sink must provide handle(event)")
++        self._sinks.append(sink)
++
++    def unregister(self, sink: TerminalEventSink) -> None:
++        self._sinks.remove(sink)
++
++    def dispatch(self, event: TerminalEvent) -> None:
++        if not isinstance(event, TerminalEvent):
++            raise TypeError("event must be a TerminalEvent")
++        for index, sink in enumerate(tuple(self._sinks), start=1):
++            try:
++                sink.handle(event)
++            except Exception as exc:
++                raise DispatchError(index, sink) from exc
++
++    __call__ = dispatch
+diff --git a/src/csbox/lab/models.py b/src/csbox/lab/models.py
+new file mode 100644
+index 0000000..94c14d6
+--- /dev/null
++++ b/src/csbox/lab/models.py
+@@ -0,0 +1,95 @@
++from __future__ import annotations
++
++from datetime import UTC, datetime
++from pathlib import Path
++from typing import Literal
++
++from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
++
++from csbox.lab.screen import TerminalSnapshot
++
++
++class SessionMetadata(BaseModel):
++    """Version-independent metadata stored next to a terminal recording."""
++
++    model_config = ConfigDict(populate_by_name=True)
++
++    session_id: str = Field(alias="id", min_length=1)
++    experiment_name: str = Field(alias="name", min_length=1)
++    status: Literal["running", "completed", "interrupted", "failed"] = "running"
++    started_at: datetime = Field(alias="startedAt")
++    ended_at: datetime | None = Field(default=None, alias="endedAt")
++    platform: str = Field(min_length=1)
++    shell: str = Field(min_length=1)
++    shell_version: str | None = Field(alias="shellVersion")
++    initial_rows: int = Field(alias="initialRows", gt=0)
++    initial_columns: int = Field(alias="initialColumns", gt=0)
++    cwd: Path
++    csbox_version: str = Field(alias="csboxVersion", min_length=1)
++
++    @field_validator("started_at", "ended_at")
++    @classmethod
++    def require_utc_datetime(cls, value: datetime | None) -> datetime | None:
++        if value is None:
++            return None
++        if value.tzinfo is None or value.utcoffset() is None:
++            raise ValueError("session timestamps must be timezone-aware")
++        return value.astimezone(UTC)
++
++
++class SessionPaths:
++    """Canonical paths belonging to one session directory."""
++
++    __slots__ = ("root",)
++
++    def __init__(self, root: Path | str) -> None:
++        self.root = Path(root)
++
++    @property
++    def cast(self) -> Path:
++        return self.root / "session.cast"
++
++    @property
++    def metadata(self) -> Path:
++        return self.root / "metadata.json"
++
++    @property
++    def captures(self) -> Path:
++        return self.root / "captures.json"
++
++    @property
++    def checkpoints(self) -> Path:
++        return self.root / "checkpoints.json"
++
++
++class CaptureRecord(BaseModel):
++    """A persisted immutable terminal snapshot and its user-facing metadata."""
++
++    model_config = ConfigDict(frozen=True, populate_by_name=True)
++
++    capture_id: str = Field(alias="id", min_length=1)
++    title: str = ""
++    created_at: datetime = Field(alias="createdAt")
++    timestamp: float = Field(ge=0)
++    rows: int = Field(gt=0)
++    columns: int = Field(gt=0)
++    cwd: Path
++    command: str | None = None
++    snapshot: TerminalSnapshot
++
++    @field_validator("created_at")
++    @classmethod
++    def require_utc_datetime(cls, value: datetime) -> datetime:
++        if value.tzinfo is None or value.utcoffset() is None:
++            raise ValueError("capture timestamp must be timezone-aware")
++        return value.astimezone(UTC)
++
++    @model_validator(mode="after")
++    def dimensions_match_snapshot(self) -> CaptureRecord:
++        if self.rows != self.snapshot.rows or self.columns != self.snapshot.columns:
++            raise ValueError("capture dimensions must match snapshot")
++        if len(self.snapshot.cells) != self.rows or any(
++            len(row) != self.columns for row in self.snapshot.cells
++        ):
++            raise ValueError("snapshot cell geometry does not match its dimensions")
++        return self
+diff --git a/src/csbox/lab/recorder.py b/src/csbox/lab/recorder.py
+new file mode 100644
+index 0000000..89c7be4
+--- /dev/null
++++ b/src/csbox/lab/recorder.py
+@@ -0,0 +1,262 @@
++from __future__ import annotations
++
++import codecs
++import json
++import math
++import queue
++import threading
++import time
++from dataclasses import dataclass
++from pathlib import Path
++from typing import Any, Final
++
++from csbox.core.events import TerminalEvent, TerminalEventType, TerminalSize
++
++
++class RecorderError(RuntimeError):
++    """A recording could not accept or durably write an event."""
++
++
++@dataclass(frozen=True, slots=True)
++class CastEvent:
++    interval: float
++    code: str
++    data: str
++
++
++@dataclass(frozen=True, slots=True)
++class CastReadResult:
++    header: dict[str, Any]
++    events: tuple[CastEvent, ...]
++    warnings: tuple[str, ...]
++
++
++_STOP: Final = object()
++_CAST_CODES: Final = frozenset({"o", "i", "r", "m", "x"})
++
++
++class AsciicastV3Recorder:
++    """Append asciicast v3 lines on a bounded background writer."""
++
++    def __init__(
++        self,
++        path: Path | str,
++        *,
++        columns: int,
++        rows: int,
++        term_type: str = "xterm-256color",
++        env: dict[str, str] | None = None,
++        queue_size: int = 1024,
++        enqueue_timeout: float = 1.0,
++        close_timeout: float = 5.0,
++    ) -> None:
++        if columns <= 0 or rows <= 0:
++            raise ValueError("terminal dimensions must be positive")
++        if queue_size <= 0:
++            raise ValueError("queue_size must be positive")
++        if enqueue_timeout <= 0 or close_timeout <= 0:
++            raise ValueError("recorder timeouts must be positive")
++
++        self.path = Path(path)
++        self._header: dict[str, Any] = {
++            "version": 3,
++            "term": {"cols": columns, "rows": rows, "type": term_type},
++        }
++        safe_env = {name: env[name] for name in ("SHELL", "TERM") if env and name in env}
++        if safe_env:
++            self._header["env"] = safe_env
++
++        self._queue: queue.Queue[TerminalEvent | object] = queue.Queue(maxsize=queue_size)
++        self._enqueue_timeout = enqueue_timeout
++        self._close_timeout = close_timeout
++        self._state_lock = threading.Lock()
++        self._closed = False
++        self._writer_error: BaseException | None = None
++        self._ready = threading.Event()
++        self._thread = threading.Thread(
++            target=self._writer_main,
++            name=f"csbox-recorder-{self.path.name}",
++            daemon=True,
++        )
++        self._thread.start()
++        if not self._ready.wait(timeout=self._close_timeout):
++            raise RecorderError("recorder writer did not start in time")
++        self._raise_writer_error()
++
++    @property
++    def is_alive(self) -> bool:
++        return self._thread.is_alive()
++
++    def record(self, event: TerminalEvent) -> None:
++        if not isinstance(event, TerminalEvent):
++            raise TypeError("event must be a TerminalEvent")
++        with self._state_lock:
++            if self._closed:
++                raise RecorderError("recorder is closed")
++            self._raise_writer_error()
++            try:
++                self._queue.put(event, timeout=self._enqueue_timeout)
++            except queue.Full as exc:
++                self._raise_writer_error()
++                raise RecorderError("recorder queue remained full") from exc
++            self._raise_writer_error()
++
++    handle = record
++    write = record
++    __call__ = record
++
++    def close(self) -> None:
++        with self._state_lock:
++            already_closed = self._closed
++            self._closed = True
++
++        if not already_closed:
++            deadline = time.monotonic() + self._close_timeout
++            while True:
++                self._raise_writer_error()
++                remaining = deadline - time.monotonic()
++                if remaining <= 0:
++                    raise RecorderError("recorder shutdown timed out while queueing stop")
++                try:
++                    self._queue.put(_STOP, timeout=min(self._enqueue_timeout, remaining))
++                    break
++                except queue.Full as exc:
++                    if not self._thread.is_alive():
++                        self._raise_writer_error()
++                        raise RecorderError("recorder writer stopped before shutdown") from exc
++
++            self._thread.join(timeout=max(0.0, deadline - time.monotonic()))
++            if self._thread.is_alive():
++                raise RecorderError("recorder writer did not stop in time")
++
++        self._raise_writer_error()
++
++    def _raise_writer_error(self) -> None:
++        if self._writer_error is not None:
++            raise RecorderError("recorder writer failed") from self._writer_error
++
++    def _writer_main(self) -> None:
++        try:
++            self.path.parent.mkdir(parents=True, exist_ok=True)
++            is_empty = not self.path.exists() or self.path.stat().st_size == 0
++            with self.path.open("a", encoding="utf-8", newline="\n") as stream:
++                if is_empty:
++                    self._write_json_line(stream, self._header)
++                self._ready.set()
++                self._write_events(stream)
++        except BaseException as exc:
++            self._writer_error = exc
++            self._ready.set()
++
++    def _write_events(self, stream: Any) -> None:
++        decoders = {
++            TerminalEventType.OUTPUT: codecs.getincrementaldecoder("utf-8")(errors="replace"),
++            TerminalEventType.INPUT: codecs.getincrementaldecoder("utf-8")(errors="replace"),
++        }
++        previous_time = 0.0
++        rounding_error = 0.0
++
++        while True:
++            item = self._queue.get()
++            try:
++                if item is _STOP:
++                    for event_type, decoder in decoders.items():
++                        tail = decoder.decode(b"", final=True)
++                        if tail:
++                            code = "o" if event_type is TerminalEventType.OUTPUT else "i"
++                            self._write_json_line(stream, [0.0, code, tail])
++                    return
++                assert isinstance(item, TerminalEvent)
++                delta = item.relative_time - previous_time
++                if delta < 0:
++                    raise RecorderError("event relative time moved backwards")
++                previous_time = item.relative_time
++                adjusted = delta + rounding_error
++                milliseconds = math.floor(adjusted * 1000.0 + 0.5)
++                interval = milliseconds / 1000.0
++                rounding_error = adjusted - interval
++                code, data = _encode_event(item, decoders)
++                self._write_json_line(stream, [interval, code, data])
++            finally:
++                self._queue.task_done()
++
++    @staticmethod
++    def _write_json_line(stream: Any, value: object) -> None:
++        stream.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
++        stream.write("\n")
++        stream.flush()
++
++
++def _encode_event(event: TerminalEvent, decoders: dict[TerminalEventType, Any]) -> tuple[str, str]:
++    if event.type in (TerminalEventType.OUTPUT, TerminalEventType.INPUT):
++        assert isinstance(event.payload, bytes)
++        code = "o" if event.type is TerminalEventType.OUTPUT else "i"
++        return code, decoders[event.type].decode(event.payload, final=False)
++    if event.type is TerminalEventType.RESIZE:
++        assert isinstance(event.payload, TerminalSize)
++        return "r", f"{event.payload.columns}x{event.payload.rows}"
++    if event.type in (TerminalEventType.MARK, TerminalEventType.CAPTURE):
++        assert isinstance(event.payload, str)
++        return "m", event.payload
++    assert event.type is TerminalEventType.EXIT
++    return "x", str(event.payload if event.payload is not None else 0)
++
++
++class AsciicastV3Reader:
++    def __init__(self, path: Path | str) -> None:
++        self.path = Path(path)
++
++    def read(self) -> CastReadResult:
++        raw_lines = self.path.read_bytes().splitlines(keepends=True)
++        warnings: list[str] = []
++        header: dict[str, Any] | None = None
++        events: list[CastEvent] = []
++
++        for line_number, raw_line in enumerate(raw_lines, start=1):
++            complete_line = raw_line.endswith((b"\n", b"\r"))
++            stripped = raw_line.strip()
++            if not stripped or stripped.startswith(b"#"):
++                continue
++            try:
++                value = json.loads(stripped)
++            except (UnicodeDecodeError, json.JSONDecodeError):
++                if line_number == len(raw_lines) and not complete_line:
++                    warnings.append(f"truncated cast line {line_number} ignored")
++                else:
++                    warnings.append(f"corrupt cast line {line_number} ignored")
++                continue
++
++            if header is None:
++                if not isinstance(value, dict) or value.get("version") != 3:
++                    raise RecorderError(f"invalid asciicast v3 header on line {line_number}")
++                header = value
++                continue
++
++            parsed = _parse_cast_event(value)
++            if parsed is None:
++                warnings.append(f"invalid cast event on line {line_number} ignored")
++                continue
++            if parsed.code not in _CAST_CODES:
++                warnings.append(f"unknown event code {parsed.code!r} on line {line_number} ignored")
++                continue
++            events.append(parsed)
++
++        if header is None:
++            raise RecorderError("asciicast v3 header is missing")
++        return CastReadResult(header=header, events=tuple(events), warnings=tuple(warnings))
++
++
++def _parse_cast_event(value: object) -> CastEvent | None:
++    if not isinstance(value, list) or len(value) != 3:
++        return None
++    interval, code, data = value
++    if (
++        isinstance(interval, bool)
++        or not isinstance(interval, int | float)
++        or not math.isfinite(interval)
++        or interval < 0
++    ):
++        return None
++    if not isinstance(code, str) or not isinstance(data, str):
++        return None
++    return CastEvent(interval=float(interval), code=code, data=data)
+diff --git a/src/csbox/lab/screen.py b/src/csbox/lab/screen.py
+new file mode 100644
+index 0000000..2bfceae
+--- /dev/null
++++ b/src/csbox/lab/screen.py
+@@ -0,0 +1,176 @@
++from __future__ import annotations
++
++import unicodedata
++from dataclasses import dataclass, replace
++from typing import Any
++
++import pyte
++from pyte import modes
++from wcwidth import wcwidth
++
++from csbox.core.display_width import display_width
++from csbox.core.events import TerminalEvent, TerminalEventType, TerminalSize
++
++
++@dataclass(frozen=True, slots=True)
++class TerminalCell:
++    character: str = " "
++    width: int = 1
++    foreground: str = "default"
++    background: str = "default"
++    bold: bool = False
++    italic: bool = False
++    underline: bool = False
++    strikethrough: bool = False
++    reverse: bool = False
++
++
++@dataclass(frozen=True, slots=True)
++class TerminalCursor:
++    row: int = 0
++    column: int = 0
++    visible: bool = True
++
++
++@dataclass(frozen=True, slots=True)
++class TerminalSnapshot:
++    rows: int
++    columns: int
++    cells: tuple[tuple[TerminalCell, ...], ...]
++    cursor: TerminalCursor
++    relative_time: float = 0.0
++
++
++class TerminalEmulator:
++    """Keep terminal state while exposing only immutable CSBox values."""
++
++    def __init__(self, *, columns: int, rows: int) -> None:
++        if columns <= 0 or rows <= 0:
++            raise ValueError("terminal dimensions must be positive")
++        self._screen = _CSBoxScreen(columns, rows)
++        self._stream = pyte.ByteStream(self._screen)
++        self._relative_time = 0.0
++
++    @property
++    def columns(self) -> int:
++        return self._screen.columns
++
++    @property
++    def rows(self) -> int:
++        return self._screen.lines
++
++    def apply(self, event: TerminalEvent) -> None:
++        if not isinstance(event, TerminalEvent):
++            raise TypeError("event must be a TerminalEvent")
++        if event.type is TerminalEventType.OUTPUT:
++            assert isinstance(event.payload, bytes)
++            self._stream.feed(event.payload)
++            self._relative_time = event.relative_time
++        elif event.type is TerminalEventType.RESIZE:
++            assert isinstance(event.payload, TerminalSize)
++            self._screen.resize(lines=event.payload.rows, columns=event.payload.columns)
++            self._relative_time = event.relative_time
++
++    handle = apply
++    __call__ = apply
++
++    def snapshot(self) -> TerminalSnapshot:
++        return _snapshot_from_pyte(self._screen, self._relative_time)
++
++
++def _snapshot_from_pyte(screen: pyte.Screen, relative_time: float) -> TerminalSnapshot:
++    """The one boundary where pyte quirks become stable domain values."""
++
++    rows = screen.lines
++    columns = screen.columns
++    cells = tuple(_row_from_pyte(screen, row, columns) for row in range(rows))
++    # pyte can temporarily place x one cell beyond the edge after drawing a
++    # double-width glyph in the final column. Do not leak that internal state.
++    cursor = TerminalCursor(
++        row=min(max(screen.cursor.y, 0), rows - 1),
++        column=min(max(screen.cursor.x, 0), columns - 1),
++        visible=not screen.cursor.hidden,
++    )
++    return TerminalSnapshot(
++        rows=rows,
++        columns=columns,
++        cells=cells,
++        cursor=cursor,
++        relative_time=relative_time,
++    )
++
++
++def _cell_from_pyte(character: Any) -> TerminalCell:
++    # pyte uses an empty character for the continuation cell of a wide glyph.
++    data = str(character.data)
++    width = 0 if data == "" else display_width(data)
++    return TerminalCell(
++        character=data,
++        width=width,
++        foreground=str(character.fg),
++        background=str(character.bg),
++        bold=bool(character.bold),
++        italic=bool(character.italics),
++        underline=bool(character.underscore),
++        strikethrough=bool(character.strikethrough),
++        reverse=bool(character.reverse),
++    )
++
++
++def _row_from_pyte(screen: pyte.Screen, row: int, columns: int) -> tuple[TerminalCell, ...]:
++    cells = [_cell_from_pyte(screen.buffer[row][column]) for column in range(columns)]
++    for column, cell in enumerate(cells):
++        if cell.character and cell.width == 0:
++            lead_column = column - 1
++            while lead_column >= 0 and cells[lead_column].width == 0:
++                lead_column -= 1
++            if lead_column >= 0:
++                lead = cells[lead_column]
++                combined = unicodedata.normalize("NFC", lead.character + cell.character)
++                cells[lead_column] = replace(lead, character=combined)
++                cells[column] = replace(cell, character="")
++        elif cell.width > columns - column:
++            # A glyph without enough trailing cells cannot be represented by
++            # the fixed domain grid. The private screen normally wraps first;
++            # this replacement also protects snapshots restored by old pyte.
++            cells[column] = replace(cell, character="\N{REPLACEMENT CHARACTER}", width=1)
++    return tuple(cells)
++
++
++class _CSBoxScreen(pyte.Screen):
++    """Contain pyte width edge-case patches behind the domain adapter."""
++
++    def draw(self, data: str) -> None:
++        for character in data:
++            character_width = wcwidth(character)
++            if (
++                character_width == 2
++                and self.cursor.x == self.columns - 1
++                and modes.DECAWM in self.mode
++            ):
++                self.carriage_return()
++                self.linefeed()
++            if (
++                character_width == 0
++                and unicodedata.combining(character)
++                and self._combine_with_wide_lead(character)
++            ):
++                continue
++            super().draw(character)
++
++    def _combine_with_wide_lead(self, combining_character: str) -> bool:
++        row = self.cursor.y
++        column = self.cursor.x - 1
++        if column < 0:
++            row -= 1
++            column = self.columns - 1
++        if row < 0 or column < 1:
++            return False
++        line = self.buffer[row]
++        if line[column].data != "" or display_width(line[column - 1].data) != 2:
++            return False
++        lead = line[column - 1]
++        combined = unicodedata.normalize("NFC", lead.data + combining_character)
++        line[column - 1] = lead._replace(data=combined)
++        self.dirty.add(row)
++        return True
+diff --git a/tests/test_captures.py b/tests/test_captures.py
+new file mode 100644
+index 0000000..0b85580
+--- /dev/null
++++ b/tests/test_captures.py
+@@ -0,0 +1,165 @@
++from __future__ import annotations
++
++import json
++from datetime import UTC, datetime
++from pathlib import Path
++
++import pytest
++
++from csbox.core.events import TerminalEvent, TerminalEventType
++from csbox.lab.captures import CaptureStore, CaptureStoreError
++from csbox.lab.dispatcher import DispatchError, TerminalEventDispatcher
++from csbox.lab.recorder import RecorderError
++from csbox.lab.screen import TerminalCell, TerminalCursor, TerminalSnapshot
++
++
++def snapshot(text: str, relative_time: float) -> TerminalSnapshot:
++    cells = tuple(TerminalCell(character=character) for character in text.ljust(8))
++    return TerminalSnapshot(
++        rows=1,
++        columns=8,
++        cells=(cells,),
++        cursor=TerminalCursor(row=0, column=min(len(text), 7)),
++        relative_time=relative_time,
++    )
++
++
++def make_store(path: Path) -> CaptureStore:
++    ids = iter(("capture-2", "capture-1", "capture-3", "capture-4"))
++    times = iter(
++        (
++            datetime(2026, 8, 10, 6, 0, 2, tzinfo=UTC),
++            datetime(2026, 8, 10, 6, 0, 1, tzinfo=UTC),
++            datetime(2026, 8, 10, 6, 0, 3, tzinfo=UTC),
++            datetime(2026, 8, 10, 6, 0, 4, tzinfo=UTC),
++        )
++    )
++    return CaptureStore(path, id_factory=lambda: next(ids), clock=lambda: next(times))
++
++
++def test_capture_store_persists_immutable_domain_snapshot_and_sorted_metadata(
++    tmp_path: Path,
++) -> None:
++    captures_path = tmp_path / "captures.json"
++    store = make_store(captures_path)
++    late_snapshot = snapshot("late", 2.0)
++    early_snapshot = snapshot("early", 1.0)
++
++    late = store.create_capture(
++        late_snapshot,
++        timestamp=2.0,
++        cwd=Path("/tmp/中文项目"),
++        command="pytest -q",
++        title="测试通过",
++    )
++    early = store.create_capture(early_snapshot, timestamp=1.0, cwd=Path("/tmp/中文项目"))
++
++    result = store.load()
++    payload = json.loads(captures_path.read_text(encoding="utf-8"))
++    assert [item.capture_id for item in result.captures] == [early.capture_id, late.capture_id]
++    assert late.snapshot is late_snapshot
++    assert (late.timestamp, late.rows, late.columns) == (2.0, 1, 8)
++    assert late.cwd == Path("/tmp/中文项目")
++    assert late.command == "pytest -q"
++    assert early.command is None
++    assert payload["version"] == 1
++    assert [item["timestamp"] for item in payload["captures"]] == [1.0, 2.0]
++    assert "pyte.screens" not in captures_path.read_text(encoding="utf-8")
++
++
++def test_capture_store_atomic_replace_failure_keeps_previous_primary(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    captures_path = tmp_path / "captures.json"
++    store = make_store(captures_path)
++    store.create_capture(snapshot("first", 1.0), timestamp=1.0, cwd=tmp_path)
++    previous = captures_path.read_bytes()
++    real_replace = __import__("os").replace
++    temp_parents: list[Path] = []
++
++    def fail_primary_replace(source: str | Path, destination: str | Path) -> None:
++        temp_parents.append(Path(source).parent)
++        if Path(destination) == captures_path:
++            raise OSError("disk failure")
++        real_replace(source, destination)
++
++    monkeypatch.setattr("csbox.lab.captures.os.replace", fail_primary_replace)
++
++    with pytest.raises(CaptureStoreError, match="persist"):
++        store.create_capture(snapshot("second", 2.0), timestamp=2.0, cwd=tmp_path)
++
++    assert captures_path.read_bytes() == previous
++    assert temp_parents and all(parent == captures_path.parent for parent in temp_parents)
++
++
++def test_capture_store_recovers_backup_and_isolates_one_invalid_capture(tmp_path: Path) -> None:
++    captures_path = tmp_path / "captures.json"
++    store = make_store(captures_path)
++    first = store.create_capture(snapshot("first", 1.0), timestamp=1.0, cwd=tmp_path)
++    store.create_capture(snapshot("second", 2.0), timestamp=2.0, cwd=tmp_path)
++    captures_path.write_text("{truncated", encoding="utf-8")
++
++    recovered = store.load()
++
++    assert [capture.capture_id for capture in recovered.captures] == [first.capture_id]
++    assert any("backup" in warning for warning in recovered.warnings)
++
++    valid = first.model_dump(mode="json", by_alias=True)
++    captures_path.write_text(
++        json.dumps({"version": 1, "captures": [valid, {"id": "broken"}, valid]}),
++        encoding="utf-8",
++    )
++    isolated = store.load()
++    assert len(isolated.captures) == 2
++    assert any("capture 2" in warning for warning in isolated.warnings)
++
++
++def test_capture_store_isolates_snapshot_dimension_mismatch(tmp_path: Path) -> None:
++    captures_path = tmp_path / "captures.json"
++    store = make_store(captures_path)
++    capture = store.create_capture(snapshot("valid", 1.0), timestamp=1.0, cwd=tmp_path)
++    invalid = capture.model_dump(mode="json", by_alias=True)
++    invalid["rows"] = 2
++    captures_path.write_text(json.dumps({"version": 1, "captures": [invalid]}), encoding="utf-8")
++
++    result = store.load()
++
++    assert result.captures == ()
++    assert any("invalid capture 1" in warning for warning in result.warnings)
++
++
++def test_capture_store_edits_title_and_deletes_by_id(tmp_path: Path) -> None:
++    store = make_store(tmp_path / "captures.json")
++    capture = store.create_capture(snapshot("one", 1.0), timestamp=1.0, cwd=tmp_path)
++
++    edited = store.edit_title(capture.capture_id, "新的标题")
++    assert edited.title == "新的标题"
++    assert store.load().captures[0].title == "新的标题"
++    assert store.delete(capture.capture_id)
++    assert store.load().captures == ()
++    assert not store.delete("missing")
++
++
++def test_dispatcher_preserves_sink_order_and_propagates_recorder_failures() -> None:
++    calls: list[str] = []
++
++    class Sink:
++        def __init__(self, name: str) -> None:
++            self.name = name
++
++        def handle(self, event: TerminalEvent) -> None:
++            calls.append(self.name)
++
++    class FailedRecorder:
++        def handle(self, event: TerminalEvent) -> None:
++            calls.append("recorder")
++            raise RecorderError("queue full")
++
++    dispatcher = TerminalEventDispatcher([Sink("screen"), FailedRecorder(), Sink("stdout")])
++    output = TerminalEvent(1, 10.0, 0.1, TerminalEventType.OUTPUT, b"hello")
++
++    with pytest.raises(DispatchError, match="sink 2") as error:
++        dispatcher.dispatch(output)
++
++    assert isinstance(error.value.__cause__, RecorderError)
++    assert calls == ["screen", "recorder"]
+diff --git a/tests/test_recorder.py b/tests/test_recorder.py
+new file mode 100644
+index 0000000..202014c
+--- /dev/null
++++ b/tests/test_recorder.py
+@@ -0,0 +1,168 @@
++from __future__ import annotations
++
++import json
++import threading
++import time
++from pathlib import Path
++
++import pytest
++
++from csbox.core.events import TerminalEvent, TerminalEventType, TerminalSize
++from csbox.lab.recorder import AsciicastV3Reader, AsciicastV3Recorder, RecorderError
++
++
++def event(
++    sequence: int,
++    relative_time: float,
++    event_type: TerminalEventType,
++    payload: bytes | str | TerminalSize | int | None,
++) -> TerminalEvent:
++    return TerminalEvent(
++        sequence=sequence,
++        monotonic_time=100.0 + relative_time,
++        relative_time=relative_time,
++        type=event_type,
++        payload=payload,
++    )
++
++
++def test_recorder_writes_v3_header_filtered_env_and_all_event_codes(tmp_path: Path) -> None:
++    cast_path = tmp_path / "session.cast"
++    recorder = AsciicastV3Recorder(
++        cast_path,
++        columns=80,
++        rows=24,
++        env={"SHELL": "/bin/bash", "TERM": "xterm-256color", "TOKEN": "secret"},
++    )
++
++    recorder.record(event(1, 0.1, TerminalEventType.OUTPUT, b"hello"))
++    recorder.record(event(2, 0.2, TerminalEventType.INPUT, b"ls\r"))
++    recorder.record(event(3, 0.3, TerminalEventType.RESIZE, TerminalSize(120, 40)))
++    recorder.record(event(4, 0.4, TerminalEventType.MARK, "checkpoint"))
++    recorder.record(event(5, 0.5, TerminalEventType.CAPTURE, "capture-1"))
++    recorder.record(event(6, 0.6, TerminalEventType.EXIT, 0))
++    recorder.close()
++
++    lines = cast_path.read_text(encoding="utf-8").splitlines()
++    header = json.loads(lines[0])
++    assert header["version"] == 3
++    assert header["term"] == {"cols": 80, "rows": 24, "type": "xterm-256color"}
++    assert header["env"] == {"SHELL": "/bin/bash", "TERM": "xterm-256color"}
++    assert [json.loads(line)[1] for line in lines[1:]] == ["o", "i", "r", "m", "m", "x"]
++    assert json.loads(lines[3])[2] == "120x40"
++    assert json.loads(lines[-1])[1:] == ["x", "0"]
++
++
++def test_recorder_diffuses_millisecond_rounding_error_between_adjacent_events(
++    tmp_path: Path,
++) -> None:
++    cast_path = tmp_path / "session.cast"
++    recorder = AsciicastV3Recorder(cast_path, columns=80, rows=24)
++
++    for sequence, relative_time in enumerate((0.0004, 0.0008, 0.0012, 0.0016), start=1):
++        recorder.record(event(sequence, relative_time, TerminalEventType.OUTPUT, b"."))
++    recorder.close()
++
++    intervals = [json.loads(line)[0] for line in cast_path.read_text().splitlines()[1:]]
++    assert intervals == [0.0, 0.001, 0.0, 0.001]
++    assert sum(intervals) == pytest.approx(0.002)
++
++
++def test_recorder_decodes_utf8_split_across_output_events(tmp_path: Path) -> None:
++    cast_path = tmp_path / "session.cast"
++    encoded = "项目".encode()
++    recorder = AsciicastV3Recorder(cast_path, columns=80, rows=24)
++
++    recorder.record(event(1, 0.01, TerminalEventType.OUTPUT, encoded[:2]))
++    recorder.record(event(2, 0.02, TerminalEventType.OUTPUT, encoded[2:4]))
++    recorder.record(event(3, 0.03, TerminalEventType.OUTPUT, encoded[4:]))
++    recorder.close()
++
++    payload = "".join(json.loads(line)[2] for line in cast_path.read_text().splitlines()[1:])
++    assert payload == "项目"
++
++
++def test_recorder_rejects_events_after_bounded_shutdown(tmp_path: Path) -> None:
++    recorder = AsciicastV3Recorder(tmp_path / "session.cast", columns=80, rows=24)
++    recorder.close()
++
++    assert not recorder.is_alive
++    with pytest.raises(RecorderError, match="closed"):
++        recorder.record(event(1, 0.0, TerminalEventType.OUTPUT, b"late"))
++
++
++def test_recorder_close_is_bounded_and_propagates_writer_failure(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    original_write = AsciicastV3Recorder._write_json_line
++    event_write_started = threading.Event()
++    release_write = threading.Event()
++    calls = 0
++
++    def blocked_event_write(stream: object, value: object) -> None:
++        nonlocal calls
++        calls += 1
++        if calls > 1:
++            event_write_started.set()
++            release_write.wait(timeout=1.0)
++            raise OSError("disk failed")
++        original_write(stream, value)
++
++    monkeypatch.setattr(AsciicastV3Recorder, "_write_json_line", staticmethod(blocked_event_write))
++    recorder = AsciicastV3Recorder(
++        tmp_path / "session.cast", columns=80, rows=24, close_timeout=0.05
++    )
++    recorder.record(event(1, 0.1, TerminalEventType.OUTPUT, b"hello"))
++    assert event_write_started.wait(timeout=0.5)
++
++    started = time.monotonic()
++    with pytest.raises(RecorderError, match="did not stop"):
++        recorder.close()
++    assert time.monotonic() - started < 0.5
++
++    release_write.set()
++    recorder._thread.join(timeout=0.5)
++    with pytest.raises(RecorderError, match="writer failed") as error:
++        recorder.close()
++    assert isinstance(error.value.__cause__, OSError)
++
++
++def test_reader_keeps_valid_events_around_corruption_and_truncated_tail(tmp_path: Path) -> None:
++    cast_path = tmp_path / "session.cast"
++    cast_path.write_text(
++        '{"version":3,"term":{"cols":80,"rows":24,"type":"xterm-256color"}}\n'
++        "# generated by a future recorder\n"
++        '[0.1,"o","first"]\n'
++        "not-json\n"
++        '[0.1,"z","future"]\n'
++        '[0.1,"o","second"]\n'
++        '[0.1,"o","unfinished"',
++        encoding="utf-8",
++    )
++
++    result = AsciicastV3Reader(cast_path).read()
++
++    assert result.header["version"] == 3
++    assert [(item.interval, item.code, item.data) for item in result.events] == [
++        (0.1, "o", "first"),
++        (0.1, "o", "second"),
++    ]
++    assert any("line 4" in warning for warning in result.warnings)
++    assert any("unknown event" in warning for warning in result.warnings)
++    assert any("truncated" in warning for warning in result.warnings)
++
++
++def test_reader_warns_and_skips_non_finite_intervals(tmp_path: Path) -> None:
++    cast_path = tmp_path / "session.cast"
++    cast_path.write_text(
++        '{"version":3,"term":{"cols":80,"rows":24}}\n'
++        '[NaN,"o","bad"]\n'
++        '[Infinity,"o","also bad"]\n'
++        '[0.1,"o","valid"]\n',
++        encoding="utf-8",
++    )
++
++    result = AsciicastV3Reader(cast_path).read()
++
++    assert [(item.interval, item.data) for item in result.events] == [(0.1, "valid")]
++    assert sum("invalid cast event" in warning for warning in result.warnings) == 2
+diff --git a/tests/test_session_models.py b/tests/test_session_models.py
+new file mode 100644
+index 0000000..7d87d89
+--- /dev/null
++++ b/tests/test_session_models.py
+@@ -0,0 +1,64 @@
++from datetime import UTC, datetime
++from pathlib import Path
++
++import pytest
++from pydantic import ValidationError
++
++from csbox.lab.models import SessionMetadata, SessionPaths
++
++
++def test_session_metadata_defaults_to_running_and_uses_stable_json_aliases() -> None:
++    metadata = SessionMetadata(
++        id="session-001",
++        name="网络实验",
++        startedAt=datetime(2026, 8, 10, 6, 0, tzinfo=UTC),
++        platform="linux",
++        shell="bash",
++        shellVersion="5.2",
++        initialRows=24,
++        initialColumns=80,
++        cwd=Path("/tmp/中文项目"),
++        csboxVersion="0.1.0",
++    )
++
++    assert metadata.status == "running"
++    assert metadata.ended_at is None
++    assert metadata.model_dump(mode="json", by_alias=True) == {
++        "id": "session-001",
++        "name": "网络实验",
++        "status": "running",
++        "startedAt": "2026-08-10T06:00:00Z",
++        "endedAt": None,
++        "platform": "linux",
++        "shell": "bash",
++        "shellVersion": "5.2",
++        "initialRows": 24,
++        "initialColumns": 80,
++        "cwd": "/tmp/中文项目",
++        "csboxVersion": "0.1.0",
++    }
++
++
++def test_session_paths_have_stable_sidecar_names(tmp_path: Path) -> None:
++    paths = SessionPaths(tmp_path / "session-001")
++
++    assert paths.cast == tmp_path / "session-001" / "session.cast"
++    assert paths.metadata == tmp_path / "session-001" / "metadata.json"
++    assert paths.captures == tmp_path / "session-001" / "captures.json"
++    assert paths.checkpoints == tmp_path / "session-001" / "checkpoints.json"
++
++
++def test_session_metadata_rejects_a_naive_non_utc_start_time() -> None:
++    with pytest.raises(ValidationError, match="timezone-aware"):
++        SessionMetadata(
++            id="session-001",
++            name="网络实验",
++            startedAt=datetime(2026, 8, 10, 6, 0),
++            platform="linux",
++            shell="bash",
++            shellVersion=None,
++            initialRows=24,
++            initialColumns=80,
++            cwd=Path("/tmp/project"),
++            csboxVersion="0.1.0",
++        )
+diff --git a/tests/test_terminal_screen.py b/tests/test_terminal_screen.py
+new file mode 100644
+index 0000000..fe2efee
+--- /dev/null
++++ b/tests/test_terminal_screen.py
+@@ -0,0 +1,135 @@
++from __future__ import annotations
++
++from dataclasses import FrozenInstanceError
++
++import pytest
++
++from csbox.core.events import TerminalEvent, TerminalEventType, TerminalSize
++from csbox.lab.screen import TerminalCell, TerminalCursor, TerminalEmulator, TerminalSnapshot
++
++
++def event(
++    sequence: int,
++    relative_time: float,
++    event_type: TerminalEventType,
++    payload: bytes | str | TerminalSize | int | None,
++) -> TerminalEvent:
++    return TerminalEvent(
++        sequence=sequence,
++        monotonic_time=100.0 + relative_time,
++        relative_time=relative_time,
++        type=event_type,
++        payload=payload,
++    )
++
++
++def row_text(snapshot: TerminalSnapshot, row: int) -> str:
++    return "".join(cell.character for cell in snapshot.cells[row] if cell.width != 0)
++
++
++def test_snapshot_converts_ascii_cjk_ansi_colors_and_attributes_to_domain_types() -> None:
++    emulator = TerminalEmulator(columns=16, rows=3)
++    emulator.apply(
++        event(
++            1,
++            0.25,
++            TerminalEventType.OUTPUT,
++            (b"A\x1b[31;1;4;7mB\x1b[0m\x1b[38;5;196mC\x1b[38;2;1;2;3mD\x1b[0m" + "中文".encode()),
++        )
++    )
++
++    snapshot = emulator.snapshot()
++
++    assert isinstance(snapshot, TerminalSnapshot)
++    assert all(isinstance(cell, TerminalCell) for row in snapshot.cells for cell in row)
++    assert isinstance(snapshot.cursor, TerminalCursor)
++    assert type(snapshot).__module__ == "csbox.lab.screen"
++    assert all(
++        type(cell).__module__ == "csbox.lab.screen" for row in snapshot.cells for cell in row
++    )
++    assert snapshot.cells[0][1] == TerminalCell(
++        character="B", foreground="red", bold=True, underline=True, reverse=True
++    )
++    assert snapshot.cells[0][2].foreground == "ff0000"
++    assert snapshot.cells[0][3].foreground == "010203"
++    assert snapshot.cells[0][4].character == "中"
++    assert snapshot.cells[0][4].width == 2
++    assert snapshot.cells[0][5].width == 0
++    assert snapshot.relative_time == 0.25
++    with pytest.raises(FrozenInstanceError):
++        snapshot.cursor.row = 2  # type: ignore[misc]
++
++
++def test_cursor_movement_erase_line_erase_screen_and_resize() -> None:
++    emulator = TerminalEmulator(columns=8, rows=3)
++    emulator.apply(event(1, 0.1, TerminalEventType.OUTPUT, b"hello\x1b[2;3HX"))
++    moved = emulator.snapshot()
++
++    assert moved.cells[1][2].character == "X"
++    assert moved.cursor == TerminalCursor(row=1, column=3, visible=True)
++
++    emulator.apply(event(2, 0.2, TerminalEventType.OUTPUT, b"\x1b[1;1H\x1b[2K"))
++    assert row_text(emulator.snapshot(), 0).strip() == ""
++    assert emulator.snapshot().cells[1][2].character == "X"
++
++    emulator.apply(event(3, 0.3, TerminalEventType.OUTPUT, b"\x1b[2J"))
++    assert all(not row_text(emulator.snapshot(), row).strip() for row in range(3))
++
++    emulator.apply(event(4, 0.4, TerminalEventType.RESIZE, TerminalSize(columns=12, rows=4)))
++    resized = emulator.snapshot()
++    assert (resized.rows, resized.columns, resized.relative_time) == (4, 12, 0.4)
++    assert len(resized.cells) == 4
++    assert all(len(row) == 12 for row in resized.cells)
++
++
++def test_carriage_return_progress_powershell_table_and_chinese_paths() -> None:
++    emulator = TerminalEmulator(columns=44, rows=6)
++    output = (
++        b"10%\r20%\r100%\r\n"
++        + "Name        Length\r\n----        ------\r\n报告.txt    128\r\n".encode()
++        + "C:\\课程\\计算机网络\\实验一\r\n/home/student/课程/实验一".encode()
++    )
++    emulator.apply(event(1, 1.0, TerminalEventType.OUTPUT, output))
++
++    snapshot = emulator.snapshot()
++
++    assert row_text(snapshot, 0).startswith("100%")
++    assert "Name        Length" in row_text(snapshot, 1)
++    assert "报告.txt    128" in row_text(snapshot, 3)
++    assert "C:\\课程\\计算机网络\\实验一" in row_text(snapshot, 4)
++    assert "/home/student/课程/实验一" in row_text(snapshot, 5)
++
++
++def test_combining_mark_after_cjk_stays_on_the_wide_lead_cell() -> None:
++    emulator = TerminalEmulator(columns=4, rows=2)
++    emulator.apply(event(1, 0.1, TerminalEventType.OUTPUT, "中\u0301".encode()))
++
++    snapshot = emulator.snapshot()
++
++    assert snapshot.cells[0][0].character == "中\u0301"
++    assert snapshot.cells[0][0].width == 2
++    assert snapshot.cells[0][1].character == ""
++    assert snapshot.cells[0][1].width == 0
++
++
++def test_wide_character_at_last_column_wraps_without_invalid_cell_geometry() -> None:
++    emulator = TerminalEmulator(columns=4, rows=2)
++    emulator.apply(event(1, 0.1, TerminalEventType.OUTPUT, "abc中".encode()))
++
++    snapshot = emulator.snapshot()
++
++    assert snapshot.cells[0][3] == TerminalCell()
++    assert snapshot.cells[1][0].character == "中"
++    assert snapshot.cells[1][0].width == 2
++    assert snapshot.cells[1][1].width == 0
++
++
++def test_emulator_ignores_non_screen_events() -> None:
++    emulator = TerminalEmulator(columns=8, rows=2)
++    before = emulator.snapshot()
++
++    emulator.apply(event(1, 1.0, TerminalEventType.INPUT, b"secret"))
++    emulator.apply(event(2, 2.0, TerminalEventType.MARK, "mark"))
++    emulator.apply(event(3, 3.0, TerminalEventType.EXIT, 0))
++
++    assert emulator.snapshot() == before

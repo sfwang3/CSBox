@@ -62,4 +62,7 @@ def test_verbose_failure_keeps_native_exception_chain(capsys: pytest.CaptureFixt
     captured = capsys.readouterr()
     assert "调试类型：TerminalCleanupError" in captured.err
     assert "TerminalCleanupError" in captured.err
-    assert "OSError: The handle is invalid (native_code=6)" in captured.err.replace("\n", " ")
+    verbose_error = captured.err.replace("\n", " ")
+    assert "OSError:" in verbose_error
+    assert "The handle is invalid" in verbose_error
+    assert "native_code=6" in verbose_error

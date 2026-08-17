@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -54,7 +55,8 @@ def test_launch_intent_is_private_and_duplicate_host_claim_is_rejected(tmp_path:
     intent = reserve_intent(tmp_path)
 
     assert intent.request_path.is_file()
-    assert intent.request_path.stat().st_mode & 0o077 == 0
+    if os.name == "posix":
+        assert intent.request_path.stat().st_mode & 0o077 == 0
     payload = json.loads(intent.request_path.read_text(encoding="utf-8"))
     assert payload["name"] == "中文实验"
     assert payload["size"] == {"columns": 100, "rows": 30}

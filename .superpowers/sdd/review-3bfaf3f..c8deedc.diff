@@ -1,0 +1,2010 @@
+# Review package: 3bfaf3f..c8deedc
+
+## Commits
+c8deedc fix: reject uncovered custom glyphs
+118c65a fix: validate rendered evidence and refresh exports
+152a141 fix: harden lab evidence export boundaries
+d2c64c6 fix: preserve terminal state across replay checkpoints
+
+## Files changed
+ src/csbox/lab/exporter.py     | 148 ++++++++++++++++++++++---
+ src/csbox/lab/fonts.py        |  20 +++-
+ src/csbox/lab/recorder.py     |   2 +
+ src/csbox/lab/renderer.py     |  72 +++++++++++-
+ src/csbox/lab/replay.py       | 249 +++++++++++++++++++++++++++++++++++++-----
+ src/csbox/lab/screen.py       | 219 +++++++++++++++++++++++++++++++++++--
+ tests/test_lab_export.py      | 179 +++++++++++++++++++++++++++++-
+ tests/test_renderer.py        |  84 +++++++++++++-
+ tests/test_replay.py          | 108 +++++++++++++++++-
+ tests/test_terminal_screen.py |  10 +-
+ 10 files changed, 1030 insertions(+), 61 deletions(-)
+
+## Diff
+diff --git a/src/csbox/lab/exporter.py b/src/csbox/lab/exporter.py
+index 1b66f6a..d6ad66a 100644
+--- a/src/csbox/lab/exporter.py
++++ b/src/csbox/lab/exporter.py
+@@ -1,22 +1,30 @@
+ from __future__ import annotations
+ 
++import hashlib
++import html
+ import re
+ import shutil
+ import unicodedata
+ from dataclasses import dataclass
+-from pathlib import Path
++from datetime import datetime, timedelta
++from pathlib import Path, PurePosixPath
++from urllib.parse import unquote
++
++from pydantic import ValidationError
+ 
+ from csbox.lab.captures import CaptureStore
+-from csbox.lab.models import CaptureRecord, SessionPaths
++from csbox.lab.models import SessionMetadata, SessionPaths
+ from csbox.lab.renderer import RenderTheme, TerminalEvidenceRenderer
+ 
++_COMPONENT_BUDGET = 240
++
+ 
+ class LabExportError(RuntimeError):
+     """A lab session cannot be exported without risking user data."""
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+ class LabExportResult:
+     destination: Path
+     evidence: tuple[Path, ...]
+     markdown: Path
+@@ -39,68 +47,80 @@ class LabExporter:
+ 
+     def export(
+         self,
+         session: SessionPaths | Path | str,
+         destination: Path | str,
+         *,
+         force: bool = False,
+     ) -> LabExportResult:
+         paths = session if isinstance(session, SessionPaths) else SessionPaths(session)
+         output = Path(destination)
+-        if not paths.cast.is_file():
+-            raise LabExportError(f"找不到实验录制文件：{paths.cast}")
++        _validate_session_sources(paths)
+         if output.exists() and output.resolve() == paths.root.resolve():
+             raise LabExportError("导出目录不能覆盖原始实验目录。")
+         self._prepare_destination(output, force=force)
+         evidence_directory = output / "evidence"
+         self._prepare_evidence_directory(evidence_directory)
++        markdown_path = output / "evidence.md"
++        cast_path = output / "session.cast"
++        commands_path = output / "commands.txt"
++        for path in (markdown_path, cast_path, commands_path):
++            _reject_symlink(path)
++        previous_evidence, cleanup_warnings = (
++            _previous_generated_evidence(output) if force else ((), ())
++        )
+ 
+         capture_result = CaptureStore(paths.captures).load()
++        session_start, metadata_warnings = _load_session_start(paths)
+         rendered: list[Path] = []
+         markdown_entries: list[str] = []
+         commands: list[str] = []
+         for index, capture in enumerate(capture_result.captures, start=1):
+             title = _display_title(capture.title, index)
+             slug = _safe_slug(capture.title, index)
+             image_path = evidence_directory / f"{index:02d}-{slug}.png"
+             _reject_symlink(image_path)
+             self.renderer.render(capture.snapshot, image_path, self.theme)
+             rendered.append(image_path)
+-            markdown_entries.append(_markdown_entry(index, title, capture, image_path.name))
++            captured_at = (
++                session_start + timedelta(seconds=capture.timestamp)
++                if session_start is not None
++                else capture.created_at
++            )
++            markdown_entries.append(_markdown_entry(index, title, captured_at, image_path.name))
+             command = _known_command(capture.command)
+             if command is not None:
+                 commands.append(command)
+ 
+-        markdown_path = output / "evidence.md"
+-        cast_path = output / "session.cast"
+-        commands_path = output / "commands.txt"
+-        for path in (markdown_path, cast_path, commands_path):
+-            _reject_symlink(path)
+         markdown = "## 实验记录\n"
+         if markdown_entries:
+             markdown += "\n" + "\n\n".join(markdown_entries) + "\n"
+         markdown_path.write_text(markdown, encoding="utf-8", newline="\n")
+         shutil.copyfile(paths.cast, cast_path)
+         exported_commands: Path | None = None
+         if commands:
+             commands_path.write_text("\n".join(commands) + "\n", encoding="utf-8", newline="\n")
+             exported_commands = commands_path
+         elif force and commands_path.is_file():
+             commands_path.unlink()
++        current_evidence = set(rendered)
++        for stale in previous_evidence:
++            if stale not in current_evidence and stale.is_file():
++                stale.unlink()
+ 
+         return LabExportResult(
+             destination=output,
+             evidence=tuple(rendered),
+             markdown=markdown_path,
+             cast=cast_path,
+             commands=exported_commands,
+-            warnings=capture_result.warnings,
++            warnings=(*capture_result.warnings, *metadata_warnings, *cleanup_warnings),
+         )
+ 
+     @staticmethod
+     def _prepare_destination(destination: Path, *, force: bool) -> None:
+         if destination.is_symlink():
+             raise LabExportError("导出目录不能是符号链接。")
+         if destination.exists():
+             if not destination.is_dir():
+                 raise LabExportError(f"导出路径不是目录：{destination}")
+             if not force:
+@@ -113,51 +133,50 @@ class LabExporter:
+         if destination.is_symlink():
+             raise LabExportError("evidence 目录不能是符号链接。")
+         if destination.exists() and not destination.is_dir():
+             raise LabExportError(f"evidence 路径不是目录：{destination}")
+         destination.mkdir(exist_ok=True)
+ 
+ 
+ def _markdown_entry(
+     index: int,
+     title: str,
+-    capture: CaptureRecord,
++    captured_at: datetime,
+     image_name: str,
+ ) -> str:
+     return (
+         f"### {index}. {title}\n\n"
+         "时间：\n"
+-        f"{capture.created_at:%H:%M:%S}\n\n"
++        f"{captured_at:%H:%M:%S}\n\n"
+         "结果：\n\n"
+-        f"![实验记录](evidence/{image_name})"
++        f"![实验记录]({_markdown_url(f'evidence/{image_name}')})"
+     )
+ 
+ 
+ def _display_title(title: str, index: int) -> str:
+     normalized = " ".join(title.split())
+-    return normalized or f"实验记录 {index}"
++    return _escape_markdown_text(normalized or f"实验记录 {index}")
+ 
+ 
+ def _safe_slug(title: str, index: int) -> str:
+     normalized = unicodedata.normalize("NFKC", title)
+     characters: list[str] = []
+     for character in normalized:
+         if unicodedata.category(character).startswith("C"):
+             continue
+         if character in '<>:"/\\|?*' or character.isspace():
+             characters.append("-")
+         else:
+             characters.append(character)
+     slug = re.sub(r"-+", "-", "".join(characters)).strip(" .-_")
+     while ".." in slug:
+         slug = slug.replace("..", ".")
+-    slug = slug[:80].rstrip(" .-_")
+     if not slug:
+         slug = f"实验记录-{index}"
+     if slug.split(".", maxsplit=1)[0].upper() in {
+         "CON",
+         "PRN",
+         "AUX",
+         "NUL",
+         "COM1",
+         "COM2",
+         "COM3",
+@@ -171,23 +190,118 @@ def _safe_slug(title: str, index: int) -> str:
+         "LPT2",
+         "LPT3",
+         "LPT4",
+         "LPT5",
+         "LPT6",
+         "LPT7",
+         "LPT8",
+         "LPT9",
+     }:
+         slug = f"_{slug}"
++    prefix = f"{index:02d}-"
++    extension = ".png"
++    byte_budget = _COMPONENT_BUDGET - len((prefix + extension).encode())
++    windows_budget = _COMPONENT_BUDGET - _windows_units(prefix + extension)
++    if len(slug.encode()) > byte_budget or _windows_units(slug) > windows_budget:
++        digest = hashlib.sha256(normalized.encode()).hexdigest()[:8]
++        suffix = f"-{digest}"
++        byte_budget -= len(suffix.encode())
++        windows_budget -= _windows_units(suffix)
++        shortened: list[str] = []
++        for character in slug:
++            candidate = "".join(shortened) + character
++            if len(candidate.encode()) > byte_budget or _windows_units(candidate) > windows_budget:
++                break
++            shortened.append(character)
++        slug = "".join(shortened).rstrip(" .-_") + suffix
+     return slug
+ 
+ 
+ def _known_command(command: str | None) -> str | None:
+-    if command is None or any(character in command for character in "\r\n\0"):
++    if command is None or any(
++        not character.isprintable() or unicodedata.category(character).startswith("C")
++        for character in command
++    ):
+         return None
+     stripped = command.strip()
+     return stripped or None
+ 
+ 
+ def _reject_symlink(path: Path) -> None:
+     if path.is_symlink():
+         raise LabExportError(f"拒绝覆盖符号链接：{path}")
++
++
++def _validate_session_sources(paths: SessionPaths) -> None:
++    if paths.root.is_symlink():
++        raise LabExportError("实验目录不能是符号链接。")
++    try:
++        root = paths.root.resolve(strict=True)
++    except OSError as exc:
++        raise LabExportError(f"找不到实验目录：{paths.root}") from exc
++    if not root.is_dir():
++        raise LabExportError(f"实验路径不是目录：{paths.root}")
++    sidecars = (
++        paths.cast,
++        paths.captures,
++        paths.captures.with_suffix(paths.captures.suffix + ".bak"),
++        paths.metadata,
++        paths.checkpoints,
++    )
++    for sidecar in sidecars:
++        if sidecar.is_symlink():
++            raise LabExportError(f"实验 sidecar 不能是符号链接：{sidecar.name}")
++        if sidecar.exists() and not sidecar.resolve(strict=True).is_relative_to(root):
++            raise LabExportError(f"实验 sidecar 越出实验目录：{sidecar.name}")
++    if not paths.cast.is_file():
++        raise LabExportError(f"找不到实验录制文件：{paths.cast}")
++
++
++def _escape_markdown_text(value: str) -> str:
++    escaped = re.sub(r"([\\`*_{}\[\]()#+|%])", r"\\\1", value)
++    return html.escape(escaped, quote=False)
++
++
++def _markdown_url(value: str) -> str:
++    parts: list[str] = []
++    for character in value:
++        if ord(character) > 127 or character.isalnum() or character in "-._~/":
++            parts.append(character)
++        else:
++            parts.extend(f"%{byte:02X}" for byte in character.encode())
++    return "".join(parts)
++
++
++def _windows_units(value: str) -> int:
++    return len(value.encode("utf-16-le")) // 2
++
++
++def _load_session_start(paths: SessionPaths) -> tuple[datetime | None, tuple[str, ...]]:
++    if not paths.metadata.exists():
++        return None, ("metadata.json 缺失，证据时间回退到 capture createdAt。",)
++    try:
++        metadata = SessionMetadata.model_validate_json(paths.metadata.read_text(encoding="utf-8"))
++    except (OSError, UnicodeError, ValidationError, ValueError) as exc:
++        return None, (f"metadata.json 无效，证据时间回退到 capture createdAt：{exc}",)
++    return metadata.started_at, ()
++
++
++def _previous_generated_evidence(
++    destination: Path,
++) -> tuple[tuple[Path, ...], tuple[str, ...]]:
++    markdown = destination / "evidence.md"
++    if not markdown.exists():
++        return (), ()
++    try:
++        content = markdown.read_text(encoding="utf-8")
++    except (OSError, UnicodeError) as exc:
++        return (), (f"旧 evidence.md 无法读取，未清理历史 evidence：{exc}",)
++    generated: list[Path] = []
++    for encoded in re.findall(r"!\[实验记录\]\((evidence/[^)\r\n]+)\)", content):
++        relative = PurePosixPath(unquote(encoded))
++        if len(relative.parts) != 2 or relative.parts[0] != "evidence":
++            continue
++        candidate = destination / "evidence" / relative.name
++        if candidate.is_symlink():
++            raise LabExportError(f"历史 evidence 不能是符号链接：{candidate.name}")
++        generated.append(candidate)
++    return tuple(generated), ()
+diff --git a/src/csbox/lab/fonts.py b/src/csbox/lab/fonts.py
+index d2fcfa0..911bc9d 100644
+--- a/src/csbox/lab/fonts.py
++++ b/src/csbox/lab/fonts.py
+@@ -1,28 +1,30 @@
+ from __future__ import annotations
+ 
+ import os
++import unicodedata
+ from collections.abc import Iterable
+ from dataclasses import dataclass
+ from pathlib import Path
+ 
+ from PIL import ImageFont
+ 
+ 
+ class FontResolutionError(RuntimeError):
+     """No system font combination can render terminal evidence safely."""
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+ class ResolvedFonts:
+     ascii: Path
+     cjk: Path
++    fallbacks: tuple[Path, ...] = ()
+ 
+ 
+ class FontResolver:
+     """Resolve a deterministic monospace/CJK system-font pair."""
+ 
+     def __init__(
+         self,
+         explicit: Path | str | None = None,
+         candidates: Iterable[Path | str] | None = None,
+     ) -> None:
+@@ -41,21 +43,26 @@ class FontResolver:
+         if ascii_font is None:
+             raise FontResolutionError(
+                 "找不到可用的等宽字体，请在配置 render.font 中填写字体文件路径。"
+             )
+         cjk_font = next((path for path in available if _has_cjk_coverage(path)), None)
+         if cjk_font is None:
+             raise FontResolutionError(
+                 "找不到支持中文的字体，请安装 Noto CJK/微软雅黑，"
+                 "或在配置 render.font 中填写支持中文的字体文件路径。"
+             )
+-        self._resolved = ResolvedFonts(ascii=ascii_font, cjk=cjk_font)
++        fallbacks = tuple(
++            path
++            for path in available
++            if path not in {ascii_font, cjk_font} and _load_font(path) is not None
++        )
++        self._resolved = ResolvedFonts(ascii=ascii_font, cjk=cjk_font, fallbacks=fallbacks)
+         return self._resolved
+ 
+ 
+ def _default_candidates() -> tuple[Path, ...]:
+     windows_root = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"
+     wsl_windows = Path("/mnt/c/Windows/Fonts")
+     roots_and_names = (
+         (windows_root, "CascadiaMono.ttf"),
+         (windows_root, "CascadiaCode.ttf"),
+         (windows_root, "consola.ttf"),
+@@ -92,15 +99,26 @@ def _is_ascii_monospace(path: Path) -> bool:
+ 
+ def _has_cjk_coverage(path: Path) -> bool:
+     font = _load_font(path)
+     return font is not None and all(_has_glyph(font, character) for character in "中文项目")
+ 
+ 
+ def _has_glyph(font: ImageFont.FreeTypeFont, character: str) -> bool:
+     return _glyph_signature(font, character) != _glyph_signature(font, "\u0378")
+ 
+ 
++def font_supports_text(font: ImageFont.FreeTypeFont, text: str) -> bool:
++    """Return whether a loaded font covers every visible codepoint."""
++
++    return all(
++        character.isspace()
++        or unicodedata.category(character) in {"Cc", "Cf"}
++        or _has_glyph(font, character)
++        for character in text
++    )
++
++
+ def _glyph_signature(
+     font: ImageFont.FreeTypeFont, character: str
+ ) -> tuple[tuple[int, int], tuple[int, int, int, int] | None, bytes]:
+     mask = font.getmask(character, mode="L")
+     return mask.size, mask.getbbox(), bytes(mask)
+diff --git a/src/csbox/lab/recorder.py b/src/csbox/lab/recorder.py
+index 69cea34..913cca0 100644
+--- a/src/csbox/lab/recorder.py
++++ b/src/csbox/lab/recorder.py
+@@ -28,20 +28,21 @@ class CastEvent:
+     # already-applied prefix again.
+     cast_offset: int = 0
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+ class CastReadResult:
+     header: dict[str, Any]
+     events: tuple[CastEvent, ...]
+     warnings: tuple[str, ...]
+     data_offset: int = 0
++    trailing_interval: float = 0.0
+ 
+ 
+ _STOP: Final = object()
+ _CAST_CODES: Final = frozenset({"o", "i", "r", "m", "x"})
+ 
+ 
+ class AsciicastV3Recorder:
+     """Append asciicast v3 lines on a bounded background writer."""
+ 
+     def __init__(
+@@ -295,20 +296,21 @@ class AsciicastV3Reader:
+             )
+             pending_unknown_interval = 0.0
+ 
+         if header is None:
+             raise RecorderError("asciicast v3 header is missing")
+         return CastReadResult(
+             header=header,
+             events=tuple(events),
+             warnings=tuple(warnings),
+             data_offset=data_offset,
++            trailing_interval=pending_unknown_interval,
+         )
+ 
+ 
+ def _parse_cast_event(value: object) -> CastEvent | None:
+     if not isinstance(value, list) or len(value) != 3:
+         return None
+     interval, code, data = value
+     if (
+         isinstance(interval, bool)
+         or not isinstance(interval, int | float)
+diff --git a/src/csbox/lab/renderer.py b/src/csbox/lab/renderer.py
+index f5dd663..7b1efdf 100644
+--- a/src/csbox/lab/renderer.py
++++ b/src/csbox/lab/renderer.py
+@@ -1,20 +1,28 @@
+ from __future__ import annotations
+ 
+ import math
++import os
++import tempfile
++from contextlib import suppress
+ from dataclasses import dataclass
+ from pathlib import Path
+ from typing import Final
+ 
+ from PIL import Image, ImageDraw, ImageFont
+ 
+-from csbox.lab.fonts import FontResolver, ResolvedFonts
++from csbox.lab.fonts import (
++    FontResolutionError,
++    FontResolver,
++    ResolvedFonts,
++    font_supports_text,
++)
+ from csbox.lab.screen import TerminalCell, TerminalSnapshot
+ 
+ RGB = tuple[int, int, int]
+ 
+ _DARK_PALETTE: Final[dict[str, RGB]] = {
+     "black": (0, 0, 0),
+     "red": (205, 49, 49),
+     "green": (13, 188, 121),
+     "brown": (229, 229, 16),
+     "yellow": (229, 229, 16),
+@@ -78,20 +86,24 @@ class TerminalEvidenceRenderer:
+     ) -> None:
+         if font_size <= 0:
+             raise ValueError("font_size must be positive")
+         if padding < 0:
+             raise ValueError("padding must not be negative")
+         self.font_size = font_size
+         self.padding = padding
+         self.fonts: ResolvedFonts = (font_resolver or FontResolver()).resolve()
+         self._ascii_font = ImageFont.truetype(str(self.fonts.ascii), size=font_size)
+         self._cjk_font = ImageFont.truetype(str(self.fonts.cjk), size=font_size)
++        self._fallback_fonts = tuple(
++            ImageFont.truetype(str(path), size=font_size) for path in self.fonts.fallbacks
++        )
++        self._font_cache: dict[str, ImageFont.FreeTypeFont] = {}
+         ascii_advance = self._ascii_font.getlength("M")
+         cjk_half_advance = self._cjk_font.getlength("中") / 2
+         self.cell_width = max(1, math.ceil(ascii_advance), math.ceil(cjk_half_advance))
+         ascii_ascent, ascii_descent = self._ascii_font.getmetrics()
+         cjk_ascent, cjk_descent = self._cjk_font.getmetrics()
+         self.cell_height = max(ascii_ascent + ascii_descent, cjk_ascent + cjk_descent)
+ 
+     def render(
+         self,
+         snapshot: TerminalSnapshot,
+@@ -107,21 +119,21 @@ class TerminalEvidenceRenderer:
+             snapshot.columns * self.cell_width + self.padding * 2,
+             snapshot.rows * self.cell_height + self.padding * 2,
+         )
+         image = Image.new("RGB", size, selected_theme.background)
+         draw = ImageDraw.Draw(image)
+         for row_index, row in enumerate(snapshot.cells):
+             for column_index, cell in enumerate(row):
+                 if cell.width == 0:
+                     continue
+                 self._draw_cell(draw, row_index, column_index, cell, selected_theme)
+-        image.save(path, format="PNG")
++        _save_png_atomic(image, path)
+         return path
+ 
+     def _draw_cell(
+         self,
+         draw: ImageDraw.ImageDraw,
+         row: int,
+         column: int,
+         cell: TerminalCell,
+         theme: RenderTheme,
+     ) -> None:
+@@ -130,18 +142,70 @@ class TerminalEvidenceRenderer:
+         span = self.cell_width * max(1, cell.width)
+         foreground = theme.resolve_color(cell.foreground)
+         background = theme.resolve_color(cell.background, background=True)
+         if cell.reverse:
+             foreground, background = background, foreground
+         draw.rectangle(
+             (x, y, x + span - 1, y + self.cell_height - 1),
+             fill=background,
+         )
+         if cell.character:
+-            font = self._cjk_font if cell.width == 2 else self._ascii_font
+-            draw.text((x, y), cell.character, font=font, fill=foreground)
++            font = self._font_for_text(cell.character, wide=cell.width == 2)
++            text_options: dict[str, object] = {"font": font, "fill": foreground}
++            if cell.bold:
++                text_options.update(stroke_width=1, stroke_fill=foreground)
++            draw.text((x, y), cell.character, **text_options)
+         if cell.underline:
+             underline_y = y + self.cell_height - 2
+             draw.line((x, underline_y, x + span - 1, underline_y), fill=foreground, width=1)
+         if cell.strikethrough:
+             strike_y = y + self.cell_height // 2
+             draw.line((x, strike_y, x + span - 1, strike_y), fill=foreground, width=1)
++
++    def _font_for_text(self, text: str, *, wide: bool) -> ImageFont.FreeTypeFont:
++        cached = self._font_cache.get(text)
++        if cached is not None:
++            return cached
++        preferred = (self._cjk_font, *self._fallback_fonts, self._ascii_font)
++        if not wide and text.isascii():
++            preferred = (self._ascii_font, self._cjk_font, *self._fallback_fonts)
++        for font in preferred:
++            if font_supports_text(font, text):
++                self._font_cache[text] = font
++                return font
++        codepoints = " ".join(f"U+{ord(character):04X}" for character in text)
++        raise FontResolutionError(
++            f"找不到能显示字符 {codepoints} 的字体，请配置包含该字形的 render.font。"
++        )
++
++
++def _save_png_atomic(image: Image.Image, destination: Path) -> None:
++    descriptor, temporary_name = tempfile.mkstemp(
++        dir=destination.parent,
++        prefix=f".{destination.name}.",
++        suffix=".tmp",
++    )
++    os.close(descriptor)
++    temporary = Path(temporary_name)
++    try:
++        image.save(temporary, format="PNG")
++        with temporary.open("rb") as stream:
++            os.fsync(stream.fileno())
++        os.replace(temporary, destination)
++        _fsync_directory(destination.parent)
++    except BaseException:
++        with suppress(OSError):
++            temporary.unlink(missing_ok=True)
++        raise
++
++
++def _fsync_directory(directory: Path) -> None:
++    try:
++        descriptor = os.open(directory, os.O_RDONLY)
++    except OSError:
++        return
++    try:
++        os.fsync(descriptor)
++    except OSError:
++        pass
++    finally:
++        os.close(descriptor)
+diff --git a/src/csbox/lab/replay.py b/src/csbox/lab/replay.py
+index 6324712..5ed5e4e 100644
+--- a/src/csbox/lab/replay.py
++++ b/src/csbox/lab/replay.py
+@@ -1,28 +1,36 @@
+ from __future__ import annotations
+ 
+ import hashlib
+ import json
+ import math
+ import os
+ import tempfile
+ from collections.abc import Callable, Mapping
+ from contextlib import suppress
+-from dataclasses import dataclass
++from dataclasses import dataclass, replace
+ from pathlib import Path
+ from typing import Any, Final
+ 
+ from csbox.core.events import TerminalEvent, TerminalEventType, TerminalSize
+ from csbox.lab.recorder import AsciicastV3Reader, CastEvent, CastReadResult
+-from csbox.lab.screen import TerminalCell, TerminalCursor, TerminalEmulator, TerminalSnapshot
+-
+-CHECKPOINT_VERSION: Final = 1
++from csbox.lab.screen import (
++    TerminalAttributes,
++    TerminalCell,
++    TerminalCursor,
++    TerminalEmulator,
++    TerminalEmulatorState,
++    TerminalSavepoint,
++    TerminalSnapshot,
++)
++
++CHECKPOINT_VERSION: Final = 2
+ CHECKPOINT_SECONDS: Final = 5.0
+ CHECKPOINT_EVENTS: Final = 500
+ 
+ EmulatorFactory = Callable[..., TerminalEmulator]
+ 
+ 
+ class CheckpointStoreError(RuntimeError):
+     """A derived replay checkpoint index could not be persisted."""
+ 
+ 
+@@ -53,20 +61,23 @@ class CheckpointStore:
+         try:
+             value = json.loads(self.path.read_text(encoding="utf-8"))
+             if not isinstance(value, Mapping) or value.get("version") != CHECKPOINT_VERSION:
+                 return None
+             if value.get("cast") != _cast_fingerprint(source):
+                 return None
+             raw_checkpoints = value.get("checkpoints")
+             if not isinstance(raw_checkpoints, list):
+                 return None
+             checksum = value.get("checksum")
++            # This detects accidental corruption only.  It is not an
++            # authentication boundary against a local writer who can also
++            # recompute the checksum; structural/source checks remain below.
+             if not isinstance(checksum, str) or checksum != _checkpoint_checksum(raw_checkpoints):
+                 return None
+             checkpoints = tuple(_checkpoint_from_json(item) for item in raw_checkpoints)
+             if not checkpoints:
+                 return None
+             return checkpoints
+         except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+             return None
+ 
+     def save(self, cast_path: Path | str, checkpoints: tuple[Checkpoint, ...]) -> None:
+@@ -99,71 +110,72 @@ class ReplayService:
+     ) -> None:
+         self.cast_path = Path(cast_path)
+         self.checkpoint_store = checkpoint_store or CheckpointStore(
+             self.cast_path.with_name("checkpoints.json")
+         )
+         self._emulator_factory = emulator_factory
+         read_result = AsciicastV3Reader(self.cast_path).read()
+         self.warnings = read_result.warnings
+         self._columns, self._rows = _header_dimensions(read_result.header)
+         self._events = _timed_events(read_result.events)
+-        self.duration = self._events[-1].relative_time if self._events else 0.0
++        event_duration = self._events[-1].relative_time if self._events else 0.0
++        self.duration = event_duration + read_result.trailing_interval
+         checkpoints = self.checkpoint_store.load(self.cast_path)
+         if not _checkpoints_match(checkpoints, read_result, self._events):
+             checkpoints = self._build_checkpoints(read_result)
+             self.checkpoint_store.save(self.cast_path, checkpoints)
+         assert checkpoints is not None
+         self.checkpoints = checkpoints
+ 
+     def seek(self, relative_time: float) -> TerminalSnapshot:
+         if isinstance(relative_time, bool) or not isinstance(relative_time, int | float):
+             raise TypeError("relative_time must be a number")
+         if not math.isfinite(relative_time):
+             raise ValueError("relative_time must be finite")
+-        target = max(0.0, float(relative_time))
++        target = min(max(0.0, float(relative_time)), self.duration)
+         checkpoint = max(
+             (item for item in self.checkpoints if item.relative_time <= target),
+             key=lambda item: (item.relative_time, item.event_index),
+         )
+         emulator = self._emulator_factory(
+             columns=checkpoint.snapshot.columns,
+             rows=checkpoint.snapshot.rows,
+         )
+         emulator.restore(checkpoint.snapshot)
+         for event_index, replay_event in enumerate(
+             self._events[checkpoint.event_index :],
+             start=checkpoint.event_index,
+         ):
+             if replay_event.relative_time > target:
+                 break
+             event = _terminal_event(event_index, replay_event)
+             if event is not None:
+                 emulator.apply(event)
+-        return emulator.snapshot()
++        return replace(emulator.snapshot(), relative_time=target)
+ 
+     def _build_checkpoints(self, read_result: CastReadResult) -> tuple[Checkpoint, ...]:
+         emulator = self._emulator_factory(columns=self._columns, rows=self._rows)
+         checkpoints = [
+             Checkpoint(
+                 event_index=0,
+                 cast_offset=read_result.data_offset,
+                 relative_time=0.0,
+                 snapshot=emulator.snapshot(),
+             )
+         ]
+         last_checkpoint_time = 0.0
+         last_checkpoint_index = 0
+         for event_index, replay_event in enumerate(self._events, start=1):
+             event = _terminal_event(event_index - 1, replay_event)
+             if event is not None:
+                 emulator.apply(event)
+-            if (
++            if emulator.checkpoint_safe and (
+                 replay_event.relative_time - last_checkpoint_time >= CHECKPOINT_SECONDS
+                 or event_index - last_checkpoint_index >= CHECKPOINT_EVENTS
+             ):
+                 checkpoints.append(
+                     Checkpoint(
+                         event_index=event_index,
+                         cast_offset=replay_event.cast.cast_offset,
+                         relative_time=replay_event.relative_time,
+                         snapshot=emulator.snapshot(),
+                     )
+@@ -228,66 +240,56 @@ def _header_dimensions(header: Mapping[str, Any]) -> tuple[int, int]:
+     return columns, rows
+ 
+ 
+ def _checkpoints_match(
+     checkpoints: tuple[Checkpoint, ...] | None,
+     read_result: CastReadResult,
+     events: tuple[_ReplayEvent, ...],
+ ) -> bool:
+     if not checkpoints:
+         return False
+-    if tuple(checkpoint.event_index for checkpoint in checkpoints) != _checkpoint_indices(events):
+-        return False
+     previous_index = -1
+     previous_time = -1.0
+     for checkpoint in checkpoints:
+         if checkpoint.event_index <= previous_index or checkpoint.relative_time < previous_time:
+             return False
+         if checkpoint.event_index < 0 or checkpoint.event_index > len(events):
+             return False
+         expected_time = (
+             0.0 if checkpoint.event_index == 0 else events[checkpoint.event_index - 1].relative_time
+         )
+         expected_offset = (
+             read_result.data_offset
+             if checkpoint.event_index == 0
+             else events[checkpoint.event_index - 1].cast.cast_offset
+         )
+         if checkpoint.relative_time != expected_time or checkpoint.cast_offset != expected_offset:
+             return False
++        if checkpoint.event_index > 0 and not (
++            checkpoint.relative_time - previous_time >= CHECKPOINT_SECONDS
++            or checkpoint.event_index - previous_index >= CHECKPOINT_EVENTS
++        ):
++            return False
++        if checkpoint.snapshot.state is None:
++            return False
+         previous_index = checkpoint.event_index
+         previous_time = checkpoint.relative_time
+     initial = checkpoints[0]
+     columns, rows = _header_dimensions(read_result.header)
+     return (
+         initial.event_index == 0
+         and initial.relative_time == 0.0
+         and initial.snapshot.columns == columns
+         and initial.snapshot.rows == rows
+     )
+ 
+ 
+-def _checkpoint_indices(events: tuple[_ReplayEvent, ...]) -> tuple[int, ...]:
+-    indices = [0]
+-    last_checkpoint_time = 0.0
+-    last_checkpoint_index = 0
+-    for event_index, event in enumerate(events, start=1):
+-        if (
+-            event.relative_time - last_checkpoint_time >= CHECKPOINT_SECONDS
+-            or event_index - last_checkpoint_index >= CHECKPOINT_EVENTS
+-        ):
+-            indices.append(event_index)
+-            last_checkpoint_time = event.relative_time
+-            last_checkpoint_index = event_index
+-    return tuple(indices)
+-
+-
+ def _cast_fingerprint(path: Path) -> dict[str, int | str]:
+     data = path.read_bytes()
+     return {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+ 
+ 
+ def _checkpoint_checksum(checkpoints: list[object]) -> str:
+     canonical = json.dumps(
+         checkpoints,
+         ensure_ascii=False,
+         sort_keys=True,
+@@ -350,20 +352,21 @@ def _snapshot_to_json(snapshot: TerminalSnapshot) -> dict[str, Any]:
+                 for cell in row
+             ]
+             for row in snapshot.cells
+         ],
+         "cursor": {
+             "row": snapshot.cursor.row,
+             "column": snapshot.cursor.column,
+             "visible": snapshot.cursor.visible,
+         },
+         "relativeTime": snapshot.relative_time,
++        "state": None if snapshot.state is None else _state_to_json(snapshot.state),
+     }
+ 
+ 
+ def _snapshot_from_json(value: object) -> TerminalSnapshot:
+     if not isinstance(value, Mapping):
+         raise ValueError("snapshot must be an object")
+     rows = value.get("rows")
+     columns = value.get("columns")
+     raw_cells = value.get("cells")
+     cursor = value.get("cursor")
+@@ -398,27 +401,223 @@ def _snapshot_from_json(value: object) -> TerminalSnapshot:
+         or not math.isfinite(relative_time)
+         or relative_time < 0
+     ):
+         raise ValueError("invalid snapshot relative time")
+     snapshot = TerminalSnapshot(
+         rows=rows,
+         columns=columns,
+         cells=cells,
+         cursor=TerminalCursor(cursor_row, cursor_column, cursor_visible),
+         relative_time=float(relative_time),
++        state=_state_from_json(value.get("state"), columns=columns, rows=rows),
+     )
+     # Reuse the adapter's public validation boundary without importing a
+     # private helper: restore rejects malformed wide-cell geometry.
+     TerminalEmulator(columns=columns, rows=rows).restore(snapshot)
+     return snapshot
+ 
+ 
++def _state_to_json(state: TerminalEmulatorState) -> dict[str, Any]:
++    return {
++        "version": state.version,
++        "cursorRow": state.cursor_row,
++        "cursorColumn": state.cursor_column,
++        "cursorAttributes": _attributes_to_json(state.cursor_attributes),
++        "modes": list(state.modes),
++        "margins": None if state.margins is None else list(state.margins),
++        "tabstops": list(state.tabstops),
++        "charset": state.charset,
++        "g0Charset": state.g0_charset,
++        "g1Charset": state.g1_charset,
++        "savepoints": [_savepoint_to_json(savepoint) for savepoint in state.savepoints],
++        "savedColumns": state.saved_columns,
++        "title": state.title,
++        "iconName": state.icon_name,
++        "useUtf8": state.use_utf8,
++    }
++
++
++def _state_from_json(
++    value: object,
++    *,
++    columns: int,
++    rows: int,
++) -> TerminalEmulatorState | None:
++    if value is None:
++        return None
++    if not isinstance(value, Mapping) or value.get("version") != 1:
++        raise ValueError("invalid terminal emulator state version")
++    cursor_row = _required_int(value, "cursorRow")
++    cursor_column = _required_int(value, "cursorColumn")
++    modes = _int_tuple(value.get("modes"), "terminal modes")
++    tabstops = _int_tuple(value.get("tabstops"), "terminal tabstops")
++    margins_value = value.get("margins")
++    margins: tuple[int, int] | None
++    if margins_value is None:
++        margins = None
++    elif (
++        isinstance(margins_value, list)
++        and len(margins_value) == 2
++        and all(type(item) is int for item in margins_value)
++    ):
++        margins = (margins_value[0], margins_value[1])
++    else:
++        raise ValueError("invalid terminal margins")
++    charset = _required_int(value, "charset")
++    saved_columns = value.get("savedColumns")
++    if saved_columns is not None and type(saved_columns) is not int:
++        raise ValueError("invalid terminal saved columns")
++    g0_charset = value.get("g0Charset")
++    g1_charset = value.get("g1Charset")
++    title = value.get("title")
++    icon_name = value.get("iconName")
++    use_utf8 = value.get("useUtf8")
++    if not all(isinstance(item, str) for item in (g0_charset, g1_charset, title, icon_name)):
++        raise ValueError("invalid terminal string state")
++    if type(use_utf8) is not bool:
++        raise ValueError("invalid terminal decoder state")
++    raw_savepoints = value.get("savepoints")
++    if not isinstance(raw_savepoints, list):
++        raise ValueError("invalid terminal savepoints")
++    state = TerminalEmulatorState(
++        version=1,
++        cursor_row=cursor_row,
++        cursor_column=cursor_column,
++        cursor_attributes=_attributes_from_json(value.get("cursorAttributes")),
++        modes=modes,
++        margins=margins,
++        tabstops=tabstops,
++        charset=charset,
++        g0_charset=g0_charset,
++        g1_charset=g1_charset,
++        savepoints=tuple(_savepoint_from_json(item) for item in raw_savepoints),
++        saved_columns=saved_columns,
++        title=title,
++        icon_name=icon_name,
++        use_utf8=use_utf8,
++    )
++    # The adapter performs bounds and semantic validation against the grid.
++    TerminalEmulator(columns=columns, rows=rows).restore(
++        TerminalSnapshot(
++            rows=rows,
++            columns=columns,
++            cells=tuple(tuple(TerminalCell() for _ in range(columns)) for _ in range(rows)),
++            cursor=TerminalCursor(),
++            state=state,
++        )
++    )
++    return state
++
++
++def _attributes_to_json(attributes: TerminalAttributes) -> dict[str, Any]:
++    return {
++        "foreground": attributes.foreground,
++        "background": attributes.background,
++        "bold": attributes.bold,
++        "italic": attributes.italic,
++        "underline": attributes.underline,
++        "strikethrough": attributes.strikethrough,
++        "reverse": attributes.reverse,
++        "blink": attributes.blink,
++    }
++
++
++def _attributes_from_json(value: object) -> TerminalAttributes:
++    if not isinstance(value, Mapping):
++        raise ValueError("invalid terminal attributes")
++    foreground = value.get("foreground")
++    background = value.get("background")
++    flags = [
++        value.get("bold"),
++        value.get("italic"),
++        value.get("underline"),
++        value.get("strikethrough"),
++        value.get("reverse"),
++        value.get("blink"),
++    ]
++    if (
++        not isinstance(foreground, str)
++        or not isinstance(background, str)
++        or any(type(flag) is not bool for flag in flags)
++    ):
++        raise ValueError("invalid terminal attributes")
++    return TerminalAttributes(
++        foreground=foreground,
++        background=background,
++        bold=flags[0],
++        italic=flags[1],
++        underline=flags[2],
++        strikethrough=flags[3],
++        reverse=flags[4],
++        blink=flags[5],
++    )
++
++
++def _savepoint_to_json(savepoint: TerminalSavepoint) -> dict[str, Any]:
++    return {
++        "row": savepoint.row,
++        "column": savepoint.column,
++        "visible": savepoint.visible,
++        "attributes": _attributes_to_json(savepoint.attributes),
++        "g0Charset": savepoint.g0_charset,
++        "g1Charset": savepoint.g1_charset,
++        "charset": savepoint.charset,
++        "origin": savepoint.origin,
++        "wrap": savepoint.wrap,
++    }
++
++
++def _savepoint_from_json(value: object) -> TerminalSavepoint:
++    if not isinstance(value, Mapping):
++        raise ValueError("invalid terminal savepoint")
++    visible = value.get("visible")
++    origin = value.get("origin")
++    wrap = value.get("wrap")
++    g0_charset = value.get("g0Charset")
++    g1_charset = value.get("g1Charset")
++    if (
++        type(visible) is not bool
++        or type(origin) is not bool
++        or type(wrap) is not bool
++        or not isinstance(g0_charset, str)
++        or not isinstance(g1_charset, str)
++    ):
++        raise ValueError("invalid terminal savepoint")
++    return TerminalSavepoint(
++        row=_required_int(value, "row"),
++        column=_required_int(value, "column"),
++        visible=visible,
++        attributes=_attributes_from_json(value.get("attributes")),
++        g0_charset=g0_charset,
++        g1_charset=g1_charset,
++        charset=_required_int(value, "charset"),
++        origin=origin,
++        wrap=wrap,
++    )
++
++
++def _required_int(value: Mapping[str, object], key: str) -> int:
++    item = value.get(key)
++    if type(item) is not int:
++        raise ValueError(f"invalid integer field {key}")
++    return item
++
++
++def _int_tuple(value: object, label: str) -> tuple[int, ...]:
++    if not isinstance(value, list) or any(type(item) is not int for item in value):
++        raise ValueError(f"invalid {label}")
++    result = tuple(value)
++    if result != tuple(sorted(set(result))):
++        raise ValueError(f"invalid {label}")
++    return result
++
++
+ def _cell_from_json(value: object) -> TerminalCell:
+     if not isinstance(value, Mapping):
+         raise ValueError("cell must be an object")
+     character = value.get("character")
+     width = value.get("width")
+     foreground = value.get("foreground")
+     background = value.get("background")
+     flags = [
+         value.get("bold"),
+         value.get("italic"),
+diff --git a/src/csbox/lab/screen.py b/src/csbox/lab/screen.py
+index 177b60b..4dab43f 100644
+--- a/src/csbox/lab/screen.py
++++ b/src/csbox/lab/screen.py
+@@ -25,140 +25,334 @@ class TerminalCell:
+     reverse: bool = False
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+ class TerminalCursor:
+     row: int = 0
+     column: int = 0
+     visible: bool = True
+ 
+ 
++@dataclass(frozen=True, slots=True)
++class TerminalAttributes:
++    foreground: str = "default"
++    background: str = "default"
++    bold: bool = False
++    italic: bool = False
++    underline: bool = False
++    strikethrough: bool = False
++    reverse: bool = False
++    blink: bool = False
++
++
++@dataclass(frozen=True, slots=True)
++class TerminalSavepoint:
++    row: int
++    column: int
++    visible: bool
++    attributes: TerminalAttributes
++    g0_charset: str
++    g1_charset: str
++    charset: int
++    origin: bool
++    wrap: bool
++
++
++@dataclass(frozen=True, slots=True)
++class TerminalEmulatorState:
++    """Versioned, pyte-independent state needed to continue a snapshot."""
++
++    version: int
++    cursor_row: int
++    cursor_column: int
++    cursor_attributes: TerminalAttributes
++    modes: tuple[int, ...]
++    margins: tuple[int, int] | None
++    tabstops: tuple[int, ...]
++    charset: int
++    g0_charset: str
++    g1_charset: str
++    savepoints: tuple[TerminalSavepoint, ...]
++    saved_columns: int | None
++    title: str
++    icon_name: str
++    use_utf8: bool
++
++
+ @dataclass(frozen=True, slots=True)
+ class TerminalSnapshot:
+     rows: int
+     columns: int
+     cells: tuple[tuple[TerminalCell, ...], ...]
+     cursor: TerminalCursor
+     relative_time: float = 0.0
++    state: TerminalEmulatorState | None = None
+ 
+ 
+ class TerminalEmulator:
+     """Keep terminal state while exposing only immutable CSBox values."""
+ 
+     def __init__(self, *, columns: int, rows: int) -> None:
+         if columns <= 0 or rows <= 0:
+             raise ValueError("terminal dimensions must be positive")
+         self._screen = _CSBoxScreen(columns, rows)
+-        self._stream = pyte.ByteStream(self._screen)
++        self._stream = _CSBoxByteStream(self._screen)
+         self._relative_time = 0.0
+ 
+     @property
+     def columns(self) -> int:
+         return self._screen.columns
+ 
+     @property
+     def rows(self) -> int:
+         return self._screen.lines
+ 
++    @property
++    def checkpoint_safe(self) -> bool:
++        """Whether parser and UTF-8 decoder are between complete sequences."""
++
++        return self._stream.checkpoint_safe
++
+     def apply(self, event: TerminalEvent) -> None:
+         if not isinstance(event, TerminalEvent):
+             raise TypeError("event must be a TerminalEvent")
+         if event.type is TerminalEventType.OUTPUT:
+             assert isinstance(event.payload, bytes)
+             self._stream.feed(event.payload)
+-            self._relative_time = event.relative_time
+         elif event.type is TerminalEventType.RESIZE:
+             assert isinstance(event.payload, TerminalSize)
+             self._screen.resize(lines=event.payload.rows, columns=event.payload.columns)
+-            self._relative_time = event.relative_time
++        self._relative_time = event.relative_time
+ 
+     handle = apply
+     __call__ = apply
+ 
+     def snapshot(self) -> TerminalSnapshot:
+-        return _snapshot_from_pyte(self._screen, self._relative_time)
++        return _snapshot_from_pyte(
++            self._screen,
++            self._relative_time,
++            _state_from_pyte(self._screen, self._stream),
++        )
+ 
+     def restore(self, snapshot: TerminalSnapshot) -> None:
+         """Replace emulator state with an immutable domain snapshot."""
+ 
+         _validate_snapshot(snapshot)
+         screen = _CSBoxScreen(snapshot.columns, snapshot.rows)
++        if snapshot.state is not None:
++            _restore_screen_state(screen, snapshot.state)
+         for row_index, row in enumerate(snapshot.cells):
+             for column_index, cell in enumerate(row):
+                 screen.buffer[row_index][column_index] = screen.default_char._replace(
+                     data=cell.character,
+                     fg=cell.foreground,
+                     bg=cell.background,
+                     bold=cell.bold,
+                     italics=cell.italic,
+                     underscore=cell.underline,
+                     strikethrough=cell.strikethrough,
+                     reverse=cell.reverse,
+                 )
+-        screen.cursor.y = snapshot.cursor.row
+-        screen.cursor.x = snapshot.cursor.column
++        screen.cursor.y = (
++            snapshot.state.cursor_row if snapshot.state is not None else snapshot.cursor.row
++        )
++        screen.cursor.x = (
++            snapshot.state.cursor_column if snapshot.state is not None else snapshot.cursor.column
++        )
+         screen.cursor.hidden = not snapshot.cursor.visible
+         screen.dirty = set(range(snapshot.rows))
+         self._screen = screen
+-        self._stream = pyte.ByteStream(screen)
++        self._stream = _CSBoxByteStream(screen)
++        if snapshot.state is not None:
++            self._stream.use_utf8 = snapshot.state.use_utf8
+         self._relative_time = snapshot.relative_time
+ 
+ 
+-def _snapshot_from_pyte(screen: pyte.Screen, relative_time: float) -> TerminalSnapshot:
++def _snapshot_from_pyte(
++    screen: pyte.Screen,
++    relative_time: float,
++    state: TerminalEmulatorState | None = None,
++) -> TerminalSnapshot:
+     """The one boundary where pyte quirks become stable domain values."""
+ 
+     rows = screen.lines
+     columns = screen.columns
+     cells = tuple(_row_from_pyte(screen, row, columns) for row in range(rows))
+     # pyte can temporarily place x one cell beyond the edge after drawing a
+     # double-width glyph in the final column. Do not leak that internal state.
+     cursor = TerminalCursor(
+         row=min(max(screen.cursor.y, 0), rows - 1),
+         column=min(max(screen.cursor.x, 0), columns - 1),
+         visible=not screen.cursor.hidden,
+     )
+     return TerminalSnapshot(
+         rows=rows,
+         columns=columns,
+         cells=cells,
+         cursor=cursor,
+         relative_time=relative_time,
++        state=state,
+     )
+ 
+ 
+ def _validate_snapshot(snapshot: TerminalSnapshot) -> None:
+     if not isinstance(snapshot, TerminalSnapshot):
+         raise TypeError("snapshot must be a TerminalSnapshot")
+     if snapshot.rows <= 0 or snapshot.columns <= 0:
+         raise ValueError("snapshot dimensions must be positive")
+     if len(snapshot.cells) != snapshot.rows or any(
+         len(row) != snapshot.columns for row in snapshot.cells
+     ):
+         raise ValueError("snapshot cell geometry does not match its dimensions")
+     if not 0 <= snapshot.cursor.row < snapshot.rows:
+         raise ValueError("snapshot cursor row is outside the terminal")
+     if not 0 <= snapshot.cursor.column < snapshot.columns:
+         raise ValueError("snapshot cursor column is outside the terminal")
++    if snapshot.state is not None:
++        _validate_emulator_state(snapshot.state, snapshot.columns, snapshot.rows)
+     for row in snapshot.cells:
+         for column, cell in enumerate(row):
+             if cell.width not in {0, 1, 2}:
+                 raise ValueError("snapshot contains an invalid cell width")
+             if cell.width == 2 and (
+                 column + 1 >= snapshot.columns
+                 or row[column + 1].width != 0
+                 or row[column + 1].character != ""
+             ):
+                 raise ValueError("snapshot contains an incomplete wide cell")
+             if cell.width == 0 and (column == 0 or row[column - 1].width != 2):
+                 raise ValueError("snapshot contains an orphan continuation cell")
+ 
+ 
++def _attributes_from_pyte(character: Any) -> TerminalAttributes:
++    return TerminalAttributes(
++        foreground=str(character.fg),
++        background=str(character.bg),
++        bold=bool(character.bold),
++        italic=bool(character.italics),
++        underline=bool(character.underscore),
++        strikethrough=bool(character.strikethrough),
++        reverse=bool(character.reverse),
++        blink=bool(character.blink),
++    )
++
++
++def _attributes_to_pyte(attributes: TerminalAttributes, *, data: str = " ") -> Any:
++    return pyte.screens.Char(
++        data=data,
++        fg=attributes.foreground,
++        bg=attributes.background,
++        bold=attributes.bold,
++        italics=attributes.italic,
++        underscore=attributes.underline,
++        strikethrough=attributes.strikethrough,
++        reverse=attributes.reverse,
++        blink=attributes.blink,
++    )
++
++
++def _state_from_pyte(
++    screen: pyte.Screen,
++    stream: _CSBoxByteStream,
++) -> TerminalEmulatorState:
++    savepoints = tuple(
++        TerminalSavepoint(
++            row=savepoint.cursor.y,
++            column=savepoint.cursor.x,
++            visible=not savepoint.cursor.hidden,
++            attributes=_attributes_from_pyte(savepoint.cursor.attrs),
++            g0_charset=str(savepoint.g0_charset),
++            g1_charset=str(savepoint.g1_charset),
++            charset=int(savepoint.charset),
++            origin=bool(savepoint.origin),
++            wrap=bool(savepoint.wrap),
++        )
++        for savepoint in screen.savepoints
++    )
++    margins = None if screen.margins is None else tuple(screen.margins)
++    return TerminalEmulatorState(
++        version=1,
++        cursor_row=screen.cursor.y,
++        cursor_column=screen.cursor.x,
++        cursor_attributes=_attributes_from_pyte(screen.cursor.attrs),
++        modes=tuple(sorted(int(mode) for mode in screen.mode)),
++        margins=margins,
++        tabstops=tuple(sorted(int(tabstop) for tabstop in screen.tabstops)),
++        charset=int(screen.charset),
++        g0_charset=str(screen.g0_charset),
++        g1_charset=str(screen.g1_charset),
++        savepoints=savepoints,
++        saved_columns=screen.saved_columns,
++        title=str(screen.title),
++        icon_name=str(screen.icon_name),
++        use_utf8=bool(stream.use_utf8),
++    )
++
++
++def _restore_screen_state(screen: pyte.Screen, state: TerminalEmulatorState) -> None:
++    _validate_emulator_state(state, screen.columns, screen.lines)
++    screen.mode = set(state.modes)
++    screen.margins = None if state.margins is None else pyte.screens.Margins(*state.margins)
++    screen.tabstops = set(state.tabstops)
++    screen.charset = state.charset
++    screen.g0_charset = state.g0_charset
++    screen.g1_charset = state.g1_charset
++    screen.saved_columns = state.saved_columns
++    screen.title = state.title
++    screen.icon_name = state.icon_name
++    screen.cursor.attrs = _attributes_to_pyte(state.cursor_attributes)
++    screen.savepoints = []
++    for saved in state.savepoints:
++        cursor = pyte.screens.Cursor(
++            saved.column,
++            saved.row,
++            _attributes_to_pyte(saved.attributes),
++        )
++        cursor.hidden = not saved.visible
++        screen.savepoints.append(
++            pyte.screens.Savepoint(
++                cursor,
++                saved.g0_charset,
++                saved.g1_charset,
++                saved.charset,
++                saved.origin,
++                saved.wrap,
++            )
++        )
++
++
++def _validate_emulator_state(
++    state: TerminalEmulatorState,
++    columns: int,
++    rows: int,
++) -> None:
++    if not isinstance(state, TerminalEmulatorState) or state.version != 1:
++        raise ValueError("unsupported terminal emulator state")
++    if not 0 <= state.cursor_row < rows or not 0 <= state.cursor_column <= columns:
++        raise ValueError("terminal state cursor is outside the terminal")
++    if state.margins is not None and (
++        len(state.margins) != 2 or not 0 <= state.margins[0] < state.margins[1] < rows
++    ):
++        raise ValueError("terminal state margins are invalid")
++    if any(tabstop < 0 or tabstop > columns for tabstop in state.tabstops):
++        raise ValueError("terminal state tab stop is outside the terminal")
++    if state.charset not in {0, 1}:
++        raise ValueError("terminal state charset is invalid")
++    if state.saved_columns is not None and state.saved_columns <= 0:
++        raise ValueError("terminal state saved columns are invalid")
++    for savepoint in state.savepoints:
++        if not 0 <= savepoint.row < rows or not 0 <= savepoint.column <= columns:
++            raise ValueError("terminal savepoint is outside the terminal")
++        if savepoint.charset not in {0, 1}:
++            raise ValueError("terminal savepoint charset is invalid")
++
++
+ def _cell_from_pyte(character: Any) -> TerminalCell:
+     # pyte uses an empty character for the continuation cell of a wide glyph.
+     data = str(character.data)
+     width = 0 if data == "" else display_width(data)
+     return TerminalCell(
+         character=data,
+         width=width,
+         foreground=str(character.fg),
+         background=str(character.bg),
+         bold=bool(character.bold),
+@@ -183,20 +377,29 @@ def _row_from_pyte(screen: pyte.Screen, row: int, columns: int) -> tuple[Termina
+                 cells[column] = replace(cell, character="")
+     for column, cell in enumerate(cells):
+         if cell.width == 2:
+             if column + 1 >= columns or cells[column + 1].width != 0:
+                 cells[column] = TerminalCell()
+         elif cell.width == 0 and (column == 0 or cells[column - 1].width != 2):
+             cells[column] = TerminalCell()
+     return tuple(cells)
+ 
+ 
++class _CSBoxByteStream(pyte.ByteStream):
++    """Keep parser boundary checks inside the pyte adapter."""
++
++    @property
++    def checkpoint_safe(self) -> bool:
++        pending_bytes, _ = self.utf8_decoder.getstate()
++        return self._taking_plain_text is True and not pending_bytes
++
++
+ class _CSBoxScreen(pyte.Screen):
+     """Contain pyte width edge-case patches behind the domain adapter."""
+ 
+     def draw(self, data: str) -> None:
+         for character in data:
+             character_width = wcwidth(character)
+             if (
+                 character_width == 2
+                 and self.cursor.x == self.columns - 1
+                 and modes.DECAWM in self.mode
+diff --git a/tests/test_lab_export.py b/tests/test_lab_export.py
+index de78035..cb3f280 100644
+--- a/tests/test_lab_export.py
++++ b/tests/test_lab_export.py
+@@ -1,14 +1,16 @@
+ from __future__ import annotations
+ 
++import json
+ from datetime import UTC, datetime
+ from pathlib import Path
++from typing import Any, cast
+ 
+ import pytest
+ 
+ from csbox.core.events import TerminalEvent, TerminalEventType
+ from csbox.lab.captures import CaptureStore
+ from csbox.lab.exporter import LabExporter, LabExportError
+ from csbox.lab.fonts import FontResolver
+ from csbox.lab.models import SessionPaths
+ from csbox.lab.renderer import RenderTheme, TerminalEvidenceRenderer
+ from csbox.lab.screen import TerminalEmulator, TerminalSnapshot
+@@ -109,26 +111,27 @@ def test_export_writes_ordered_safe_pngs_cast_commands_and_stable_chinese_markdo
+     assert result.cast.read_bytes() == session_with_captures.cast.read_bytes()
+     markdown = result.markdown.read_text(encoding="utf-8")
+     assert markdown.startswith(
+         "## 实验记录\n\n"
+         "### 1. 查看网络接口\n\n"
+         "时间：\n"
+         "14:23:41\n\n"
+         "结果：\n\n"
+         "![实验记录](evidence/01-查看网络接口.png)\n"
+     )
+-    assert "### 2. ../../课程/实验二:*?" in markdown
++    assert r"### 2. ../../课程/实验二:\*?" in markdown
+     assert "![实验记录](evidence/02-课程-实验二.png)" in markdown
+     assert "命令：" not in markdown
+     assert result.commands is not None
+     assert result.commands.read_text(encoding="utf-8") == "ip addr\n"
+     assert "unknown" not in result.commands.read_text(encoding="utf-8").lower()
++    assert any("metadata" in warning for warning in result.warnings)
+     assert not (tmp_path / "课程").exists()
+ 
+ 
+ def test_export_omits_commands_file_when_every_capture_command_is_unknown(
+     tmp_path: Path, exporter: LabExporter
+ ) -> None:
+     paths = SessionPaths(tmp_path / "session")
+     paths.root.mkdir()
+     paths.cast.write_bytes(FIXTURE_CAST.read_bytes())
+     CaptureStore(paths.captures).create_capture(
+@@ -154,10 +157,184 @@ def test_export_refuses_existing_destination_without_force_and_force_is_explicit
+     marker = destination / "keep.txt"
+     marker.write_text("user data", encoding="utf-8")
+ 
+     with pytest.raises(LabExportError, match="已存在|覆盖"):
+         exporter.export(session_with_captures, destination)
+ 
+     assert marker.read_text(encoding="utf-8") == "user data"
+     forced = exporter.export(session_with_captures, destination, force=True)
+     assert forced.markdown.is_file()
+     assert marker.read_text(encoding="utf-8") == "user data"
++
++
++def test_export_escapes_markdown_html_and_percent_encodes_reserved_link_characters(
++    tmp_path: Path, exporter: LabExporter
++) -> None:
++    paths = SessionPaths(tmp_path / "session")
++    paths.root.mkdir()
++    paths.cast.write_bytes(FIXTURE_CAST.read_bytes())
++    CaptureStore(paths.captures).create_capture(
++        rendered_snapshot("done", 1.0),
++        cwd=tmp_path,
++        title="C# (测试)% <b>*粗*</b> [链接](x)",
++    )
++
++    result = exporter.export(paths, tmp_path / "export")
++    markdown = result.markdown.read_text(encoding="utf-8")
++
++    assert "<b>" not in markdown
++    assert "&lt;b&gt;" in markdown
++    assert r"C\# \(测试\)\%" in markdown
++    assert r"\*粗\*" in markdown
++    assert r"\[链接\]\(x\)" in markdown
++    image_link = markdown.split("![实验记录](", maxsplit=1)[1].split(")", maxsplit=1)[0]
++    assert "%23" in image_link
++    assert "%28" in image_link
++    assert "%29" in image_link
++    assert "%25" in image_link
++    assert "测试" in image_link
++
++
++def test_export_limits_utf8_and_windows_component_length_with_collision_hash(
++    tmp_path: Path, exporter: LabExporter
++) -> None:
++    paths = SessionPaths(tmp_path / "session")
++    paths.root.mkdir()
++    paths.cast.write_bytes(FIXTURE_CAST.read_bytes())
++    store = CaptureStore(paths.captures)
++    common = "实验😀" * 100
++    for suffix in ("甲", "乙"):
++        store.create_capture(
++            rendered_snapshot("done", 1.0),
++            cwd=tmp_path,
++            title=common + suffix,
++        )
++
++    result = exporter.export(paths, tmp_path / "export")
++
++    assert len(result.evidence) == 2
++    assert result.evidence[0].name != result.evidence[1].name
++    for image in result.evidence:
++        assert len(image.name.encode("utf-8")) <= 240
++        assert len(image.name.encode("utf-16-le")) // 2 <= 240
++        assert image.is_file()
++
++
++def test_export_rejects_control_and_bidi_commands_instead_of_emitting_terminal_actions(
++    tmp_path: Path, exporter: LabExporter
++) -> None:
++    paths = SessionPaths(tmp_path / "session")
++    paths.root.mkdir()
++    paths.cast.write_bytes(FIXTURE_CAST.read_bytes())
++    store = CaptureStore(paths.captures)
++    commands = (
++        "ip addr",
++        "printf '\x1b[2J'",
++        "printf '\x1b]8;;https://example.invalid\x07link\x1b]8;;\x07'",
++        "echo ab\bcd",
++        "echo safe\u202egnp.exe",
++    )
++    for index, command in enumerate(commands):
++        store.create_capture(
++            rendered_snapshot(str(index), float(index)),
++            cwd=tmp_path,
++            command=command,
++            title=f"记录 {index}",
++        )
++
++    result = exporter.export(paths, tmp_path / "export")
++
++    assert result.commands is not None
++    assert result.commands.read_text(encoding="utf-8") == "ip addr\n"
++
++
++def test_export_rejects_session_sidecar_symlinks_before_reading_them(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    paths = SessionPaths(tmp_path / "session")
++    paths.root.mkdir()
++    external = tmp_path / "outside-sensitive-placeholder.cast"
++    external.write_text("fake private content", encoding="utf-8")
++    try:
++        paths.cast.symlink_to(external)
++    except OSError as exc:
++        pytest.skip(f"symlinks are unavailable: {exc}")
++
++    class UnexpectedRenderer:
++        def render(self, *args: object, **kwargs: object) -> Path:
++            raise AssertionError("renderer must not run for an unsafe session")
++
++    def unexpected_copy(*args: object, **kwargs: object) -> None:
++        raise AssertionError("unsafe session.cast must not be copied")
++
++    monkeypatch.setattr("csbox.lab.exporter.shutil.copyfile", unexpected_copy)
++    exporter = LabExporter(cast(Any, UnexpectedRenderer()))
++    destination = tmp_path / "export"
++
++    with pytest.raises(LabExportError, match="符号链接|实验目录"):
++        exporter.export(paths, destination)
++
++    assert external.read_text(encoding="utf-8") == "fake private content"
++    assert not destination.exists()
++
++
++def test_force_export_removes_only_stale_generated_evidence(
++    tmp_path: Path,
++    session_with_captures: SessionPaths,
++    exporter: LabExporter,
++) -> None:
++    destination = tmp_path / "export"
++    first = exporter.export(session_with_captures, destination)
++    stale = first.evidence[1]
++    user_png = destination / "evidence" / "notes.png"
++    user_png.write_bytes(b"user image")
++    user_file = destination / "evidence" / "keep.txt"
++    user_file.write_text("keep", encoding="utf-8")
++    assert CaptureStore(session_with_captures.captures).delete("capture-2")
++
++    second = exporter.export(session_with_captures, destination, force=True)
++
++    assert [path.name for path in second.evidence] == ["01-查看网络接口.png"]
++    assert not stale.exists()
++    assert user_png.read_bytes() == b"user image"
++    assert user_file.read_text(encoding="utf-8") == "keep"
++
++
++def test_export_uses_session_start_plus_capture_offset_and_warns_on_bad_metadata(
++    tmp_path: Path, exporter: LabExporter
++) -> None:
++    paths = SessionPaths(tmp_path / "session")
++    paths.root.mkdir()
++    paths.cast.write_bytes(FIXTURE_CAST.read_bytes())
++    CaptureStore(
++        paths.captures,
++        clock=lambda: datetime(2026, 8, 10, 20, 0, tzinfo=UTC),
++    ).create_capture(
++        rendered_snapshot("done", 90.0),
++        cwd=tmp_path,
++        title="时间证据",
++    )
++    metadata = {
++        "id": "session-1",
++        "name": "实验",
++        "status": "completed",
++        "startedAt": "2026-08-10T14:23:00Z",
++        "endedAt": "2026-08-10T14:30:00Z",
++        "platform": "linux",
++        "shell": "bash",
++        "shellVersion": "5.2",
++        "initialRows": 24,
++        "initialColumns": 80,
++        "cwd": str(tmp_path),
++        "csboxVersion": "0.1.0",
++    }
++    paths.metadata.write_text(json.dumps(metadata), encoding="utf-8")
++
++    reliable = exporter.export(paths, tmp_path / "reliable")
++
++    assert "14:24:30" in reliable.markdown.read_text(encoding="utf-8")
++    assert not any("metadata" in warning for warning in reliable.warnings)
++
++    paths.metadata.write_text("{broken", encoding="utf-8")
++    fallback = exporter.export(paths, tmp_path / "fallback")
++    assert "20:00:00" in fallback.markdown.read_text(encoding="utf-8")
++    assert any("metadata" in warning for warning in fallback.warnings)
+diff --git a/tests/test_renderer.py b/tests/test_renderer.py
+index 107ea32..04470a3 100644
+--- a/tests/test_renderer.py
++++ b/tests/test_renderer.py
+@@ -187,25 +187,105 @@ def test_reverse_swaps_cell_colors_and_underline_uses_cell_span(
+         (
+             renderer.padding,
+             renderer.padding + renderer.cell_height - 2,
+             renderer.padding + renderer.cell_width - 1,
+             renderer.padding + renderer.cell_height - 2,
+         ),
+         theme.resolve_color("blue"),
+     )
+ 
+ 
+-def test_font_resolver_is_deterministic_and_requires_real_cjk_coverage(
++def test_font_resolver_is_deterministic(
+     font_paths: tuple[Path, Path],
+ ) -> None:
+     ascii_font, cjk_font = font_paths
+     resolver = FontResolver(explicit=ascii_font, candidates=(cjk_font,))
+ 
+     first = resolver.resolve()
+     second = resolver.resolve()
+ 
+     assert first == second
+     assert first.ascii == ascii_font
+     assert first.cjk == cjk_font
+ 
++
++def test_font_resolver_missing_cjk_error_does_not_depend_on_system_cjk_font(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    dummy_font = tmp_path / "ascii-only.ttf"
++    dummy_font.write_bytes(b"test double boundary")
++    monkeypatch.setattr("csbox.lab.fonts._is_ascii_monospace", lambda path: True)
++    monkeypatch.setattr("csbox.lab.fonts._has_cjk_coverage", lambda path: False)
++
+     with pytest.raises(FontResolutionError, match="中文.*字体|字体.*中文"):
+-        FontResolver(candidates=(ascii_font,)).resolve()
++        FontResolver(candidates=(dummy_font,)).resolve()
++
++
++@pytest.mark.parametrize(
++    "missing_glyph", ("\U00020000", "\ue000"), ids=("extension-b", "private-use")
++)
++def test_renderer_rejects_actual_snapshot_glyph_missing_from_all_candidates(
++    tmp_path: Path, font_paths: tuple[Path, Path], missing_glyph: str
++) -> None:
++    terminal = snapshot(
++        (
++            TerminalCell(character=missing_glyph, width=2),
++            TerminalCell(character="", width=0),
++        )
++    )
++    renderer = TerminalEvidenceRenderer(FontResolver(candidates=font_paths))
++    destination = tmp_path / "missing-extension-b.png"
++
++    with pytest.raises(FontResolutionError, match="字符|字形|字体"):
++        renderer.render(terminal, destination, RenderTheme.dark())
++
++    assert not destination.exists()
++
++
++def test_renderer_atomically_preserves_existing_png_when_save_fails(
++    tmp_path: Path,
++    font_paths: tuple[Path, Path],
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    terminal = snapshot((TerminalCell(character="A"),))
++    renderer = TerminalEvidenceRenderer(FontResolver(candidates=font_paths))
++    destination = tmp_path / "evidence.png"
++    destination.write_bytes(b"previous png")
++
++    def fail_save(image: Image.Image, target: str | Path, *args: object, **kwargs: object) -> None:
++        Path(target).write_bytes(b"partial png")
++        raise OSError("disk full")
++
++    monkeypatch.setattr(Image.Image, "save", fail_save)
++
++    with pytest.raises(OSError, match="disk full"):
++        renderer.render(terminal, destination, RenderTheme.dark())
++
++    assert destination.read_bytes() == b"previous png"
++    assert not list(tmp_path.glob("*.tmp"))
++
++
++def test_renderer_marks_bold_text_without_changing_its_cell_origin(
++    tmp_path: Path,
++    font_paths: tuple[Path, Path],
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    terminal = snapshot((TerminalCell(character="B", bold=True),))
++    renderer = TerminalEvidenceRenderer(FontResolver(candidates=font_paths), padding=4)
++    calls: list[tuple[tuple[float, float], int]] = []
++    original_text = ImageDraw.ImageDraw.text
++
++    def observe_text(
++        draw: ImageDraw.ImageDraw,
++        xy: tuple[float, float],
++        text: str,
++        *args: object,
++        **kwargs: object,
++    ) -> None:
++        calls.append((xy, int(kwargs.get("stroke_width", 0))))
++        original_text(draw, xy, text, *args, **kwargs)
++
++    monkeypatch.setattr(ImageDraw.ImageDraw, "text", observe_text)
++
++    renderer.render(terminal, tmp_path / "bold.png", RenderTheme.dark())
++
++    assert calls == [((renderer.padding, renderer.padding), 1)]
+diff --git a/tests/test_replay.py b/tests/test_replay.py
+index a1ea63c..ba44a3b 100644
+--- a/tests/test_replay.py
++++ b/tests/test_replay.py
+@@ -10,20 +10,42 @@ from csbox.lab.recorder import AsciicastV3Reader
+ from csbox.lab.replay import CHECKPOINT_VERSION, CheckpointStore, ReplayService
+ from csbox.lab.screen import TerminalEmulator, TerminalSnapshot
+ 
+ FIXTURES = Path(__file__).parent / "fixtures" / "sessions"
+ 
+ 
+ def row_text(snapshot: TerminalSnapshot, row: int) -> str:
+     return "".join(cell.character for cell in snapshot.cells[row] if cell.width != 0)
+ 
+ 
++def write_cast(
++    path: Path,
++    events: list[tuple[float, str, str]],
++    *,
++    columns: int = 8,
++    rows: int = 4,
++) -> None:
++    lines = [json.dumps({"version": 3, "term": {"cols": columns, "rows": rows}})]
++    lines.extend(json.dumps(list(item), ensure_ascii=False) for item in events)
++    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
++
++
++def output_event(sequence: int, relative_time: float, data: str) -> TerminalEvent:
++    return TerminalEvent(
++        sequence=sequence,
++        monotonic_time=relative_time,
++        relative_time=relative_time,
++        type=TerminalEventType.OUTPUT,
++        payload=data.encode(),
++    )
++
++
+ def test_seek_is_deterministic_across_boundaries_resize_exit_and_backward_seek(
+     tmp_path: Path,
+ ) -> None:
+     cast_path = tmp_path / "mixed.cast"
+     cast_path.write_bytes((FIXTURES / "mixed.cast").read_bytes())
+     service = ReplayService(
+         cast_path,
+         checkpoint_store=CheckpointStore(tmp_path / "checkpoints.json"),
+     )
+ 
+@@ -35,37 +57,121 @@ def test_seek_is_deterministic_across_boundaries_resize_exit_and_backward_seek(
+ 
+     assert (at_zero.rows, at_zero.columns, row_text(at_zero, 0).strip()) == (2, 6, "")
+     assert row_text(between_events, 0).startswith("A")
+     assert "B" not in row_text(between_events, 0)
+     assert (after_resize.rows, after_resize.columns) == (3, 8)
+     assert row_text(after_resize, 0).startswith("AB")
+     assert row_text(after_exit, 1).startswith("中文")
+     assert backward == service.seek(1.0)
+     assert row_text(backward, 0).startswith("A")
+     assert "B" not in row_text(backward, 0)
+-    assert service.duration == pytest.approx(6.0)
++    assert (after_exit.relative_time, service.duration) == pytest.approx((6.0, 6.0))
+     assert any("unknown event" in warning for warning in service.warnings)
+ 
+ 
+ def test_empty_cast_returns_the_initial_terminal_snapshot(tmp_path: Path) -> None:
+     cast_path = tmp_path / "empty.cast"
+     cast_path.write_text(
+         '{"version":3,"term":{"cols":7,"rows":3,"type":"xterm-256color"}}\n',
+         encoding="utf-8",
+     )
+ 
+     snapshot = ReplayService(cast_path).seek(500)
+ 
+     assert (snapshot.rows, snapshot.columns, snapshot.relative_time) == (3, 7, 0.0)
+     assert all(not row_text(snapshot, row).strip() for row in range(3))
+ 
+ 
++@pytest.mark.parametrize(
++    ("prefix", "tail", "columns", "rows"),
++    [
++        ("\x1b[31mA", "B", 8, 2),
++        ("ABC\x1b[1;2H\x1b[4h", "X", 8, 2),
++        ("\x1b[?7labc", "de", 4, 2),
++        ("\x1b[2;2H\x1b7\x1b[1;1H", "\x1b8X", 8, 3),
++        ("\x1b[2;3r\x1b[3;1H", "one\ntwo\nthree", 8, 4),
++        ("\x1b[3g\x1b[1;3H\x1bH\r", "\tX", 8, 2),
++        ("\x1b%@\x1b(0", "q", 8, 2),
++    ],
++    ids=("sgr", "insert-mode", "autowrap", "saved-cursor", "margins", "tabstop", "charset"),
++)
++def test_checkpoint_seek_matches_continuous_terminal_state(
++    tmp_path: Path,
++    prefix: str,
++    tail: str,
++    columns: int,
++    rows: int,
++) -> None:
++    cast_path = tmp_path / "state.cast"
++    write_cast(cast_path, [(5.0, "o", prefix), (1.0, "o", tail)], columns=columns, rows=rows)
++    continuous = TerminalEmulator(columns=columns, rows=rows)
++    continuous.apply(output_event(1, 5.0, prefix))
++    continuous.apply(output_event(2, 6.0, tail))
++
++    store = CheckpointStore(tmp_path / "state.json")
++    service = ReplayService(cast_path, checkpoint_store=store)
++
++    assert service.seek(6.0) == continuous.snapshot()
++    assert service.checkpoints[1].event_index == 1
++    assert service.checkpoints[1].snapshot.state is not None
++    assert ReplayService(cast_path, checkpoint_store=store).seek(6.0) == continuous.snapshot()
++
++
++def test_checkpoint_is_delayed_until_split_csi_parser_reaches_a_safe_boundary(
++    tmp_path: Path,
++) -> None:
++    cast_path = tmp_path / "split-csi.cast"
++    write_cast(
++        cast_path,
++        [(5.0, "o", "\x1b[31"), (1.0, "o", "mR"), (1.0, "o", "X")],
++        rows=2,
++    )
++    continuous = TerminalEmulator(columns=8, rows=2)
++    continuous.apply(output_event(1, 5.0, "\x1b[31"))
++    assert not continuous.checkpoint_safe
++    continuous.apply(output_event(2, 6.0, "mR"))
++    assert continuous.checkpoint_safe
++    continuous.apply(output_event(3, 7.0, "X"))
++
++    service = ReplayService(cast_path, checkpoint_store=CheckpointStore(tmp_path / "split.json"))
++
++    assert [checkpoint.event_index for checkpoint in service.checkpoints] == [0, 2]
++    assert service.seek(7.0) == continuous.snapshot()
++
++
++def test_seek_uses_target_timeline_and_keeps_trailing_unknown_duration(tmp_path: Path) -> None:
++    cast_path = tmp_path / "timeline.cast"
++    write_cast(
++        cast_path,
++        [
++            (1.0, "o", "A"),
++            (1.0, "i", "input"),
++            (1.0, "m", "mark"),
++            (1.0, "x", "0"),
++            (3.0, "future", "ignored"),
++        ],
++        rows=2,
++    )
++    reader_result = AsciicastV3Reader(cast_path).read()
++    service = ReplayService(cast_path, checkpoint_store=CheckpointStore(tmp_path / "timeline.json"))
++
++    assert reader_result.trailing_interval == 3.0
++    assert service.duration == 7.0
++    assert service.seek(-1).relative_time == 0.0
++    assert service.seek(1.5).relative_time == 1.5
++    assert service.seek(2.0).relative_time == 2.0
++    assert service.seek(3.0).relative_time == 3.0
++    assert service.seek(4.0).relative_time == 4.0
++    assert service.seek(99).relative_time == 7.0
++    assert row_text(service.seek(99), 0).startswith("A")
++
++
+ def test_reader_exposes_resume_offsets_and_time_checkpoint_is_persisted(tmp_path: Path) -> None:
+     cast_path = tmp_path / "session.cast"
+     cast_path.write_bytes((FIXTURES / "mixed.cast").read_bytes())
+     checkpoints_path = tmp_path / "checkpoints.json"
+ 
+     read_result = AsciicastV3Reader(cast_path).read()
+     ReplayService(cast_path, checkpoint_store=CheckpointStore(checkpoints_path)).seek(6.0)
+     payload = json.loads(checkpoints_path.read_text(encoding="utf-8"))
+ 
+     assert read_result.data_offset == len(cast_path.read_bytes().splitlines(keepends=True)[0])
+diff --git a/tests/test_terminal_screen.py b/tests/test_terminal_screen.py
+index 5e7ff3f..cf4d543 100644
+--- a/tests/test_terminal_screen.py
++++ b/tests/test_terminal_screen.py
+@@ -168,19 +168,25 @@ def test_resize_shrink_then_grow_does_not_revive_a_truncated_wide_pair() -> None
+     shrunk = emulator.snapshot()
+     assert shrunk.cells[0][2] == TerminalCell()
+     assert_valid_grid(shrunk)
+ 
+     emulator.apply(event(3, 0.3, TerminalEventType.RESIZE, TerminalSize(4, 2)))
+     grown = emulator.snapshot()
+     assert grown.cells[0][2:] == (TerminalCell(), TerminalCell())
+     assert_valid_grid(grown)
+ 
+ 
+-def test_emulator_ignores_non_screen_events() -> None:
++def test_emulator_advances_timeline_for_non_screen_events_without_changing_grid() -> None:
+     emulator = TerminalEmulator(columns=8, rows=2)
+     before = emulator.snapshot()
+ 
+     emulator.apply(event(1, 1.0, TerminalEventType.INPUT, b"secret"))
++    after_input = emulator.snapshot()
+     emulator.apply(event(2, 2.0, TerminalEventType.MARK, "mark"))
++    after_mark = emulator.snapshot()
+     emulator.apply(event(3, 3.0, TerminalEventType.EXIT, 0))
++    after_exit = emulator.snapshot()
+ 
+-    assert emulator.snapshot() == before
++    assert after_input.cells == after_mark.cells == after_exit.cells == before.cells
++    assert after_input.relative_time == 1.0
++    assert after_mark.relative_time == 2.0
++    assert after_exit.relative_time == 3.0
