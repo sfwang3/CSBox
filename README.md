@@ -1,16 +1,18 @@
 # CSBox
 
-CSBox 是面向计算机专业学生的本地实验记录与课程项目交付工具。它把终端实验、可回看的 Capture、PNG/Markdown 证据、项目检查和安全打包串成一条工作流；数据保存在本地，不需要云端账号或远程服务。
+CSBox 是面向计算机专业学生的本地实验记录与课程项目交付工具。需要记录终端操作、保留关键画面、检查项目或整理提交材料时，就使用 CSBox；数据保存在本地，不需要云端账号或远程服务。
 
-当前版本为 `0.2.0`，支持 Python 3.11+。项目尚未发布到 PyPI；可以从源码同步环境，或从本地构建的 wheel 安装。
+当前 0.3.0 Release Candidate 尚未发布到 PyPI，支持 Python 3.11+。现在请从源码同步环境，或从本地构建的 wheel 安装；不要使用尚未提供的公开索引安装命令。
 
 ## 安装
 
-开发或从源码运行：
+从源码运行（当前开发版）：
 
 ```bash
+git clone https://github.com/sfwang3/CSBox.git
+cd CSBox
 uv sync
-uv run csbox --version
+uv run csbox
 uv run csbox --help
 ```
 
@@ -18,8 +20,9 @@ uv run csbox --help
 
 ```bash
 uv build
-uv tool install dist/csbox-0.2.0-py3-none-any.whl
-csbox --version
+uv tool install dist/csbox-0.3.0-py3-none-any.whl
+csbox
+csbox --help
 ```
 
 也可以安装到普通虚拟环境：
@@ -33,10 +36,22 @@ CSBox 的运行时依赖会由 distribution metadata 自动安装。PNG 证据�
 
 ## 快速开始
 
-无参数运行会打开 Home TUI，显示当前项目最近的 session、Capture 数量、平台、Shell 和工作目录：
+先完成安装，再按这条路径开始第一次实验：
+
+```text
+安装 → csbox → 开始实验 → F12 保存关键画面 → 输入 exit → 实验记录 → 导出材料
+```
+
+从源码运行时，最短命令是：
 
 ```bash
-csbox doctor
+uv sync
+uv run csbox
+```
+
+安装到本地工具后，直接运行：
+
+```bash
 csbox
 ```
 
@@ -51,14 +66,7 @@ csbox lab review
 csbox lab export <SESSION> --output evidence --theme dark
 ```
 
-`lab start` 选择配置的 Shell，录制 asciicast v3，并维护 terminal emulator、Capture 和 session metadata。默认 Capture 键是 `F12`，也可以在 `.csbox/config.toml` 中设置：
-
-```toml
-[lab]
-capture_key = "ctrl-space"
-```
-
-宿主终端可能拦截 `F12`；CSBox 会给出提示，不会修改宿主、Shell 或编辑器配置。无法实时 Capture 时，可以在 Review 中补录。Lab export 会生成 PNG、`evidence.md` 和 `session.cast`；有可信命令时还会生成 `commands.txt`。
+`lab start` 选择配置的 Shell，录制 asciicast v3，并维护 terminal emulator、Capture 和 session metadata。`F12 Capture` 是唯一正式的 Lab Capture 快捷键；CSBox 只报告实际观察到的匹配输入，不修改宿主、Shell 或编辑器配置。无法实时 Capture 时，可以在 Review 中补录。Lab export 会生成 PNG、`evidence.md` 和 `session.cast`；有可信命令时还会生成 `commands.txt`。
 
 ### API：场景、运行和 Evidence
 

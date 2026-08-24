@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "csbox"
-version = "0.2.0"
+version = "0.3.0"
 description = "计算机实验与项目交付工具"
 readme = "README.md"
 license = "Apache-2.0"

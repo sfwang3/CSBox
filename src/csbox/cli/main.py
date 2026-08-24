@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated
 
@@ -22,12 +23,13 @@ from csbox.pack.service import create_pack_service
 _locale = load_locale()
 app = typer.Typer(
     add_completion=False,
+    add_help_option=False,
     help=_locale("cli.help"),
     invoke_without_command=True,
     name="csbox",
     no_args_is_help=False,
 )
-lab_app = typer.Typer(help="实验录制、回放和证据导出。", no_args_is_help=True)
+lab_app = typer.Typer(help="实验记录、回看和导出。", no_args_is_help=True)
 app.add_typer(lab_app, name="lab")
 app.add_typer(api_app, name="api")
 
@@ -40,6 +42,33 @@ def _print_safe_failure(message: str, error: Exception, *, verbose: bool) -> Non
     Console(markup=False).print(message)
     if verbose:
         Console(markup=False, stderr=True).print(f"调试类型：{type(error).__name__}")
+        Console(markup=False, stderr=True).print(f"调试异常链：{_format_exception_chain(error)}")
+
+
+def _format_exception_chain(error: BaseException) -> str:
+    parts: list[str] = []
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        detail = str(current).strip()
+        native_code = getattr(current, "winerror", None)
+        if native_code is None:
+            native_code = getattr(current, "errno", None)
+        if native_code is not None:
+            detail = (
+                f"{detail} (native_code={native_code})" if detail else f"native_code={native_code}"
+            )
+        debug_context = getattr(current, "debug_context", ())
+        if debug_context:
+            detail = f"{detail} [{'; '.join(debug_context)}]"
+        parts.append(f"{type(current).__name__}: {detail}" if detail else type(current).__name__)
+
+        linked = getattr(current, "cause", None)
+        if not isinstance(linked, BaseException):
+            linked = current.__cause__ or current.__context__
+        current = linked
+    return " -> ".join(parts)
 
 
 def _version_callback(value: bool) -> bool:
@@ -47,6 +76,23 @@ def _version_callback(value: bool) -> bool:
         typer.echo(__version__)
         raise typer.Exit()
     return value
+
+
+def _stream_is_tty(stream: object) -> bool:
+    isatty = getattr(stream, "isatty", None)
+    if not callable(isatty):
+        return False
+    try:
+        return bool(isatty())
+    except (OSError, ValueError):
+        return False
+
+
+def _require_interactive_stdio() -> None:
+    if _stream_is_tty(sys.stdin) and _stream_is_tty(sys.stdout):
+        return
+    print(_locale("cli.non_interactive"), file=sys.stderr)
+    raise typer.Exit(code=1)
 
 
 @app.callback()
@@ -59,15 +105,98 @@ def _run_default(
         is_eager=True,
         help="显示 CSBox 版本。",
     ),
+    show_help: Annotated[
+        bool,
+        typer.Option(
+            "--help",
+            is_eager=True,
+            help=_locale("cli.help.option"),
+        ),
+    ] = False,
 ) -> None:
     del version
+    if show_help:
+        typer.echo(ctx.get_help())
+        raise typer.Exit()
     if ctx.invoked_subcommand is not None:
         return
-    from csbox.tui.app import CSBoxApp, real_home_data_source
+    _require_interactive_stdio()
+    _run_tui_workflow(Path.cwd())
 
-    environment = detect_environment()
-    data_source = real_home_data_source(Path.cwd())
-    CSBoxApp(data_source=data_source, environment=environment, locale=_locale).run()
+
+def _run_tui_workflow(
+    project_dir: Path,
+    *,
+    environment: object | None = None,
+    service: object | None = None,
+    app_factory: Callable[..., object] | None = None,
+) -> None:
+    """Run Textual outside the terminal-owning Lab service boundary."""
+
+    from csbox.tui.app import CSBoxApp, real_home_data_source
+    from csbox.tui.lab_workflow import (
+        ActiveLabSession,
+        HomeNotice,
+        LabStartRequest,
+        ShellOption,
+        lab_start_failure_notice,
+        lab_status_notice,
+        no_available_shell_message,
+    )
+
+    selected_environment = environment or detect_environment()
+    selected_service = service or create_lab_service(project_dir)
+    selected_app_factory = app_factory or CSBoxApp
+    data_source = real_home_data_source(project_dir)
+    notice: HomeNotice | None = None
+    active_session: ActiveLabSession | None = None
+
+    try:
+        selected_service.repository.recover_stale_running()
+    except (OSError, UnicodeError, ValueError):
+        notice = HomeNotice("部分旧实验状态暂时无法恢复；仍可开始新的实验。", "warning")
+
+    profiles = selected_service.available_shells()
+    shell_options = tuple(ShellOption.from_profile(profile) for profile in profiles)
+    shell_error = (
+        None
+        if shell_options
+        else no_available_shell_message(getattr(selected_environment, "os_name", ""))
+    )
+
+    while True:
+        tui = selected_app_factory(
+            data_source=data_source,
+            environment=selected_environment,
+            locale=_locale,
+            shell_options=shell_options,
+            shell_error=shell_error,
+            home_notice=notice,
+            active_session=active_session,
+            export_action=getattr(selected_service, "export", None),
+        )
+        request = tui.run()
+        notice = getattr(tui, "home_notice", notice)
+        active_session = getattr(tui, "active_session", active_session)
+        if request is None:
+            return
+        if not isinstance(request, LabStartRequest):
+            return
+        active_session = None
+        try:
+            result = selected_service.start(
+                request.experiment_name,
+                shell=request.shell,
+            )
+        except Exception as error:
+            notice = lab_start_failure_notice(error)
+            continue
+        notice = lab_status_notice(request.experiment_name, result.status)
+        if result.status == "running":
+            active_session = ActiveLabSession(
+                paths=result.session,
+                experiment_name=request.experiment_name,
+            )
 
 
 @app.command(help=_locale("cli.doctor.help"))
@@ -93,6 +222,16 @@ def doctor() -> None:
         f"{translator('doctor.terminal')}: "
         f"{environment.terminal_columns}×{environment.terminal_rows}"
     )
+    if (
+        environment.shell_executable
+        or environment.powershell_51_available
+        or environment.powershell_7_available
+    ):
+        console.print(translator("doctor.next.start"))
+    elif environment.os_name == "Windows":
+        console.print(translator("doctor.next.windows"))
+    else:
+        console.print(translator("doctor.next.unix"))
 
 
 @app.command("check", help="检查项目结构、敏感文件、Git 状态和可选构建。")
@@ -360,16 +499,74 @@ def lab_start(
         result = service.start(name, shell=shell)
     except Exception as error:
         _print_safe_failure(
-            "发生了什么：实验无法启动。在哪里：当前 Shell 或实验目录。"
-            "怎么处理：运行 csbox doctor，检查 Shell 配置和目录权限后重试。",
+            _lab_start_failure_message(error),
             error,
             verbose=verbose,
         )
         raise typer.Exit(code=1) from error
     if not advisory_printed:
         console.print(result.advisory)
-    status_label = "完成" if result.status == "completed" else result.status
+    status_label = {
+        "completed": "完成",
+        "running": "启动",
+        "interrupted": "中断",
+        "failed": "失败",
+    }.get(result.status, result.status)
     console.print(f"实验已{status_label}：{result.session.root}")
+
+
+def _lab_start_failure_message(error: BaseException) -> str:
+    kind = getattr(error, "kind", None)
+    if kind == "windows_terminal_unavailable":
+        return (
+            "发生了什么：未找到 Windows Terminal。在哪里：专用终端窗口发现阶段。"
+            "怎么处理：安装或修复 Windows Terminal 后重试。"
+        )
+    if kind == "windows_terminal_launch_failure":
+        return (
+            "发生了什么：Windows Terminal 无法启动。在哪里：专用终端窗口启动阶段。"
+            "怎么处理：运行 wt.exe 检查 Windows Terminal 后重试。"
+        )
+    if kind == "shell_executable_unlaunchable":
+        return (
+            "发生了什么：Shell 可执行文件无法启动。在哪里：PowerShell 启动阶段。"
+            "怎么处理：重新安装 PowerShell，或选择另一个已安装的 Shell 后重试。"
+        )
+    if kind == "shell_executable_unavailable":
+        return (
+            "发生了什么：未找到 Shell 可执行文件。在哪里：Shell 发现阶段。"
+            "怎么处理：安装 PowerShell，或使用 --shell 选择已安装的 Shell。"
+        )
+    if kind == "conpty_initialization_failure":
+        return (
+            "发生了什么：Windows ConPTY 无法初始化。在哪里：终端后端启动阶段。"
+            "怎么处理：确认 Windows 版本与终端能力后重试。"
+        )
+    if kind == "runtime_backend_failure":
+        return (
+            "发生了什么：终端后端运行失败。在哪里：实验 Shell 运行阶段。"
+            "怎么处理：重新启动实验；若仍失败，使用 --verbose 查看诊断。"
+        )
+    return (
+        "发生了什么：实验无法启动。在哪里：当前 Shell 或实验目录。"
+        "怎么处理：运行 csbox doctor，检查 Shell 配置和目录权限后重试。"
+    )
+
+
+@lab_app.command("_host", hidden=True)
+def lab_host(
+    intent: Annotated[Path, typer.Option("--intent", help="内部 dedicated-host intent。")],
+    token: Annotated[str, typer.Option("--token", help="内部 dedicated-host token。")],
+) -> None:
+    """Run the private Windows Terminal host without writing diagnostics to the body."""
+
+    from csbox.lab.windows_host import run_dedicated_lab_host
+
+    try:
+        return_code = run_dedicated_lab_host(intent, token)
+    except Exception:
+        return_code = 1
+    raise typer.Exit(code=return_code)
 
 
 @lab_app.command("export")

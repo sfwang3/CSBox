@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+import ntpath
 import os
 import platform
 import shutil
 import subprocess
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
-from pathlib import PurePath
+from pathlib import PurePath, PureWindowsPath
 
 from csbox.core.registry import Registry
 from csbox.core.subprocess_env import minimal_subprocess_environment
@@ -108,10 +109,19 @@ _SHELL_ALIASES = {
 class ShellUnavailableError(RuntimeError):
     """A shell-selection failure with stable Chinese user-facing guidance."""
 
-    def __init__(self, user_message: str, cause: Exception) -> None:
+    def __init__(
+        self,
+        user_message: str,
+        cause: Exception,
+        *,
+        kind: str = "shell_executable_unavailable",
+        executable: str | None = None,
+    ) -> None:
         super().__init__(user_message)
         self.user_message = user_message
         self.cause = cause
+        self.kind = kind
+        self.debug_context = () if executable is None else (f"resolved_executable={executable}",)
 
 
 def supported_shell_profiles() -> tuple[ShellProfile, ...]:
@@ -177,25 +187,41 @@ def select_shell(
     config_shell: str | None,
     system: str | None = None,
     environ: Mapping[str, str] | None = None,
-    which: Callable[[str], str | None] | None = None,
+    which: Callable[..., str | None] | None = None,
 ) -> ShellProfile:
     """Select an available shell according to explicit, configured, and platform order."""
 
     env = os.environ if environ is None else environ
     os_name = platform.system() if system is None else system
     find_command = shutil.which if which is None else which
+    search_path = _environment_value(env, "PATH")
 
     preferred = requested or config_shell
     if preferred:
         profile = _profile_for_requested(preferred)
-        if find_command(profile.executable) is None:
+        resolved = _resolve_profile_executable(
+            profile,
+            system=os_name,
+            environ=env,
+            search_path=search_path,
+            which=find_command,
+        )
+        if resolved is None:
             cause = FileNotFoundError(profile.executable)
             _raise_shell_error(_unavailable_message(profile), cause)
-        return profile
+        return replace(profile, executable=resolved)
 
     current = detect_shell(environ=env, system=os_name)
-    if current is not UNKNOWN_SHELL and find_command(current.executable) is not None:
-        return current
+    if current is not UNKNOWN_SHELL:
+        resolved = _resolve_profile_executable(
+            current,
+            system=os_name,
+            environ=env,
+            search_path=search_path,
+            which=find_command,
+        )
+        if resolved is not None:
+            return replace(current, executable=resolved)
 
     ordered_kinds: Sequence[ShellKind]
     if os_name == "Windows":
@@ -204,8 +230,15 @@ def select_shell(
         ordered_kinds = (ShellKind.BASH, ShellKind.ZSH)
     for kind in ordered_kinds:
         profile = SHELL_PROFILES.get(kind.value)
-        if find_command(profile.executable) is not None:
-            return profile
+        resolved = _resolve_profile_executable(
+            profile,
+            system=os_name,
+            environ=env,
+            search_path=search_path,
+            which=find_command,
+        )
+        if resolved is not None:
+            return replace(profile, executable=resolved)
 
     cause = FileNotFoundError("no supported shell executable")
     if os_name == "Windows":
@@ -213,6 +246,161 @@ def select_shell(
     else:
         message = "未找到可用的 Shell。请安装 bash 或 zsh。"
     _raise_shell_error(message, cause)
+
+
+def _resolve_profile_executable(
+    profile: ShellProfile,
+    *,
+    system: str,
+    environ: Mapping[str, str],
+    search_path: str | None,
+    which: Callable[..., str | None],
+) -> str | None:
+    resolved = _locate_executable(
+        profile.executable,
+        system=system,
+        search_path=search_path,
+        which=which,
+    )
+    if resolved is None or system != "Windows" or not _is_windows_app_alias(resolved, environ):
+        return resolved
+    # Do not serialize an App Execution Alias into the dedicated host request. pywinpty
+    # ultimately builds a CreateProcess command line, where an alias path containing spaces
+    # can be interpreted as an invalid executable target.
+    filtered_path = _without_windows_app_alias_paths(search_path, environ)
+    native = _locate_executable(
+        profile.executable,
+        system=system,
+        search_path=filtered_path,
+        which=which,
+    )
+    if native is not None:
+        return native
+    if profile.kind is ShellKind.POWERSHELL_7:
+        native = _resolve_powershell_execution_alias(resolved, environ)
+        if native is not None:
+            return native
+        cause = OSError("PowerShell App Execution Alias did not resolve to a native executable")
+        raise ShellUnavailableError(
+            "PowerShell 7 的应用执行别名无法启动。请重新安装 PowerShell 7。",
+            cause,
+            kind="shell_executable_unlaunchable",
+            executable=resolved,
+        ) from cause
+    return resolved
+
+
+def _locate_executable(
+    command: str,
+    *,
+    system: str,
+    search_path: str | None,
+    which: Callable[..., str | None],
+) -> str | None:
+    if system != "Windows":
+        return which(command, path=search_path)
+    if _is_fully_qualified_windows_path(command):
+        candidates = (command,)
+    else:
+        candidates = tuple(
+            ntpath.join(entry, command)
+            for entry in (search_path or "").split(";")
+            if entry and _is_fully_qualified_windows_path(entry)
+        )
+    for candidate in candidates:
+        # Supplying a directory-qualified candidate prevents shutil.which from applying
+        # Windows' implicit current-directory search ahead of the requested PATH entry.
+        resolved = which(candidate, path="")
+        if resolved is not None and _is_fully_qualified_windows_path(resolved):
+            return ntpath.normpath(resolved)
+    return None
+
+
+def _is_fully_qualified_windows_path(value: str) -> bool:
+    return PureWindowsPath(value).is_absolute()
+
+
+def _resolve_powershell_execution_alias(
+    alias: str,
+    environ: Mapping[str, str],
+) -> str | None:
+    arguments = [
+        alias,
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "[Console]::Out.Write([Environment]::ProcessPath)",
+    ]
+    try:
+        with tempfile.TemporaryFile() as output_file:
+            subprocess.run(
+                arguments,
+                stdout=output_file,
+                stderr=subprocess.STDOUT,
+                env=minimal_subprocess_environment(environ),
+                check=True,
+                timeout=1.0,
+                shell=False,
+            )
+            output_file.seek(0)
+            raw_output = output_file.read(_MAX_SHELL_VERSION_BYTES + 1)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if len(raw_output) > _MAX_SHELL_VERSION_BYTES:
+        return None
+    try:
+        resolved = raw_output.decode("utf-8", errors="strict").strip()
+    except UnicodeError:
+        return None
+    if (
+        not resolved
+        or not _is_fully_qualified_windows_path(resolved)
+        or ntpath.basename(resolved).casefold() != "pwsh.exe"
+        or _is_windows_app_alias(resolved, environ)
+        or not os.path.isfile(resolved)
+    ):
+        return None
+    return ntpath.normpath(resolved)
+
+
+def _environment_value(environ: Mapping[str, str], name: str) -> str | None:
+    target = name.casefold()
+    return next((value for key, value in environ.items() if key.casefold() == target), None)
+
+
+def _windows_app_alias_root(environ: Mapping[str, str]) -> str | None:
+    local_app_data = _environment_value(environ, "LOCALAPPDATA")
+    if not local_app_data:
+        return None
+    return ntpath.normcase(ntpath.normpath(ntpath.join(local_app_data, "Microsoft", "WindowsApps")))
+
+
+def _is_windows_app_alias(path: str, environ: Mapping[str, str]) -> bool:
+    root = _windows_app_alias_root(environ)
+    if root is None:
+        return False
+    candidate = ntpath.normcase(ntpath.normpath(path))
+    return candidate == root or candidate.startswith(root + ntpath.sep)
+
+
+def _without_windows_app_alias_paths(
+    search_path: str | None,
+    environ: Mapping[str, str],
+) -> str | None:
+    if search_path is None:
+        return None
+    root = _windows_app_alias_root(environ)
+    if root is None:
+        return search_path
+    kept = []
+    for entry in search_path.split(";"):
+        if not entry:
+            continue
+        candidate = ntpath.normcase(ntpath.normpath(entry))
+        if candidate != root and not candidate.startswith(root + ntpath.sep):
+            kept.append(entry)
+    return ";".join(kept)
 
 
 def detect_shell_version(profile: ShellProfile) -> str | None:
