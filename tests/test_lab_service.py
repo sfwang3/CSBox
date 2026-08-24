@@ -128,7 +128,9 @@ def test_service_creates_running_metadata_before_spawning_and_persists_capture(
     assert result.status == "completed"
     assert result.exit_code == 0
     assert backend.spawn_checked is True
-    assert bytes(output.data).endswith("输出中文\x1b[0m\n".encode())
+    assert bytes(output.data).startswith(b"\x1b[?1049h")
+    assert bytes(output.data).endswith(b"\x1b[?1049l")
+    assert "输出中文\x1b[0m\n".encode() in bytes(output.data)
     assert state.restored is True
     session = SessionPaths(result.session.root)
     metadata = json.loads(session.metadata.read_text(encoding="utf-8"))
@@ -137,6 +139,93 @@ def test_service_creates_running_metadata_before_spawning_and_persists_capture(
     assert len(captures["captures"]) == 1
     assert b"\x1b[24~" not in backend.writes
     assert session.cast.is_file()
+
+
+def test_dedicated_host_mode_uses_fresh_main_buffer_without_alternate_screen(
+    tmp_path: Path,
+) -> None:
+    backend = ScriptedBackend([b"child output", b""])
+    service, repository, output, state = make_service(tmp_path, backend, [b"\x1b[24~", b""])
+    ready: list[SessionPaths] = []
+
+    result = service.start(
+        "专用窗口实验",
+        shell="bash",
+        command=("bash",),
+        size=TerminalSize(80, 24),
+        dedicated_host=True,
+        ready_callback=ready.append,
+    )
+
+    output_bytes = bytes(output.data)
+    assert result.status == "completed"
+    assert result.exit_code == 0
+    assert ready == [result.session]
+    assert b"child output" in output_bytes
+    assert b"\x1b[?1049h" not in output_bytes
+    assert b"\x1b[?1049l" not in output_bytes
+    assert b"\nCSBox Lab" not in output_bytes
+    assert b"\x1b]0;" in output_bytes
+    assert b"\x1b]0;" not in result.session.cast.read_bytes()
+    assert repository.list_sessions()[0].metadata.status == "completed"
+    assert state.restored is True
+
+
+def test_dedicated_host_mode_persists_nonzero_child_exit_without_fabricating_failure(
+    tmp_path: Path,
+) -> None:
+    class NonZeroBackend(ScriptedBackend):
+        @property
+        def exit_code(self) -> int:
+            return 17
+
+        def wait(self, timeout: float = 0.0) -> int:
+            del timeout
+            return 17
+
+    backend = NonZeroBackend([b"child reported an error", b""])
+    service, repository, _, _ = make_service(tmp_path, backend, [None])
+
+    result = service.start(
+        "非零退出实验",
+        shell="bash",
+        command=("bash",),
+        dedicated_host=True,
+    )
+
+    assert result.status == "completed"
+    assert result.exit_code == 17
+    metadata = repository.list_sessions()[0].metadata
+    assert metadata.status == "completed"
+    assert metadata.exit_code == 17
+
+
+def test_parent_service_returns_only_after_injected_launcher_reports_ready(
+    tmp_path: Path,
+) -> None:
+    class ReadyLauncher:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def start(self, **kwargs: object) -> object:
+            self.calls.append(kwargs)
+            return type("Launch", (), {"session_id": "session-ready", "status": "running"})()
+
+    launcher = ReadyLauncher()
+    repository = SessionRepository(tmp_path / "sessions")
+    service = LabService(
+        repository=repository,
+        config=CSBoxConfig(),
+        cwd=tmp_path,
+        windows_launcher=launcher,  # type: ignore[arg-type]
+    )
+
+    result = service.start("父进程只等待 READY", shell="bash", command=("bash",))
+
+    assert result.session.root == repository.root / "session-ready"
+    assert result.status == "running"
+    assert launcher.calls[0]["command"] == ("bash",)
+    assert repository.list_sessions() == ()
 
 
 def test_service_marks_failed_and_keeps_recording_when_shell_crashes(tmp_path: Path) -> None:
@@ -149,6 +238,25 @@ def test_service_marks_failed_and_keeps_recording_when_shell_crashes(tmp_path: P
     session = repository.list_sessions()[0]
     assert session.metadata.status == "failed"
     assert session.paths.cast.read_text(encoding="utf-8").find("before crash") >= 0
+    assert state.restored is True
+
+
+def test_service_reports_cleanup_failure_after_a_completed_child_exit(tmp_path: Path) -> None:
+    class CleanupFailureBackend(ScriptedBackend):
+        def close(self) -> None:
+            self.closed = True
+            raise OSError("closed handle")
+
+    backend = CleanupFailureBackend([b"finished", b""])
+    service, repository, _, state = make_service(tmp_path, backend, [None])
+
+    with pytest.raises(RuntimeError, match="实验运行结束，但终端清理失败"):
+        service.start("清理阶段实验", shell="bash", command=("bash",))
+
+    metadata = repository.list_sessions()[0].metadata
+    assert metadata.status == "failed"
+    assert metadata.status_reason == "实验运行结束，但终端清理失败。"
+    assert metadata.exit_code == 0
     assert state.restored is True
 
 

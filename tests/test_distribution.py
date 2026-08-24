@@ -417,4 +417,4 @@ def test_uv_tool_install_runs_built_wheel_outside_repository(tmp_path: Path) -> 
         text=True,
         encoding="utf-8",
     )
-    assert result.stdout.strip() == "0.2.0"
+    assert result.stdout.strip() == "0.3.0"

@@ -10,7 +10,7 @@
 
 ## Windows
 
-`WindowsConPTYBackend` 只在 `spawn` 时导入 pywinpty，调用 `PtyProcess.spawn(..., dimensions=(rows, columns), backend="0")`，其中 `0` 明确选择 ConPTY。pywinpty 的 high-level API 读写字符串，因此 backend 负责 UTF-8 边界、reader queue、partial write、resize、尾帧 drain 和可重试 close。
+`WindowsConPTYBackend` 只在 `spawn` 时导入 pywinpty，调用 `PtyProcess.spawn(..., dimensions=(rows, columns), backend="0")`，其中 `0` 明确选择 ConPTY。pywinpty 的 high-level API 读写字符串，因此 backend 负责 UTF-8 边界、reader queue、partial write、resize、尾帧 drain 和可重试 close。`PtyProcess.read()` 的 `EOFError`/closed-handle 只有在确认 child 已退出后才是正常 EOF；空字符串 `0011Ignore` 是 no-output sentinel，不能结束 reader。
 
 Shell profile：
 
@@ -23,9 +23,9 @@ Windows PowerShell 5.1 与 PowerShell 7 的 native smoke 都直接创建 `Window
 
 ## Proxy 与宿主终端
 
-`TerminalProxy` 用 `FileInputAdapter`/`FileOutputAdapter` 隔离 stdin/stdout；Unix raw termios 和 Windows console mode 都在 context exit 时恢复。Unix 安装并恢复 `SIGWINCH`，Windows 不假定有该信号。实验态不启动 full-screen Textual，避免破坏用户自己的 terminal workflow。
+`TerminalProxy` 用 `FileInputAdapter`/`FileOutputAdapter` 隔离 stdin/stdout；Lab 使用标准 alternate screen，Unix raw termios 和 Windows console mode 都在终端状态退出时恢复。Unix 安装并恢复 `SIGWINCH`，Windows 不假定有该信号。实验态不启动 full-screen Textual，避免破坏用户自己的 terminal workflow。
 
-Capture 默认键是 `F12`，配置键是 `Ctrl-Space`。VS Code、Windows Terminal 或其他宿主可能抢占 F12；`CaptureBindingProbe` 只给 advisory，不改宿主、Windows Terminal、Bash 或 PSReadLine 设置。无法实时捕获时，可在 Review 中补 Capture。
+`F12 Capture` 是唯一正式的 Lab Capture 快捷键。VS Code、Windows Terminal 或其他宿主可能抢占 F12；`CaptureBindingProbe` 只给 advisory，不改宿主、Windows Terminal、Bash 或 PSReadLine 设置。无法实时捕获时，可在 Review 中补 Capture。
 
 ## 安装态说明
 

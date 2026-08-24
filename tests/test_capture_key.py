@@ -5,6 +5,7 @@ import pytest
 from csbox.lab.keymap import CaptureBindingProbe, CaptureKeyMatcher
 
 F12 = b"\x1b[24~"
+CTRL_SPACE = b"\x00"
 
 
 def collect(matcher: CaptureKeyMatcher, chunks: list[bytes]) -> tuple[bytes, int]:
@@ -42,11 +43,25 @@ def test_false_prefix_is_flushed_in_original_order() -> None:
     assert captures == 0
 
 
+def test_cpr_like_response_is_forwarded_without_becoming_capture() -> None:
+    forwarded, captures = collect(CaptureKeyMatcher("f12"), [b"\x1b[12;34", b"R"])
+
+    assert forwarded == b"\x1b[12;34R"
+    assert captures == 0
+
+
 def test_multiple_captures_and_ordinary_controls_are_preserved() -> None:
     forwarded, captures = collect(CaptureKeyMatcher("f12"), [b"\x03", F12 + b"a" + F12 + b"\r"])
 
     assert forwarded == b"\x03a\r"
     assert captures == 2
+
+
+def test_default_f12_binding_also_consumes_ctrl_space_fallback() -> None:
+    forwarded, captures = collect(CaptureKeyMatcher("f12"), [b"A", CTRL_SPACE, b"B"])
+
+    assert forwarded == b"AB"
+    assert captures == 1
 
 
 def test_flush_forwards_an_unfinished_non_match() -> None:
@@ -66,13 +81,15 @@ def test_custom_binding_is_supported_without_assuming_f12() -> None:
     assert result.captures == 1
 
 
-def test_binding_probe_reports_host_advisory_without_mutating_environment() -> None:
+def test_binding_probe_reports_only_official_f12_advisory_without_mutating_environment() -> None:
     environment = {"TERM_PROGRAM": "vscode", "TERM": "xterm-256color"}
     advisory = CaptureBindingProbe("f12", environ=environment, input_supported=True).probe()
 
     assert advisory.key == "f12"
     assert advisory.supported is True
     assert "VS Code" in advisory.message
+    assert "F12 Capture" in advisory.message
+    assert "ctrl" not in advisory.message.lower()
     assert environment == {"TERM_PROGRAM": "vscode", "TERM": "xterm-256color"}
 
 
@@ -80,4 +97,6 @@ def test_binding_probe_marks_unavailable_input_adapter() -> None:
     advisory = CaptureBindingProbe("f12", input_supported=False).probe()
 
     assert advisory.supported is False
+    assert "F12 Capture" in advisory.message
+    assert "ctrl" not in advisory.message.lower()
     assert "降级" in advisory.message or "capture" in advisory.message.lower()

@@ -444,7 +444,9 @@ async def test_api_screen_escape_returns_home_and_standalone_q_exits(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_home_renders_real_api_run_and_check_status(tmp_path: Path) -> None:
+async def test_home_keeps_api_and_check_workflows_out_of_lightweight_home(
+    tmp_path: Path,
+) -> None:
     repository = ApiRunRepository.from_cwd(tmp_path)
     repository.save(_run("20260811T080006-home12345678"))
 
@@ -468,11 +470,12 @@ async def test_home_renders_real_api_run_and_check_status(tmp_path: Path) -> Non
 
     async with app.run_test(size=(120, 35)) as pilot:
         await pilot.pause()
-        api_text = str(app.screen.query_one("#recent-api-content").renderable)
-        check_text = str(app.screen.query_one("#home-check-status").renderable)
-        assert "中文 API 场景" in api_text
-        assert "通过" in api_text
-        assert "项目检查：通过" in check_text
+        project_text = str(app.screen.query_one("#home-project-path").renderable)
+        workflow_text = str(app.screen.query_one("#home-workflow-status").renderable)
+        assert project_text
+        assert "准备就绪" in workflow_text
+        assert "中文 API 场景" not in _screen_text(app.screen)
+        assert "项目检查：通过" not in _screen_text(app.screen)
         assert SECRET not in _screen_text(app.screen)
 
 
