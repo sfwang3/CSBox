@@ -5,7 +5,7 @@
 - `csbox lab start` 是透明 terminal workflow：不启动全屏 Textual，不绘制永久状态栏，把 Shell 的输入输出直接交给宿主终端。
 - Home、Review 和 Check 是管理/回看界面，使用 Textual 全屏布局；它们通过 service/controller 获取数据，不解析 cast、不直接写 session 文件。
 
-实验态只保留 Capture 快捷键这一项输入拦截。默认序列是 `F12` 的 `ESC [ 24 ~`，也可配置为 `Ctrl-Space`。宿主终端可能抢占按键，界面和命令都会给出 advisory，并保留 Review 中补 Capture 的路径。
+实验态只保留 `F12 Capture` 这一项正式输入拦截，序列是 `ESC [ 24 ~`。宿主终端可能抢占按键，界面和命令都会给出 advisory，并保留 Review 中补 Capture 的路径。
 
 ## 信息层级
 

@@ -3,9 +3,9 @@
 from csbox.tui.widgets.home import (
     ActionPanel,
     BrandBlock,
-    EnvironmentPanel,
-    RecentPanel,
+    ProjectPanel,
     ShortcutBar,
+    WorkflowStatusPanel,
 )
 from csbox.tui.widgets.project_check import CheckFindings, CheckFooter, CheckSummary
 from csbox.tui.widgets.review import (
@@ -21,11 +21,11 @@ __all__ = [
     "CheckFindings",
     "CheckFooter",
     "CheckSummary",
-    "EnvironmentPanel",
-    "RecentPanel",
+    "ProjectPanel",
     "ReviewCaptureList",
     "ReviewFooter",
     "ReviewTerminal",
     "ReviewTimeline",
     "ShortcutBar",
+    "WorkflowStatusPanel",
 ]

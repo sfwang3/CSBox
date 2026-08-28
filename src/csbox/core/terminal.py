@@ -19,10 +19,29 @@ DEFAULT_TERMINAL_SIZE = TerminalSize(80, 24)
 class TerminalBackendError(RuntimeError):
     """A terminal backend failure with stable Chinese user-facing guidance."""
 
-    def __init__(self, user_message: str, cause: Exception) -> None:
+    def __init__(
+        self,
+        user_message: str,
+        cause: Exception,
+        *,
+        kind: str = "runtime_backend_failure",
+        debug_context: tuple[str, ...] = (),
+    ) -> None:
         super().__init__(user_message)
         self.user_message = user_message
         self.cause = cause
+        self.kind = kind
+        self.debug_context = tuple(
+            item.replace("\r", r"\r").replace("\n", r"\n")[:1024] for item in debug_context
+        )
+
+
+class TerminalProcessExited(RuntimeError):
+    """Signal that an input write lost a race with confirmed child exit."""
+
+    def __init__(self, exit_code: int | None) -> None:
+        super().__init__("terminal child exited before pending input could be written")
+        self.exit_code = exit_code
 
 
 class TerminalBackend(ABC):
@@ -93,6 +112,7 @@ def __getattr__(name: str) -> type[TerminalBackend]:
 __all__ = [
     "TerminalBackend",
     "TerminalBackendError",
+    "TerminalProcessExited",
     "DEFAULT_TERMINAL_SIZE",
     "UnixPTYBackend",
     "WindowsConPTYBackend",

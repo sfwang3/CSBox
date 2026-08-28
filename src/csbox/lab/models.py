@@ -16,7 +16,11 @@ class SessionMetadata(BaseModel):
 
     session_id: str = Field(alias="id", min_length=1)
     experiment_name: str = Field(alias="name", min_length=1)
-    status: Literal["running", "completed", "interrupted", "failed"] = "running"
+    status: Literal["starting", "running", "completed", "interrupted", "failed"] = "starting"
+    status_reason: str | None = Field(default=None, alias="statusReason")
+    exit_code: int | None = Field(default=None, alias="exitCode")
+    owner_pid: int | None = Field(default=None, alias="ownerPid")
+    owner_token: str | None = Field(default=None, alias="ownerToken")
     started_at: datetime = Field(alias="startedAt")
     ended_at: datetime | None = Field(default=None, alias="endedAt")
     platform: str = Field(min_length=1)
@@ -60,6 +64,10 @@ class SessionPaths:
     @property
     def checkpoints(self) -> Path:
         return self.root / "checkpoints.json"
+
+    @property
+    def owner_lock(self) -> Path:
+        return self.root / "owner.lock"
 
 
 class CaptureRecord(BaseModel):

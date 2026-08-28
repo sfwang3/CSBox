@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import os
@@ -22,7 +23,7 @@ from csbox.api.errors import (
     ApiPersistenceError,
     ApiTransportError,
 )
-from csbox.api.exporter import ApiEvidenceExporter
+from csbox.api.exporter import ApiEvidenceExporter, ApiExportResult
 from csbox.api.models import (
     ApiAssertion,
     ApiRequest,
@@ -31,15 +32,28 @@ from csbox.api.models import (
     ApiScenario,
     ApiStep,
 )
+from csbox.api.openapi import OpenApiImporter, write_scenario_templates
 from csbox.api.redaction import Redactor
 from csbox.api.repository import ApiRunRepository, ApiRunSummary
 from csbox.api.scenario import ScenarioLoader
+from csbox.api.scenario_writer import ScenarioFile, scenario_filename, write_scenario_files
 from csbox.api.variables import resolve_variables
 from csbox.config import ConfigPaths, ConfigurationError, load_config
 from csbox.core.display_width import display_width, truncate_cells
 from csbox.core.fonts import FontResolutionError
 from csbox.core.text_layout import wrap_cells
 from csbox.locales import Translator
+from csbox.tui.dialogs.api import (
+    ApiExportDialog,
+    ApiExportOverwriteDialog,
+    ApiExportRequest,
+    ApiOpenApiImportDialog,
+    ApiOpenApiOverwriteDialog,
+    ApiQuickCreateDialog,
+    ApiQuickCreateRequest,
+    ApiScenarioOverwriteDialog,
+)
+from csbox.tui.screens.api_export_result import ApiExportResultScreen
 from csbox.tui.widgets.api import ApiDetail, ApiFooter, ApiRunList, ApiScenarioList
 
 RunnerFactory = Callable[..., object]
@@ -156,7 +170,7 @@ class ApiScreen(Screen[None]):
                         for path in self.scenario_dir.glob("*.toml")
                         if path.is_file() and not path.is_symlink()
                     ),
-                    key=lambda path: path.name.casefold(),
+                    key=lambda path: (path.name.casefold(), path.name),
                 )
             )
         except (OSError, ValueError):
@@ -176,33 +190,48 @@ class ApiScreen(Screen[None]):
         scenario_panel = self.query_one("#api-scenarios", ApiScenarioList)
         scenario_lines = [self.locale("api.scenarios.title")]
         scenario_buttons: list[Button] = []
-        if not self.scenarios:
+        if not self._has_loadable_scenarios():
             scenario_lines.append(self.locale("api.empty.scenarios"))
-        else:
-            for index, item in enumerate(self.scenarios):
-                if item.scenario is None:
-                    scenario_lines.append(self.locale("api.scenario.invalid", name=item.path.name))
-                    label = self.locale("api.action.invalid", name=item.path.name)
-                else:
-                    scenario_lines.append(
-                        truncate_cells(
-                            self.locale("api.scenario.item", name=item.scenario.name),
-                            max(1, (scenario_panel.size.width or 34) - 2),
-                            ellipsis="…",
-                        )
-                    )
-                    label = self.locale("api.action.run", name=item.scenario.name)
-                scenario_buttons.append(
+            scenario_lines.append(self.locale("api.empty.scenarios.hint"))
+            scenario_buttons.extend(
+                (
                     Button(
-                        truncate_cells(
-                            label,
-                            max(8, (scenario_panel.size.width or 34) - 4),
-                            ellipsis="…",
-                        ),
-                        id=f"scenario-{index}",
-                        classes="api-row",
+                        self.locale("api.action.quick_create"),
+                        id="api-quick-create",
+                        classes="api-empty-action",
+                        variant="primary",
+                    ),
+                    Button(
+                        self.locale("api.action.openapi_import"),
+                        id="api-openapi-import",
+                        classes="api-empty-action",
+                    ),
+                )
+            )
+        for index, item in enumerate(self.scenarios):
+            if item.scenario is None:
+                scenario_lines.append(self.locale("api.scenario.invalid", name=item.path.name))
+                label = self.locale("api.action.invalid", name=item.path.name)
+            else:
+                scenario_lines.append(
+                    truncate_cells(
+                        self.locale("api.scenario.item", name=item.scenario.name),
+                        max(1, (scenario_panel.size.width or 34) - 2),
+                        ellipsis="…",
                     )
                 )
+                label = self.locale("api.action.run", name=item.scenario.name)
+            scenario_buttons.append(
+                Button(
+                    truncate_cells(
+                        label,
+                        max(8, (scenario_panel.size.width or 34) - 4),
+                        ellipsis="…",
+                    ),
+                    id=f"scenario-{index}",
+                    classes="api-row",
+                )
+            )
         await scenario_panel.set_rows("\n".join(scenario_lines), scenario_buttons)
 
         run_panel = self.query_one("#api-runs", ApiRunList)
@@ -240,6 +269,9 @@ class ApiScreen(Screen[None]):
                     )
                 )
         await run_panel.set_rows("\n".join(run_lines), run_buttons)
+
+    def _has_loadable_scenarios(self) -> bool:
+        return any(item.scenario is not None for item in self.scenarios)
 
     def _run_empty_text(self) -> str:
         if self._has_unavailable_run_directories():
@@ -397,10 +429,211 @@ class ApiScreen(Screen[None]):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         identifier = event.button.id or ""
-        if identifier.startswith("scenario-"):
+        if identifier == "api-quick-create":
+            self._open_quick_create()
+        elif identifier == "api-openapi-import":
+            self._open_openapi_import()
+        elif identifier.startswith("scenario-"):
             self.select_scenario(int(identifier.removeprefix("scenario-")), execute=True)
         elif identifier.startswith("run-"):
             self.select_run(int(identifier.removeprefix("run-")))
+
+    def _open_quick_create(self, initial: ApiQuickCreateRequest | None = None) -> None:
+        self.app.push_screen(
+            ApiQuickCreateDialog(locale=self.locale, initial=initial),
+            self._handle_quick_create,
+        )
+
+    def _open_openapi_import(
+        self,
+        initial_path: Path | None = None,
+        initial_error: str = "",
+    ) -> None:
+        self.app.push_screen(
+            ApiOpenApiImportDialog(
+                locale=self.locale,
+                initial_path=initial_path,
+                initial_error=initial_error,
+            ),
+            self._handle_openapi_import,
+        )
+
+    def _handle_openapi_import(self, source: Path | None) -> None:
+        if source is None:
+            return
+        self.run_worker(
+            self._import_openapi(source),
+            name="api-openapi-import",
+            group="api-openapi-import",
+            exclusive=True,
+            exit_on_error=False,
+        )
+
+    def _handle_openapi_overwrite(self, source: Path, confirmed: bool) -> None:
+        if confirmed:
+            self.run_worker(
+                self._import_openapi(source, force=True),
+                name="api-openapi-import",
+                group="api-openapi-import",
+                exclusive=True,
+                exit_on_error=False,
+            )
+        else:
+            self._open_openapi_import(source)
+
+    async def _import_openapi(self, source: Path, *, force: bool = False) -> None:
+        self._busy = True
+        self._refresh_status(self.locale("api.status.importing"))
+        previous_path = (
+            self.scenarios[self.selected_scenario_index].path
+            if self.selected_scenario_index is not None
+            and self.selected_scenario_index < len(self.scenarios)
+            else None
+        )
+
+        def import_files() -> tuple[tuple[Path, ...], bool]:
+            importer = OpenApiImporter()
+            document = importer.load(source)
+            scenario = importer.to_scenario(document, source.stem)
+            written = write_scenario_templates(scenario, self.scenario_dir, force=force)
+            serialized = json.dumps(scenario.model_dump(mode="json"), ensure_ascii=False)
+            return written, "{{TODO_" in serialized
+
+        try:
+            written, has_todo = await asyncio.to_thread(import_files)
+            await self._reload()
+            generated = {Path(path) for path in written}
+            if not generated:
+                self._restore_scenario_selection(previous_path)
+            else:
+                candidates = [
+                    (index, item.path)
+                    for index, item in enumerate(self.scenarios)
+                    if item.path in generated
+                ]
+                if candidates:
+                    self.select_scenario(candidates[0][0], execute=False)
+            self._refresh_status(
+                self.locale(
+                    "api.status.imported",
+                    count=len(written),
+                )
+            )
+            self._show_import_result(written, has_todo)
+        except ApiConfigError:
+            self._open_openapi_import(source, self.locale("api.error.openapi_import"))
+        except FileExistsError:
+            if force:
+                self._open_openapi_import(source, self.locale("api.error.openapi_conflict"))
+            else:
+                self.app.push_screen(
+                    ApiOpenApiOverwriteDialog(
+                        locale=self.locale,
+                        destination=self.scenario_dir,
+                    ),
+                    lambda confirmed: self._handle_openapi_overwrite(source, confirmed),
+                )
+        except (OSError, UnicodeError, TypeError, ValueError):
+            self._open_openapi_import(source, self.locale("api.error.openapi_import"))
+        finally:
+            self._busy = False
+
+    def _restore_scenario_selection(self, previous_path: Path | None) -> None:
+        self.selected_scenario_index = next(
+            (
+                index
+                for index, item in enumerate(self.scenarios)
+                if previous_path is not None and item.path == previous_path
+            ),
+            None,
+        )
+        self.selected_run_index = None
+        self.selected_run = None
+        self._refresh_detail()
+
+    def _show_import_result(self, written: tuple[Path, ...], has_todo: bool) -> None:
+        lines = [
+            self.locale("api.import.result.title"),
+            self.locale("api.import.result.count", count=len(written)),
+            self.locale("api.import.result.location", path=str(self.scenario_dir.resolve())),
+        ]
+        if not written:
+            lines.extend(("", self.locale("api.import.result.none")))
+        elif has_todo:
+            lines.extend(("", self.locale("api.import.result.todo")))
+        else:
+            lines.extend(("", self.locale("api.import.result.ready")))
+        self.query_one("#api-detail", ApiDetail).update(self._wrap(lines))
+
+    def _handle_quick_create(self, request: ApiQuickCreateRequest | None) -> None:
+        if request is None:
+            return
+        self.run_worker(self._persist_quick_create(request), exclusive=True)
+
+    def _handle_quick_create_overwrite(
+        self,
+        request: ApiQuickCreateRequest,
+        confirmed: bool,
+    ) -> None:
+        if confirmed:
+            self.run_worker(self._persist_quick_create(request, force=True), exclusive=True)
+        else:
+            self._open_quick_create(request)
+
+    async def _persist_quick_create(
+        self,
+        request: ApiQuickCreateRequest,
+        *,
+        force: bool = False,
+    ) -> None:
+        self._busy = True
+        self._refresh_status(self.locale("api.status.creating"))
+        scenario = ApiScenario(
+            name=request.name,
+            steps=(
+                ApiStep(
+                    name="请求",
+                    request=ApiRequest(method=request.method, url=request.url),
+                ),
+            ),
+        )
+        try:
+            written = write_scenario_files(
+                (ScenarioFile(filename_stem=request.name, scenario=scenario),),
+                self.scenario_dir,
+                force=force,
+            )
+            await self._reload()
+            selected_path = written[0] if written else None
+            self.selected_scenario_index = next(
+                (
+                    index
+                    for index, item in enumerate(self.scenarios)
+                    if selected_path is not None and item.path == selected_path
+                ),
+                None,
+            )
+            self.selected_run_index = None
+            self.selected_run = None
+            self.active_pane = "detail"
+            self._set_active_pane_class()
+            self._refresh_detail()
+            self._refresh_status(self.locale("api.status.created", name=request.name))
+        except FileExistsError:
+            if force:
+                self._show_inline_error(self.locale("api.error.quick_create"))
+            else:
+                self.app.push_screen(
+                    ApiScenarioOverwriteDialog(
+                        locale=self.locale,
+                        filename=scenario_filename(request.name),
+                    ),
+                    lambda confirmed: self._handle_quick_create_overwrite(request, confirmed),
+                )
+        except (OSError, UnicodeError, TypeError, ValueError):
+            self._show_inline_error(self.locale("api.error.quick_create"))
+        finally:
+            self._busy = False
 
     def select_scenario(self, index: int, *, execute: bool = False) -> None:
         if not 0 <= index < len(self.scenarios):
@@ -452,7 +685,12 @@ class ApiScreen(Screen[None]):
             panel = self.query_one(
                 "#api-scenarios" if self.active_pane == "scenarios" else "#api-runs"
             )
-            if list(panel.query(Button)):
+            if self.active_pane == "scenarios" and not self._has_loadable_scenarios():
+                empty_action = next(iter(panel.query("#api-quick-create")), None)
+                if empty_action is not None:
+                    empty_action.focus()
+                    return
+            if self._row_buttons(panel):
                 self._focus_row(0, keep_selection=True)
             else:
                 self.set_focus(None)
@@ -469,7 +707,7 @@ class ApiScreen(Screen[None]):
         if self.active_pane not in {"scenarios", "runs"}:
             return
         panel = self.query_one("#api-scenarios" if self.active_pane == "scenarios" else "#api-runs")
-        buttons = list(panel.query(Button))
+        buttons = self._row_buttons(panel)
         if not buttons:
             return
         current = next((index for index, button in enumerate(buttons) if button.has_focus), None)
@@ -498,6 +736,14 @@ class ApiScreen(Screen[None]):
         if not keep_selection:
             self._refresh_detail()
 
+    def _row_buttons(self, panel: object) -> list[Button]:
+        prefix = "scenario-" if self.active_pane == "scenarios" else "run-"
+        return [
+            button
+            for button in panel.query(Button)  # type: ignore[attr-defined]
+            if (button.id or "").startswith(prefix)
+        ]
+
     def action_run_selected(self) -> None:
         if self.selected_scenario_index is not None and not self._busy:
             item = self.scenarios[self.selected_scenario_index]
@@ -505,8 +751,49 @@ class ApiScreen(Screen[None]):
                 self.run_worker(self._run_scenario(self.selected_scenario_index), exclusive=True)
 
     def action_export_selected(self) -> None:
-        if self.selected_run is not None:
-            self.run_worker(self._export_run(), exclusive=True)
+        if self.selected_run is not None and not self._busy:
+            self._open_export_dialog()
+
+    def _open_export_dialog(
+        self,
+        initial: ApiExportRequest | None = None,
+        error: str = "",
+    ) -> None:
+        if self.selected_run is None:
+            return
+        self.app.push_screen(
+            ApiExportDialog(
+                locale=self.locale,
+                run=self.selected_run,
+                default_destination=self._project_dir() / "evidence",
+                initial=initial,
+                error=error,
+            ),
+            self._handle_export_request,
+        )
+
+    def _handle_export_request(self, request: ApiExportRequest | None) -> None:
+        if request is None or self.selected_run is None or self._busy:
+            return
+        self.run_worker(
+            self._export_run(request),
+            name="api-export",
+            group="api-export",
+            exclusive=True,
+            exit_on_error=False,
+        )
+
+    def _handle_export_overwrite(self, request: ApiExportRequest, confirmed: bool) -> None:
+        if confirmed:
+            self.run_worker(
+                self._export_run(request, force=True),
+                name="api-export",
+                group="api-export",
+                exclusive=True,
+                exit_on_error=False,
+            )
+        else:
+            self._open_export_dialog(request)
 
     def action_go_back(self) -> None:
         if getattr(self.app, "owns_api_screen", False):
@@ -586,7 +873,10 @@ class ApiScreen(Screen[None]):
             raise ApiConfigError(f"{self.locale('api.error.variable')} 缺少：{missing}。")
         return dict(resolution.values)
 
-    async def _export_run(self) -> None:
+    async def _export_run(self, request: ApiExportRequest, *, force: bool = False) -> None:
+        if self.selected_run is None:
+            return
+        self._busy = True
         self._refresh_status(self.locale("api.status.exporting"))
         try:
             exporter = (
@@ -594,18 +884,42 @@ class ApiScreen(Screen[None]):
                 if self.exporter_factory is not None
                 else ApiEvidenceExporter()
             )
-            destination = self._project_dir() / "evidence"
-            result = exporter.export(self.selected_run, destination, theme="dark", force=False)
-            del result
+            result = await asyncio.to_thread(
+                exporter.export,
+                self.selected_run,
+                request.destination,
+                theme=request.theme,
+                force=force,
+            )
+            if not isinstance(result, ApiExportResult):
+                raise TypeError("exporter returned an invalid result")
             self._refresh_status(self.locale("api.status.exported"))
-        except ApiConfigError:
-            self._show_inline_error(self.locale("api.error.export"))
-        except ApiPersistenceError:
-            self._show_inline_error(self.locale("api.error.repository"))
-        except ApiDomainError:
-            self._show_inline_error(self.locale("api.error.export"))
-        except (FontResolutionError, OSError, UnicodeError, TypeError, ValueError):
-            self._show_inline_error(self.locale("api.error.export"))
+            self.app.push_screen(
+                ApiExportResultScreen(locale=self.locale, result=result, run=self.selected_run)
+            )
+        except ApiPersistenceError as error:
+            if not force and "导出目录已存在" in error.user_message:
+                self.app.push_screen(
+                    ApiExportOverwriteDialog(
+                        locale=self.locale,
+                        destination=request.destination,
+                    ),
+                    lambda confirmed: self._handle_export_overwrite(request, confirmed),
+                )
+            else:
+                self._open_export_dialog(request, self.locale("api.error.export_retry"))
+        except (
+            ApiConfigError,
+            ApiDomainError,
+            FontResolutionError,
+            OSError,
+            UnicodeError,
+            TypeError,
+            ValueError,
+        ):
+            self._open_export_dialog(request, self.locale("api.error.export_retry"))
+        finally:
+            self._busy = False
 
     def _show_inline_error(self, message: str) -> None:
         safe = message if "发生了什么" in message else self.locale("api.error.generic")

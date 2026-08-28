@@ -12,7 +12,7 @@ from csbox.lab.captures import CaptureStore
 from csbox.lab.exporter import LabExporter, LabExportError
 from csbox.lab.models import SessionPaths
 from csbox.lab.recorder import AsciicastV3Reader, RecorderError
-from csbox.lab.replay import CheckpointStore, ReplayService
+from csbox.lab.replay import CheckpointStore, ReplayService, ReplayState
 from csbox.lab.repository import SessionRepository
 
 
@@ -151,6 +151,7 @@ def test_reader_keeps_valid_prefix_and_warns_for_invalid_events(
         ("o", "after"),
     ]
     assert result.warnings
+    assert ReplayService(path).state is ReplayState.CORRUPT
 
 
 def test_reader_rejects_overflowing_integer_timestamp_without_traceback(
@@ -192,6 +193,7 @@ def test_replay_rejects_malformed_resize_instead_of_constructing_invalid_termina
     assert any(
         "resize" in warning.lower() or "invalid" in warning.lower() for warning in service.warnings
     )
+    assert service.state is ReplayState.CORRUPT
 
 
 def test_corrupt_checkpoint_is_rebuilt_without_modifying_raw_cast(tmp_path: Path) -> None:
@@ -232,7 +234,9 @@ def test_corrupt_capture_primary_recovers_backup_and_corrupt_metadata_is_warning
     assert paths.metadata.read_text(encoding="utf-8") == "{broken"
 
 
-def test_repository_lists_healthy_session_when_sibling_session_is_partial(tmp_path: Path) -> None:
+def test_repository_lists_recording_warning_when_sibling_session_is_partial(
+    tmp_path: Path,
+) -> None:
     repository = SessionRepository(tmp_path / "sessions")
     healthy = repository.create_running(
         "健康 session",
@@ -263,7 +267,13 @@ def test_repository_lists_healthy_session_when_sibling_session_is_partial(tmp_pa
 
     sessions = repository.list_sessions()
 
-    assert [item.paths.root.name for item in sessions] == ["healthy"]
+    assert {item.paths.root.name for item in sessions} == {"healthy", "corrupt-cast"}
+    corrupt_summary = next(item for item in sessions if item.paths.root.name == "corrupt-cast")
+    assert corrupt_summary.recording_warnings == ("recording is not readable: RecorderError",)
+    assert (
+        next(item for item in sessions if item.paths.root.name == "healthy").recording_warnings
+        == ()
+    )
 
 
 def test_repository_reads_metadata_through_a_bounded_regular_file_boundary(
@@ -294,7 +304,7 @@ def test_repository_reads_metadata_through_a_bounded_regular_file_boundary(
     assert observed[0][1] > 0
 
 
-def test_repository_does_not_list_metadata_only_session_as_available(tmp_path: Path) -> None:
+def test_repository_lists_metadata_only_session_with_recording_warning(tmp_path: Path) -> None:
     repository = SessionRepository(tmp_path / "sessions")
     missing_cast = repository.create_running(
         "缺少录制",
@@ -307,7 +317,50 @@ def test_repository_does_not_list_metadata_only_session_as_available(tmp_path: P
     )
     repository.finish(missing_cast, "completed", exit_code=0)
 
-    assert repository.list_sessions() == ()
+    sessions = repository.list_sessions()
+
+    assert len(sessions) == 1
+    assert sessions[0].paths.root.name == "missing-cast"
+    assert sessions[0].recording_warnings == ("recording file is missing",)
+
+
+def test_repository_lists_body_integrity_warnings_for_review(tmp_path: Path) -> None:
+    repository = SessionRepository(tmp_path / "sessions")
+    truncated = repository.create_running(
+        "截断录制",
+        platform="linux",
+        shell="bash",
+        shell_version=None,
+        size=TerminalSize(8, 2),
+        cwd=tmp_path,
+        session_id="truncated-cast",
+    )
+    truncated.cast.write_text(
+        json.dumps({"version": 3, "term": {"cols": 8, "rows": 2}})
+        + "\n"
+        + json.dumps([0.1, "o", "valid"])
+        + "\n"
+        + '[0.1,"o","unfinished"',
+        encoding="utf-8",
+    )
+    repository.finish(truncated, "completed", exit_code=0)
+
+    malformed = repository.create_running(
+        "非法事件",
+        platform="linux",
+        shell="bash",
+        shell_version=None,
+        size=TerminalSize(8, 2),
+        cwd=tmp_path,
+        session_id="malformed-event",
+    )
+    write_cast(malformed.cast, [[0.1, "o", "valid"], [0.1, "r", "0x0"]])
+    repository.finish(malformed, "completed", exit_code=0)
+
+    summaries = {item.paths.root.name: item for item in repository.list_sessions()}
+
+    assert any("truncated" in warning for warning in summaries["truncated-cast"].recording_warnings)
+    assert any("resize" in warning for warning in summaries["malformed-event"].recording_warnings)
 
 
 def test_export_rejects_missing_cast_before_creating_partial_output(tmp_path: Path) -> None:

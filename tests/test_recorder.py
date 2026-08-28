@@ -48,8 +48,8 @@ def test_recorder_writes_v3_header_filtered_env_and_all_event_codes(tmp_path: Pa
     assert header["version"] == 3
     assert header["term"] == {"cols": 80, "rows": 24, "type": "xterm-256color"}
     assert header["env"] == {"SHELL": "/bin/bash", "TERM": "xterm-256color"}
-    assert [json.loads(line)[1] for line in lines[1:]] == ["o", "i", "r", "m", "m", "x"]
-    assert json.loads(lines[3])[2] == "120x40"
+    assert [json.loads(line)[1] for line in lines[1:]] == ["o", "r", "m", "m", "x"]
+    assert json.loads(lines[2])[2] == "120x40"
     assert json.loads(lines[-1])[1:] == ["x", "0"]
 
 
@@ -98,7 +98,7 @@ def test_incomplete_output_and_input_tails_are_flushed_before_exit(tmp_path: Pat
     recorder.close()
 
     events = [json.loads(line) for line in cast_path.read_text(encoding="utf-8").splitlines()[1:]]
-    assert events[-3:] == [[0.0, "o", "�"], [0.0, "i", "�"], [0.1, "x", "7"]]
+    assert events[-3:] == [[0.1, "o", ""], [0.0, "o", "�"], [0.2, "x", "7"]]
     assert events[-1][1] == "x"
 
 

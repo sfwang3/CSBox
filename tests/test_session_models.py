@@ -7,7 +7,7 @@ from pydantic import ValidationError
 from csbox.lab.models import SessionMetadata, SessionPaths
 
 
-def test_session_metadata_defaults_to_running_and_uses_stable_json_aliases() -> None:
+def test_session_metadata_defaults_to_starting_and_uses_stable_json_aliases() -> None:
     cwd = Path("/tmp/中文项目")
     metadata = SessionMetadata(
         id="session-001",
@@ -22,12 +22,16 @@ def test_session_metadata_defaults_to_running_and_uses_stable_json_aliases() -> 
         csboxVersion="0.1.0",
     )
 
-    assert metadata.status == "running"
+    assert metadata.status == "starting"
     assert metadata.ended_at is None
     assert metadata.model_dump(mode="json", by_alias=True) == {
         "id": "session-001",
         "name": "网络实验",
-        "status": "running",
+        "status": "starting",
+        "statusReason": None,
+        "exitCode": None,
+        "ownerPid": None,
+        "ownerToken": None,
         "startedAt": "2026-08-10T06:00:00Z",
         "endedAt": None,
         "platform": "linux",

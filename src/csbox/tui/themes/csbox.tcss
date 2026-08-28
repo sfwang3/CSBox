@@ -25,11 +25,6 @@ Screen {
     height: 1;
 }
 
-#brand-version {
-    color: #70859a;
-    height: 1;
-}
-
 #home-greeting {
     color: #e7f0f8;
     margin-top: 1;
@@ -41,17 +36,18 @@ Screen {
     height: 1;
 }
 
-#environment-panel,
+#home-quick-start {
+    color: #86c8ae;
+    height: auto;
+    margin-top: 1;
+}
+
 #action-panel,
-#recent-panel {
+#project-panel,
+#workflow-status-panel {
     background: #0e1a26;
     border: round #29455f;
     padding: 1;
-}
-
-#environment-panel {
-    height: auto;
-    margin-top: 1;
 }
 
 .panel-title {
@@ -59,11 +55,6 @@ Screen {
     text-style: bold;
     height: 1;
     margin-bottom: 1;
-}
-
-#environment-content {
-    color: #b3c5d6;
-    height: auto;
 }
 
 #main-scroll {
@@ -76,16 +67,39 @@ Screen {
 #content-grid {
     height: auto;
     layout: vertical;
+    margin-top: 1;
 }
 
 #action-panel,
-#recent-panel {
+#home-context {
     height: auto;
     margin-bottom: 1;
 }
 
-#recent-panel {
-    min-height: 8;
+#home-context {
+    width: 100%;
+}
+
+#project-panel,
+#workflow-status-panel {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#home-project-path {
+    color: #d7e6f3;
+    height: auto;
+}
+
+#home-project-note {
+    color: #70859a;
+    height: 1;
+    margin-top: 1;
+}
+
+#home-workflow-status {
+    color: #bcd0e0;
+    height: auto;
 }
 
 .entry-button {
@@ -105,23 +119,6 @@ Screen {
 .entry-button:focus {
     border: tall #969dff;
     text-style: bold;
-}
-
-#demo-note {
-    color: #f0bd60;
-    height: auto;
-    margin-bottom: 1;
-}
-
-#demo-count {
-    color: #8da6ba;
-    height: 1;
-    margin-bottom: 1;
-}
-
-#recent-content {
-    color: #c1d4e4;
-    height: auto;
 }
 
 #shortcut-bar {
@@ -181,15 +178,302 @@ UnavailableDialog {
     overflow-y: auto;
 }
 
-.wide #recent-panel {
+.wide #home-context {
     width: 3fr;
     height: 1fr;
     margin-bottom: 0;
 }
 
+LabStartDialog {
+    align: center middle;
+    background: rgba(0, 0, 0, 0.72);
+}
+
+#lab-start-dialog {
+    width: 66;
+    max-width: 92%;
+    height: 23;
+    max-height: 96%;
+    border: round #6d79e8;
+    background: #101c29;
+    padding: 1 2;
+}
+
+#lab-start-card {
+    height: 100%;
+}
+
+#lab-start-heading {
+    color: #9da4ff;
+    text-style: bold;
+    height: 1;
+    margin-bottom: 1;
+}
+
+#lab-start-fields {
+    height: 1fr;
+    scrollbar-size: 1 1;
+}
+
+.field-label {
+    color: #8ea5b9;
+    height: 1;
+    margin-top: 1;
+}
+
+#lab-start-name,
+#lab-start-shell-select {
+    width: 100%;
+}
+
+#lab-start-shell-display,
+#lab-start-project {
+    color: #dbe7f2;
+    height: 1;
+}
+
+#lab-start-advanced {
+    width: 18;
+    height: 3;
+    margin-top: 0;
+}
+
+#lab-start-shell-select {
+    height: 3;
+}
+
+#lab-start-hint {
+    color: #86c8ae;
+    height: auto;
+    margin-top: 1;
+}
+
+#lab-start-validation {
+    color: #f0bd60;
+    height: auto;
+    min-height: 1;
+}
+
+#lab-start-actions {
+    height: 3;
+    margin-top: 1;
+}
+
+#lab-start-confirm,
+#lab-start-cancel {
+    width: 1fr;
+    height: 3;
+}
+
+#lab-start-confirm {
+    margin-right: 1;
+}
+
 #review-layout {
     height: 100%;
     padding: 1 2 0 2;
+}
+
+#records-layout {
+    height: 100%;
+    padding: 1 2 0 2;
+}
+
+#records-title {
+    color: #9da4ff;
+    text-style: bold;
+    height: 2;
+    border-bottom: solid #25384b;
+    margin-bottom: 1;
+}
+
+#records-body {
+    height: 1fr;
+    layout: horizontal;
+}
+
+#records-list,
+#records-detail,
+#records-narrow {
+    background: #0e1a26;
+    border: round #29455f;
+    color: #c1d4e4;
+    padding: 1;
+    overflow-y: auto;
+}
+
+#records-list {
+    width: 2fr;
+}
+
+#records-detail {
+    width: 3fr;
+    margin-left: 1;
+}
+
+#records-narrow {
+    display: none;
+    height: 1fr;
+}
+
+#records-message {
+    color: #f0bd60;
+    height: 1;
+    margin-top: 1;
+}
+
+#records-actions {
+    height: 3;
+    align: right middle;
+}
+
+#records-actions Button {
+    min-width: 14;
+    height: 3;
+}
+
+#records-review:focus,
+#records-export:focus,
+#records-start:focus {
+    border: tall #f0bd60;
+}
+
+#records-footer {
+    height: 1;
+    color: #a5bacd;
+    background: #101e2b;
+    padding: 0 1;
+    margin-top: 1;
+}
+
+.narrow #records-body {
+    display: none;
+}
+
+.narrow #records-narrow {
+    display: block;
+}
+
+.wide #records-narrow {
+    display: none;
+}
+
+ExportDialog,
+ExportOverwriteDialog,
+ExportResultScreen {
+    align: center middle;
+    background: rgba(0, 0, 0, 0.72);
+}
+
+#export-dialog,
+#export-overwrite-dialog,
+#export-result-dialog {
+    width: 70;
+    max-width: 92%;
+    height: auto;
+    max-height: 96%;
+    border: round #6d79e8;
+    background: #101c29;
+    padding: 1 2;
+}
+
+#export-dialog {
+    height: 23;
+}
+
+#export-overwrite-dialog,
+#export-result-dialog {
+    width: 76;
+}
+
+#export-heading,
+#export-overwrite-heading,
+#export-result-heading {
+    color: #9da4ff;
+    text-style: bold;
+    height: 1;
+    margin-bottom: 1;
+}
+
+#export-experiment,
+#export-captures,
+#export-theme-display {
+    color: #dbe7f2;
+    height: auto;
+}
+
+#export-captures {
+    margin-top: 0;
+}
+
+#export-destination-input {
+    width: 100%;
+    height: 3;
+}
+
+#export-validation {
+    color: #f0bd60;
+    height: auto;
+    min-height: 1;
+}
+
+#export-restore-default {
+    width: 18;
+    height: 3;
+    margin-top: 0;
+}
+
+#export-theme-select {
+    width: 100%;
+    height: 3;
+}
+
+#export-advanced {
+    width: 18;
+    height: 3;
+    margin-top: 0;
+}
+
+#export-actions,
+#export-overwrite-actions,
+#export-result-actions {
+    height: 3;
+    margin-top: 0;
+    align: right middle;
+}
+
+#export-actions Button,
+#export-overwrite-actions Button,
+#export-result-actions Button {
+    min-width: 14;
+    height: 3;
+    margin-left: 1;
+}
+
+#export-overwrite-card,
+#export-result-card {
+    height: auto;
+}
+
+#export-card {
+    height: 100%;
+}
+
+#export-fields {
+    height: 1fr;
+    scrollbar-size: 1 1;
+}
+
+#export-overwrite-message,
+#export-result-body,
+#export-result-artifacts {
+    color: #dbe7f2;
+    height: auto;
+    margin-bottom: 1;
+}
+
+#export-result-artifacts {
+    color: #bcd0e0;
 }
 
 #review-title {
@@ -408,6 +692,11 @@ UnavailableDialog {
     padding: 1 2 0 2;
 }
 
+#pack-body-scroll {
+    height: 1fr;
+    scrollbar-size: 1 1;
+}
+
 #api-title,
 #pack-title {
     color: #9da4ff;
@@ -480,6 +769,225 @@ UnavailableDialog {
     text-style: bold;
 }
 
+.api-empty-action {
+    width: 100%;
+    min-height: 3;
+    margin-top: 1;
+    border: round #326fa2;
+    background: #122335;
+    color: #dbeeff;
+}
+
+.api-empty-action:focus {
+    border: tall #969dff;
+    text-style: bold;
+}
+
+#api-quick-create-dialog,
+#api-scenario-overwrite-dialog,
+#api-openapi-import-dialog,
+#api-openapi-overwrite-dialog {
+    align: center middle;
+    background: #07111a 70%;
+}
+
+#api-quick-create-card,
+#api-scenario-overwrite-card,
+#api-openapi-card,
+#api-openapi-overwrite-card {
+    width: 76;
+    max-width: 92%;
+    max-height: 90%;
+    padding: 1 2;
+    background: #0e1a26;
+    border: round #426784;
+}
+
+#api-quick-create-heading,
+#api-overwrite-heading,
+#api-openapi-heading,
+#api-openapi-overwrite-heading {
+    height: 2;
+    color: #9da4ff;
+    text-style: bold;
+    border-bottom: solid #25384b;
+    margin-bottom: 1;
+}
+
+#api-quick-create-fields {
+    height: 1fr;
+    overflow-y: auto;
+}
+
+.api-quick-create-control {
+    width: 100%;
+    margin-bottom: 1;
+}
+
+#api-quick-create-validation {
+    color: #f0bd60;
+    height: auto;
+    min-height: 1;
+}
+
+#api-quick-create-hint,
+#api-overwrite-message {
+    color: #a5bacd;
+    height: auto;
+    margin-top: 1;
+}
+
+#api-quick-create-actions,
+#api-scenario-overwrite-actions {
+    height: 3;
+    align: right middle;
+    margin-top: 1;
+}
+
+#api-quick-create-actions Button,
+#api-scenario-overwrite-actions Button {
+    min-width: 12;
+    margin-left: 1;
+}
+
+#api-quick-create-submit:focus,
+#api-quick-create-cancel:focus,
+#api-scenario-overwrite-confirm:focus,
+#api-scenario-overwrite-cancel:focus,
+#api-openapi-submit:focus,
+#api-openapi-cancel:focus,
+#api-openapi-overwrite-confirm:focus,
+#api-openapi-overwrite-cancel:focus {
+    border: tall #f0bd60;
+}
+
+#api-openapi-fields {
+    height: 1fr;
+    overflow-y: auto;
+}
+
+.api-openapi-control {
+    width: 100%;
+    margin-bottom: 1;
+}
+
+#api-openapi-validation {
+    color: #f0bd60;
+    height: auto;
+    min-height: 1;
+}
+
+#api-openapi-hint {
+    color: #a5bacd;
+    height: auto;
+    margin-top: 1;
+}
+
+#api-openapi-actions {
+    height: 3;
+    align: right middle;
+    margin-top: 1;
+}
+
+#api-openapi-actions Button {
+    min-width: 12;
+    margin-left: 1;
+}
+
+#api-openapi-overwrite-message {
+    color: #a5bacd;
+    height: auto;
+    margin-top: 1;
+}
+
+#api-openapi-overwrite-actions {
+    height: 3;
+    align: right middle;
+    margin-top: 1;
+}
+
+#api-openapi-overwrite-actions Button {
+    min-width: 12;
+    margin-left: 1;
+}
+
+#api-export-dialog,
+#api-export-overwrite-dialog,
+#api-export-result-dialog {
+    align: center middle;
+    background: #07111a 70%;
+}
+
+#api-export-card,
+#api-export-overwrite-card,
+#api-export-result-card {
+    width: 76;
+    max-width: 92%;
+    max-height: 90%;
+    padding: 1 2;
+    background: #0e1a26;
+    border: round #426784;
+}
+
+#api-export-heading,
+#api-export-overwrite-heading,
+#api-export-result-heading {
+    height: 2;
+    color: #9da4ff;
+    text-style: bold;
+    border-bottom: solid #25384b;
+    margin-bottom: 1;
+}
+
+#api-export-fields {
+    height: 1fr;
+    overflow-y: auto;
+}
+
+.api-export-control {
+    width: 100%;
+    margin-bottom: 1;
+}
+
+#api-export-hint,
+#api-export-run,
+#api-export-overwrite-message,
+#api-export-result-body,
+#api-export-result-artifacts {
+    color: #a5bacd;
+    height: auto;
+}
+
+#api-export-validation {
+    color: #f0bd60;
+    height: auto;
+    min-height: 1;
+}
+
+#api-export-actions,
+#api-export-overwrite-actions,
+#api-export-result-actions {
+    height: 3;
+    align: right middle;
+    margin-top: 1;
+}
+
+#api-export-actions Button,
+#api-export-overwrite-actions Button,
+#api-export-result-actions Button {
+    min-width: 12;
+    margin-left: 1;
+}
+
+#api-export-submit:focus,
+#api-export-cancel:focus,
+#api-export-restore-default:focus,
+#api-export-overwrite-confirm:focus,
+#api-export-overwrite-cancel:focus,
+#api-export-result-return:focus {
+    border: tall #f0bd60;
+}
+
 #api-footer,
 #pack-footer {
     height: 1;
@@ -495,7 +1003,41 @@ UnavailableDialog {
 }
 
 #pack-items {
-    height: 1fr;
+    height: auto;
+    margin-top: 1;
+}
+
+#pack-destination-label {
+    color: #dbe7f2;
+    height: 1;
+    margin-bottom: 1;
+}
+
+#pack-destination-input {
+    width: 100%;
+    height: 3;
+}
+
+#pack-destination-validation {
+    color: #f0bd60;
+    height: auto;
+    min-height: 1;
+}
+
+#pack-destination-hint {
+    color: #8ea5b9;
+    height: auto;
+}
+
+#pack-destination-actions {
+    height: 3;
+    align: left middle;
+    margin-top: 1;
+}
+
+#pack-destination-actions Button {
+    min-width: 14;
+    margin-right: 1;
 }
 
 #pack-actions {
@@ -510,7 +1052,80 @@ UnavailableDialog {
 }
 
 #pack-confirm:focus,
-#pack-cancel:focus {
+#pack-cancel:focus,
+#pack-edit-destination:focus,
+#pack-restore-default:focus,
+#pack-update-preview:focus {
+    border: tall #f0bd60;
+}
+
+PackOverwriteDialog,
+PackResultScreen {
+    align: center middle;
+    background: rgba(0, 0, 0, 0.72);
+}
+
+#pack-overwrite-dialog,
+#pack-result-dialog {
+    width: 76;
+    max-width: 92%;
+    max-height: 90%;
+    height: auto;
+    border: round #6d79e8;
+    background: #101c29;
+    padding: 1 2;
+}
+
+#pack-overwrite-heading,
+#pack-result-heading {
+    color: #9da4ff;
+    text-style: bold;
+    height: 2;
+    margin-bottom: 1;
+}
+
+#pack-overwrite-message,
+#pack-result-body {
+    color: #dbe7f2;
+    height: auto;
+}
+
+#pack-overwrite-scroll {
+    height: auto;
+    max-height: 8;
+    min-height: 2;
+    scrollbar-size: 1 1;
+}
+
+#pack-result-scroll {
+    height: 1fr;
+    scrollbar-size: 1 1;
+}
+
+#pack-overwrite-actions,
+#pack-result-actions {
+    height: 3;
+    align: right middle;
+    margin-top: 1;
+}
+
+#pack-overwrite-actions Button,
+#pack-result-actions Button {
+    min-width: 14;
+    margin-left: 1;
+}
+
+#pack-result-footer {
+    height: 1;
+    color: #a5bacd;
+    background: #101e2b;
+    padding: 0 1;
+    margin-top: 1;
+}
+
+#pack-overwrite-confirm:focus,
+#pack-overwrite-cancel:focus,
+#pack-result-return:focus {
     border: tall #f0bd60;
 }
 

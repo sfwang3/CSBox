@@ -10,6 +10,15 @@ from csbox.cli.main import app
 from csbox.pack.models import PackReport
 
 
+def test_pack_help_makes_output_path_semantics_explicit() -> None:
+    result = CliRunner().invoke(app, ["pack", "--help"])
+
+    assert result.exit_code == 0
+    help_text = result.stdout.replace(" ", "").replace("\n", "").replace("│", "")
+    assert "已存在目录使用默认ZIP文件名" in help_text
+    assert "其他路径视为最终ZIP文件" in help_text
+
+
 def test_pack_json_routes_to_service(monkeypatch, tmp_path: Path) -> None:
     cli_module = importlib.import_module("csbox.cli.main")
     calls: list[tuple[Path, bool, bool]] = []
