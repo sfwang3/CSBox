@@ -137,6 +137,33 @@ class FakePtyProcess:
             self._condition.notify_all()
 
 
+class FakeNativePTY:
+    def __init__(self, process: FakePtyProcess) -> None:
+        self.process = process
+
+    def isalive(self) -> bool:
+        return self.process.alive
+
+
+class PywinptyLifecycleProcess(FakePtyProcess):
+    """Model pywinpty's wrapper-closing side effect from ``isalive``."""
+
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)
+        self.pty = FakeNativePTY(self)
+        self.resources_closed = False
+
+    def isalive(self) -> bool:
+        self.closed = not self.alive
+        return self.alive
+
+    def close(self, force: bool = False) -> None:
+        if self.closed:
+            return
+        self.resources_closed = True
+        super().close(force)
+
+
 class FakePywinptyPtyProcess(FakePtyProcess):
     """Marks the fake as pywinpty's async high-level process adapter."""
 
@@ -586,29 +613,45 @@ def test_empty_pywinpty_sentinel_is_not_eof(tmp_path: Path) -> None:
     backend.close()
 
 
-def test_empty_pywinpty_sentinel_after_child_exit_is_eof(tmp_path: Path) -> None:
-    class EmptyAfterExitProcess(FakePtyProcess):
-        def read(self, size: int = 1024) -> str:
-            with self._condition:
-                if self.frames:
-                    frame = self.frames.popleft()
-                    if isinstance(frame, BaseException):
-                        raise frame
-                    return frame[:size]
-                if not self.alive and not self.closed:
-                    return ""
-            return super().read(size)
-
-    process = EmptyAfterExitProcess(frames=["tail-output"], alive=False, exitstatus=0)
+def test_empty_pywinpty_sentinel_keeps_trailing_output_after_child_exit(tmp_path: Path) -> None:
+    process = FakePtyProcess(
+        frames=["before-sentinel", "", "after-sentinel", EOFError()],
+        alive=False,
+        exitstatus=0,
+    )
     backend = make_backend(process)
     spawn_backend(backend, tmp_path)
 
     try:
-        assert backend.read(timeout=0.5) == b"tail-output"
-        assert backend.read(timeout=0.5) == b""
+        received = bytearray()
+        while True:
+            chunk = backend.read(timeout=0.5)
+            assert chunk is not None
+            if chunk == b"":
+                break
+            received.extend(chunk)
+        assert bytes(received) == b"before-sentinelafter-sentinel"
         assert backend.exit_code == 0
     finally:
         backend.close()
+
+
+def test_native_liveness_poll_does_not_skip_pywinpty_cleanup(tmp_path: Path) -> None:
+    process = PywinptyLifecycleProcess(frames=[EOFError()], alive=False, exitstatus=0)
+    PywinptyLifecycleProcess.next_process = process
+    backend = WindowsConPTYBackend(pty_process_factory=PywinptyLifecycleProcess)
+    backend.spawn(
+        ["pwsh.exe", "-NoLogo"],
+        cwd=tmp_path,
+        size=TerminalSize(100, 30),
+    )
+
+    assert backend.is_alive() is False
+    assert process.closed is False
+    backend.close()
+
+    assert process.resources_closed is True
+    assert process.close_calls == 1
 
 
 def test_eof_waits_for_a_racing_child_exit(tmp_path: Path) -> None:

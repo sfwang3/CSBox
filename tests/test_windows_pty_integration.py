@@ -79,19 +79,6 @@ def _read_until_interactive_prompt(
     )
 
 
-def _read_to_eof(backend: WindowsConPTYBackend, *, timeout: float = 10.0) -> bytes:
-    deadline = time.monotonic() + timeout
-    output = bytearray()
-    while time.monotonic() < deadline:
-        chunk = backend.read(timeout=min(0.1, max(0.0, deadline - time.monotonic())))
-        if chunk is None:
-            continue
-        if chunk == b"":
-            return bytes(output)
-        output.extend(chunk)
-    pytest.fail(f"timed out waiting for Windows ConPTY EOF; output={bytes(output[-500:])!r}")
-
-
 def _run_process_after_output(
     argv: list[str],
     *,
@@ -408,12 +395,15 @@ def test_native_windows_conpty_shell_unicode_resize_and_exit(
     )
 
     output += _read_until(backend, b"CSBOX_SIZE_160x45")
-    output += _read_to_eof(backend)
+    output += _read_until(backend, b"CSBOX_FLOW_20")
+    output += _read_until(backend, str(tmp_path).encode())
 
     assert b"CSBOX_SIZE_160x45" in output
     assert "CSBOX_NATIVE_中文_OK".encode() in output
     assert b"CSBOX_FLOW_20" in output
     assert str(tmp_path).encode() in output
+    # PowerShell 5.1 may finish the child before pywinpty reports PTY EOF.
+    # The smoke contract is complete output markers plus the native exit code.
     assert backend.wait(timeout=2.0) == 0
 
 

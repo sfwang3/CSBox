@@ -207,7 +207,7 @@ class WindowsConPTYBackend(TerminalBackend):
             if self._process is None or self._closed:
                 return False
             try:
-                alive = bool(self._process.isalive())
+                alive = self._process_is_alive(self._process)
             except Exception as cause:
                 raise TerminalBackendError("查询 Windows ConPTY 状态失败。", cause) from cause
             if not alive:
@@ -309,14 +309,10 @@ class WindowsConPTYBackend(TerminalBackend):
                     raise TypeError(f"PtyProcess.read returned {type(text).__name__}")
                 if text == "":
                     # pywinpty uses an empty string for its internal
-                    # ``0011Ignore`` no-output sentinel.  On some native
-                    # PowerShell 5.1 exits the sentinel is the final read,
-                    # so pair it with child liveness before treating it as
-                    # no output.  Actual EOF is also reported as EOFError
-                    # by PtyProcess.read().
-                    if not bool(process.isalive()):
-                        self._capture_exit_status()
-                        break
+                    # ``0011Ignore`` no-output sentinel.  Actual EOF is
+                    # reported as EOFError by PtyProcess.read().  Keep
+                    # consuming after the sentinel: ConPTY may still expose
+                    # trailing output after the child has exited.
                     continue
                 encoded = text.encode("utf-8")
                 offset = 0
@@ -350,7 +346,7 @@ class WindowsConPTYBackend(TerminalBackend):
         deadline = time.monotonic() + self._EOF_EXIT_GRACE
         while True:
             try:
-                if not bool(process.isalive()):
+                if not self._process_is_alive(process):
                     return True
             except Exception as cause:
                 raise RuntimeError(
@@ -378,7 +374,7 @@ class WindowsConPTYBackend(TerminalBackend):
         if error_code not in {6, 109, 232}:
             return False
         try:
-            return not bool(process.isalive())
+            return not self._process_is_alive(process)
         except Exception:
             return self._exit_code is not None
 
@@ -475,7 +471,7 @@ class WindowsConPTYBackend(TerminalBackend):
         if not isinstance(cause, EOFError) and not self._is_expected_closed_handle(cause):
             return False
         try:
-            if bool(process.isalive()):
+            if self._process_is_alive(process):
                 return False
         except Exception:
             self._capture_exit_status()
@@ -494,7 +490,7 @@ class WindowsConPTYBackend(TerminalBackend):
         deadline = time.monotonic() + timeout
         while True:
             try:
-                alive = bool(process.isalive())
+                alive = self._process_is_alive(process)
             except Exception as cause:
                 if self._reader_done and self._is_expected_closed_handle(cause):
                     self._capture_exit_status()
@@ -507,6 +503,16 @@ class WindowsConPTYBackend(TerminalBackend):
             if remaining <= 0:
                 return True
             time.sleep(min(0.01, remaining))
+
+    @staticmethod
+    def _process_is_alive(process: Any) -> bool:
+        """Query pywinpty's native PTY without mutating its wrapper state."""
+
+        native_pty = getattr(process, "pty", None)
+        native_is_alive = getattr(native_pty, "isalive", None)
+        if callable(native_is_alive):
+            return bool(native_is_alive())
+        return bool(process.isalive())
 
     def _is_expected_closed_handle(self, cause: BaseException) -> bool:
         if isinstance(cause, OSError):
