@@ -7,6 +7,7 @@ from textual.containers import Horizontal, Vertical
 from textual.events import Resize
 from textual.screen import Screen
 
+from csbox.check.messages import finding_title, public_finding_message
 from csbox.check.models import CheckFinding, CheckReport, CheckStatus, DetectedProject
 from csbox.core.display_width import truncate_cells
 from csbox.core.safe_paths import safe_relative_path
@@ -100,6 +101,12 @@ class ProjectCheckScreen(Screen[None]):
 
     def _findings(self, findings: tuple[CheckFinding, ...], width: int) -> str:
         lines = ["FINDINGS"]
+        if not any(finding.status in {CheckStatus.WARN, CheckStatus.FAIL} for finding in findings):
+            lines.append("检查完成：未发现需要处理的问题。")
+            if any(finding.status is CheckStatus.SKIP for finding in findings):
+                lines.append("部分检查已跳过，结果不代表全部项目均已检查。")
+            return "\n".join(lines)
+
         for finding in findings:
             location = ""
             if finding.path is not None:
@@ -111,16 +118,20 @@ class ProjectCheckScreen(Screen[None]):
             if finding.line is not None:
                 location += f":{finding.line}"
             category = f" [{finding.category}]" if finding.category else ""
-            if (
-                finding.category in {"env", "private-key", "hard-coded-secret", "deep-secret-scan"}
-                and finding.status is CheckStatus.FAIL
-            ):
-                lines.append(f"{_status_symbol(finding.status)} {location} {finding.category}")
+            if finding.status in {CheckStatus.WARN, CheckStatus.FAIL}:
+                header = (
+                    f"{_status_symbol(finding.status)} {finding_title(finding)} "
+                    f"[{finding.rule_id}] {location}"
+                ).rstrip()
+                lines.extend(wrap_cells(header, width))
+                detail_width = max(2, width - 2)
+                for message_line in public_finding_message(finding).splitlines()[1:]:
+                    lines.extend(wrap_cells(f"  {message_line}", detail_width))
                 continue
             lines.extend(
                 wrap_cells(
                     f"{_status_symbol(finding.status)} {finding.status.value} "
-                    f"{finding.rule_id}{category} {location} {finding.message}",
+                    f"{finding.rule_id}{category} {location} {public_finding_message(finding)}",
                     width,
                 )
             )

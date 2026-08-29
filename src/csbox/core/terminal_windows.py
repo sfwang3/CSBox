@@ -10,7 +10,58 @@ from pathlib import Path
 from typing import Any
 
 from csbox.core.events import TerminalSize
-from csbox.core.terminal import DEFAULT_TERMINAL_SIZE, TerminalBackend, TerminalBackendError
+from csbox.core.terminal import (
+    DEFAULT_TERMINAL_SIZE,
+    TerminalBackend,
+    TerminalBackendError,
+    TerminalProcessExited,
+)
+
+
+def _classify_spawn_failure(cause: BaseException) -> tuple[str, str, int | None]:
+    error_code = _windows_error_code(cause)
+    if error_code in {193, 216}:
+        return (
+            "shell_executable_unlaunchable",
+            "Shell 可执行文件无效或无法启动。请重新安装 Shell 后重试。",
+            error_code,
+        )
+    if isinstance(cause, FileNotFoundError) or error_code in {2, 3}:
+        return (
+            "shell_executable_unavailable",
+            "未找到 Shell 可执行文件。请检查 Shell 安装后重试。",
+            error_code,
+        )
+    return (
+        "conpty_initialization_failure",
+        "无法初始化 Windows ConPTY。请确认 Windows 终端能力后重试。",
+        error_code,
+    )
+
+
+def _windows_error_code(cause: BaseException) -> int | None:
+    error_code = getattr(cause, "winerror", None)
+    if error_code is None:
+        error_code = getattr(cause, "errno", None)
+    if isinstance(error_code, int):
+        return error_code
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+
+        actual = _normalized_windows_error(str(cause))
+        for candidate in (2, 3, 193, 216):
+            expected = _normalized_windows_error(ctypes.FormatError(candidate))
+            if actual and expected and expected in actual:
+                return candidate
+    except (AttributeError, OSError, ValueError):
+        return None
+    return None
+
+
+def _normalized_windows_error(message: str) -> str:
+    return " ".join(message.casefold().strip().rstrip(".").split())
 
 
 class WindowsConPTYBackend(TerminalBackend):
@@ -18,6 +69,7 @@ class WindowsConPTYBackend(TerminalBackend):
 
     _READ_SIZE = 65536
     _CLOSE_GRACE = 0.05
+    _EOF_EXIT_GRACE = 0.5
     _READER_JOIN_TIMEOUT = 0.5
 
     def __init__(
@@ -77,8 +129,18 @@ class WindowsConPTYBackend(TerminalBackend):
                     backend="0",
                 )
             except Exception as cause:
+                kind, message, native_code = _classify_spawn_failure(cause)
+                debug_context = [
+                    f"resolved_executable={command[0]}",
+                    f"cwd={cwd}" if cwd is not None else "cwd=<inherited>",
+                ]
+                if native_code is not None:
+                    debug_context.append(f"native_code={native_code}")
                 raise TerminalBackendError(
-                    "无法创建 Windows ConPTY，请检查 Windows 版本和 Shell 配置。", cause
+                    message,
+                    cause,
+                    kind=kind,
+                    debug_context=tuple(debug_context),
                 ) from cause
             self._process = process
             self._closed = False
@@ -195,10 +257,13 @@ class WindowsConPTYBackend(TerminalBackend):
                 try:
                     process.close(force=force)
                 except Exception as cause:
-                    self._closing = False
-                    raise TerminalBackendError(
-                        "关闭 Windows ConPTY 失败，可重试清理。", cause
-                    ) from cause
+                    if not force and self._is_expected_closed_handle(cause):
+                        pass
+                    else:
+                        self._closing = False
+                        raise TerminalBackendError(
+                            "关闭 Windows ConPTY 失败，可重试清理。", cause
+                        ) from cause
 
             if reader is not None:
                 reader.join(self._READER_JOIN_TIMEOUT)
@@ -232,11 +297,21 @@ class WindowsConPTYBackend(TerminalBackend):
         reader_error: Exception | None = None
         try:
             while True:
-                text = process.read(self._READ_SIZE)
-                if not text:
-                    continue
+                try:
+                    text = process.read(self._READ_SIZE)
+                except EOFError as cause:
+                    if self._confirm_eof_after_process_exit(process):
+                        break
+                    raise RuntimeError(
+                        "Windows ConPTY output closed while the child process is still alive"
+                    ) from cause
                 if not isinstance(text, str):
                     raise TypeError(f"PtyProcess.read returned {type(text).__name__}")
+                if text == "":
+                    # pywinpty uses an empty string for its internal
+                    # ``0011Ignore`` no-output sentinel.  Actual EOF is
+                    # reported as EOFError by PtyProcess.read().
+                    continue
                 encoded = text.encode("utf-8")
                 offset = 0
                 while offset < len(encoded):
@@ -257,13 +332,49 @@ class WindowsConPTYBackend(TerminalBackend):
         except EOFError:
             pass
         except Exception as cause:
-            if not self._closing:
+            if not self._closing and not self._is_expected_reader_close(process, cause):
                 reader_error = cause
         finally:
             with self._output_ready:
                 self._reader_error = reader_error
                 self._reader_done = True
                 self._output_ready.notify_all()
+
+    def _confirm_eof_after_process_exit(self, process: Any) -> bool:
+        deadline = time.monotonic() + self._EOF_EXIT_GRACE
+        while True:
+            try:
+                if not bool(process.isalive()):
+                    return True
+            except Exception as cause:
+                raise RuntimeError(
+                    "Windows ConPTY could not confirm child exit after output EOF"
+                ) from cause
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(0.01, remaining))
+
+    def _is_expected_reader_close(self, process: Any, cause: BaseException) -> bool:
+        """Recognize a native output handle closing after child exit.
+
+        ConPTY consumers observe EOF through either pywinpty's ``EOFError`` or
+        a Windows broken/closed-pipe error depending on which native layer
+        wins the race.  Only the latter codes, with a dead child, are normal;
+        arbitrary reader exceptions remain backend failures.
+        """
+
+        if not isinstance(cause, OSError):
+            return False
+        error_code = getattr(cause, "winerror", None)
+        if error_code is None:
+            error_code = getattr(cause, "errno", None)
+        if error_code not in {6, 109, 232}:
+            return False
+        try:
+            return not bool(process.isalive())
+        except Exception:
+            return self._exit_code is not None
 
     def _drain_output(self, max_bytes: int) -> bytes:
         remaining = min(max_bytes, self._buffered_output_bytes)
@@ -297,7 +408,7 @@ class WindowsConPTYBackend(TerminalBackend):
             try:
                 written = process.write(text)
             except Exception as cause:
-                raise TerminalBackendError("写入 Windows ConPTY 失败。", cause) from cause
+                self._raise_write_failure(process, cause)
             if type(written) is not int or written < 0 or written > len(complete_bytes):
                 cause = ValueError(f"invalid PtyProcess.write result: {written!r}")
                 raise TerminalBackendError(
@@ -339,13 +450,32 @@ class WindowsConPTYBackend(TerminalBackend):
             try:
                 written = process.write(text)
             except Exception as cause:
-                raise TerminalBackendError("写入 Windows ConPTY 失败。", cause) from cause
+                self._raise_write_failure(process, cause)
             if type(written) is not int or written < 0:
                 cause = ValueError(f"invalid PtyProcess.write result: {written!r}")
                 raise TerminalBackendError(
                     "Windows ConPTY 返回了无效的写入字节数。", cause
                 ) from cause
             self._input_buffer = self._input_buffer[complete_length:]
+
+    def _raise_write_failure(self, process: Any, cause: Exception) -> None:
+        if self._is_expected_input_close(process, cause):
+            self._capture_exit_status()
+            self._input_buffer = b""
+            raise TerminalProcessExited(self._exit_code) from cause
+        raise TerminalBackendError("写入 Windows ConPTY 失败。", cause) from cause
+
+    def _is_expected_input_close(self, process: Any, cause: BaseException) -> bool:
+        if not isinstance(cause, EOFError) and not self._is_expected_closed_handle(cause):
+            return False
+        try:
+            if bool(process.isalive()):
+                return False
+        except Exception:
+            self._capture_exit_status()
+            return self._exit_code is not None
+        self._capture_exit_status()
+        return True
 
     @staticmethod
     def _complete_utf8_length(data: bytes) -> int:
@@ -360,6 +490,9 @@ class WindowsConPTYBackend(TerminalBackend):
             try:
                 alive = bool(process.isalive())
             except Exception as cause:
+                if self._reader_done and self._is_expected_closed_handle(cause):
+                    self._capture_exit_status()
+                    return False
                 raise TerminalBackendError("查询 Windows ConPTY 状态失败。", cause) from cause
             if not alive:
                 self._capture_exit_status()
@@ -368,6 +501,19 @@ class WindowsConPTYBackend(TerminalBackend):
             if remaining <= 0:
                 return True
             time.sleep(min(0.01, remaining))
+
+    def _is_expected_closed_handle(self, cause: BaseException) -> bool:
+        if isinstance(cause, OSError):
+            error_code = getattr(cause, "winerror", None)
+            if error_code is None:
+                error_code = getattr(cause, "errno", None)
+            return error_code in {6, 109, 232}
+        if isinstance(cause, ValueError):
+            message = str(cause).casefold()
+            return any(
+                marker in message for marker in ("closed", "invalid handle", "bad file descriptor")
+            )
+        return False
 
     def _capture_exit_status(self) -> None:
         if self._process is None or self._exit_code is not None:

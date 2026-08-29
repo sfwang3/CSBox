@@ -4,12 +4,15 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 import pytest
-from textual.widgets import Button, Static
+from textual.widgets import Button, Input, Static
 
+import csbox.tui.screens.api as api_screen_module
 from csbox.api.errors import ApiTransportError
+from csbox.api.exporter import ApiExportResult
 from csbox.api.models import (
     ApiAssertion,
     ApiAssertionResult,
@@ -45,6 +48,24 @@ def _screen_text(screen: Any) -> str:
             *(str(widget.renderable) for widget in widgets),
             *(str(button.label) for button in buttons),
         ]
+    )
+
+
+async def _wait_until(pilot: Any, predicate: Any, *, timeout: float = 3.0) -> None:
+    deadline = monotonic() + timeout
+    while monotonic() < deadline:
+        if predicate():
+            return
+        await pilot.pause()
+    assert predicate()
+
+
+def _api_export_result_rendered(app: ApiApp) -> bool:
+    if app.screen.name != "api-export-result":
+        return False
+    return any(
+        widget.id == "api-export-result-body" and bool(str(widget.renderable).strip())
+        for widget in app.screen.query(Static)
     )
 
 
@@ -174,6 +195,33 @@ class _MissingFontExporter:
         raise FontResolutionError("找不到支持中文的字体")
 
 
+@dataclass
+class _RetryingExporter:
+    calls: list[tuple[Path, str, bool]]
+    fail_once: bool = True
+
+    def export(
+        self,
+        _run: ApiRun,
+        destination: Path,
+        *,
+        theme: str,
+        force: bool,
+    ) -> ApiExportResult:
+        self.calls.append((destination, theme, force))
+        if self.fail_once:
+            self.fail_once = False
+            raise OSError("temporary exporter failure")
+        markdown = destination / "api-evidence.md"
+        results = destination / "results.json"
+        return ApiExportResult(
+            destination=destination,
+            evidence=(destination / "evidence" / "step-1.png",),
+            markdown=markdown,
+            results=results,
+        )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("size", [(80, 24), (100, 30), (120, 35), (160, 45)])
 async def test_api_app_has_actionable_empty_scenario_and_run_states(
@@ -187,6 +235,8 @@ async def test_api_app_has_actionable_empty_scenario_and_run_states(
 
         assert isinstance(app.screen, ApiScreen)
         assert "暂无 API 场景" in str(app.screen.query_one("#api-scenarios").renderable)
+        assert str(app.screen.query_one("#api-quick-create", Button).label) == "快速创建"
+        assert str(app.screen.query_one("#api-openapi-import", Button).label) == "从 OpenAPI 导入"
         assert "暂无 API 运行记录" in str(app.screen.query_one("#api-runs").renderable)
         assert app.screen.active_pane == "scenarios"
 
@@ -195,6 +245,352 @@ async def test_api_app_has_actionable_empty_scenario_and_run_states(
         await pilot.press("tab")
         assert app.screen.active_pane == "detail"
         assert "如何" in str(app.screen.query_one("#api-detail").renderable)
+
+
+@pytest.mark.asyncio
+async def test_api_quick_create_persists_minimal_cjk_scenario_and_selects_it(
+    tmp_path: Path,
+) -> None:
+    repository = ApiRunRepository.from_cwd(tmp_path)
+    app = ApiApp(repository, ScenarioLoader(), lambda: FakeRunner(_run("unused")), load_locale())
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await pilot.click("#api-quick-create")
+        await pilot.pause()
+
+        assert app.screen.name == "api-quick-create"
+        app.screen.query_one("#api-quick-create-name", Input).value = "中文起步场景"
+        app.screen.query_one(
+            "#api-quick-create-url", Input
+        ).value = "http://localhost:8080/api/test?中文=值"
+        app.screen.query_one("#api-quick-create-url", Input).focus()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert isinstance(app.screen, ApiScreen)
+        files = tuple((tmp_path / ".csbox/api/scenarios").glob("*.toml"))
+        assert len(files) == 1
+        loaded = ScenarioLoader().load(files[0])
+        assert loaded.name == "中文起步场景"
+        assert loaded.steps[0].name == "请求"
+        assert loaded.steps[0].request.method == "GET"
+        assert loaded.steps[0].request.url == "http://localhost:8080/api/test?中文=值"
+        assert app.screen.selected_scenario_index == 0
+        assert app.screen.scenarios[0].path == files[0]
+
+
+@pytest.mark.asyncio
+async def test_api_quick_create_cancel_and_invalid_submit_do_not_write(tmp_path: Path) -> None:
+    repository = ApiRunRepository.from_cwd(tmp_path)
+    app = ApiApp(repository, ScenarioLoader(), lambda: FakeRunner(_run("unused")), load_locale())
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await pilot.click("#api-quick-create")
+        await pilot.pause()
+        await pilot.click("#api-quick-create-submit")
+        await pilot.pause()
+
+        assert app.screen.name == "api-quick-create"
+        assert "请输入" in _screen_text(app.screen)
+        assert not (tmp_path / ".csbox/api/scenarios").exists()
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert isinstance(app.screen, ApiScreen)
+        assert not (tmp_path / ".csbox/api/scenarios").exists()
+
+
+@pytest.mark.asyncio
+async def test_api_quick_create_input_changes_do_not_write_or_reload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = ApiRunRepository.from_cwd(tmp_path)
+    app = ApiApp(repository, ScenarioLoader(), lambda: FakeRunner(_run("unused")), load_locale())
+
+    def unexpected_write(*_args: object, **_kwargs: object) -> tuple[Path, ...]:
+        raise AssertionError("typing must not write scenario files")
+
+    monkeypatch.setattr(api_screen_module, "write_scenario_files", unexpected_write)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await pilot.click("#api-quick-create")
+        await pilot.pause()
+        app.screen.query_one("#api-quick-create-name", Input).value = "输入中的场景"
+        app.screen.query_one(
+            "#api-quick-create-url", Input
+        ).value = "http://localhost:8080/api/test?value=long"
+        await pilot.pause()
+
+        assert app.screen.name == "api-quick-create"
+        assert not (tmp_path / ".csbox/api/scenarios").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("url", ["ftp://example.test", "http://localhost/{{token}}"])
+async def test_api_quick_create_rejects_non_concrete_url_without_write(
+    tmp_path: Path, url: str
+) -> None:
+    repository = ApiRunRepository.from_cwd(tmp_path)
+    app = ApiApp(repository, ScenarioLoader(), lambda: FakeRunner(_run("unused")), load_locale())
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await pilot.click("#api-quick-create")
+        await pilot.pause()
+        app.screen.query_one("#api-quick-create-name", Input).value = "坏 URL 场景"
+        app.screen.query_one("#api-quick-create-url", Input).value = url
+        await pilot.click("#api-quick-create-submit")
+        await pilot.pause()
+
+        assert app.screen.name == "api-quick-create"
+        assert "URL" in _screen_text(app.screen)
+        assert not (tmp_path / ".csbox/api/scenarios").exists()
+
+
+@pytest.mark.asyncio
+async def test_api_invalid_only_scenarios_keep_beginner_bootstrap_actions(tmp_path: Path) -> None:
+    scenario_dir = tmp_path / ".csbox" / "api" / "scenarios"
+    scenario_dir.mkdir(parents=True)
+    (scenario_dir / "坏场景.toml").write_text('name = "坏场景"\n', encoding="utf-8")
+    app = ApiApp(
+        ApiRunRepository.from_cwd(tmp_path),
+        ScenarioLoader(),
+        lambda: FakeRunner(_run("unused")),
+        load_locale(),
+    )
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        assert app.screen.query_one("#api-quick-create", Button)
+        assert app.screen.query_one("#api-openapi-import", Button)
+        assert app.screen.focused is not None
+        assert app.screen.focused.id == "api-quick-create"
+        assert "配置错误" in _screen_text(app.screen)
+
+
+def _write_openapi_fixture(path: Path) -> Path:
+    path.write_text(
+        json.dumps(
+            {
+                "openapi": "3.0.3",
+                "info": {"title": "本地 API", "version": "1"},
+                "paths": {
+                    "/zeta/{item}": {
+                        "get": {
+                            "responses": {"200": {"description": "ok"}},
+                        }
+                    },
+                    "/alpha": {
+                        "post": {
+                            "responses": {"201": {"description": "created"}},
+                        }
+                    },
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+@pytest.mark.asyncio
+async def test_api_openapi_import_opens_from_empty_state_and_cancel_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    repository = ApiRunRepository.from_cwd(tmp_path)
+    app = ApiApp(repository, ScenarioLoader(), lambda: FakeRunner(_run("unused")), load_locale())
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await pilot.click("#api-openapi-import")
+        await pilot.pause()
+
+        assert app.screen.name == "api-openapi-import"
+        assert app.screen.query_one("#api-openapi-path", Input)
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert isinstance(app.screen, ApiScreen)
+        assert not (tmp_path / ".csbox/api/scenarios").exists()
+
+
+@pytest.mark.asyncio
+async def test_api_openapi_import_success_reports_count_todo_and_deterministic_selection(
+    tmp_path: Path,
+) -> None:
+    source = _write_openapi_fixture(tmp_path / "课程 资料.json")
+    repository = ApiRunRepository.from_cwd(tmp_path)
+    fake_runner = FakeRunner(_run("unused"))
+    app = ApiApp(repository, ScenarioLoader(), lambda: fake_runner, load_locale())
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await pilot.click("#api-openapi-import")
+        await pilot.pause()
+        path_input = app.screen.query_one("#api-openapi-path", Input)
+        path_input.value = str(source)
+        path_input.focus()
+        await pilot.press("enter")
+        await _wait_until(pilot, lambda: isinstance(app.screen, ApiScreen))
+
+        assert isinstance(app.screen, ApiScreen)
+        text = _screen_text(app.screen)
+        assert "生成场景：2 个" in text
+        assert "保存位置" in text
+        assert "补充参数" in text or "TODO" in text
+        assert len(app.screen.scenarios) == 2
+        assert app.screen.selected_scenario_index == 0
+        assert app.screen.scenarios[0].path.name.casefold() == "get-zeta-item.toml"
+        assert fake_runner.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("empty_write", "expected_count", "expected_selection"),
+    [
+        (True, 0, None),
+        (False, 1, 0),
+    ],
+)
+async def test_api_openapi_import_zero_or_one_selection_is_deterministic(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    empty_write: bool,
+    expected_count: int,
+    expected_selection: int | None,
+) -> None:
+    source = tmp_path / "中文 OpenAPI.json"
+    source.write_text(
+        json.dumps(
+            {
+                "openapi": "3.0.3",
+                "info": {"title": "test"},
+                "paths": {
+                    "/health": {
+                        "get": {"responses": {"200": {"description": "ok"}}},
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    if empty_write:
+        monkeypatch.setattr(
+            api_screen_module,
+            "write_scenario_templates",
+            lambda *_args, **_kwargs: (),
+        )
+    repository = ApiRunRepository.from_cwd(tmp_path)
+    fake_runner = FakeRunner(_run("unused"))
+    app = ApiApp(repository, ScenarioLoader(), lambda: fake_runner, load_locale())
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await pilot.click("#api-openapi-import")
+        await pilot.pause()
+        path_input = app.screen.query_one("#api-openapi-path", Input)
+        path_input.value = str(source)
+        path_input.focus()
+        await pilot.press("enter")
+        await _wait_until(pilot, lambda: isinstance(app.screen, ApiScreen))
+
+        assert app.screen.selected_scenario_index == expected_selection
+        assert f"生成场景：{expected_count} 个" in _screen_text(app.screen)
+        assert fake_runner.calls == []
+        if expected_count == 0:
+            assert "没有生成可运行场景" in _screen_text(app.screen)
+
+
+@pytest.mark.asyncio
+async def test_api_openapi_import_zero_keeps_existing_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "empty-result.json"
+    source.write_text(
+        json.dumps(
+            {
+                "openapi": "3.0.3",
+                "info": {"title": "test"},
+                "paths": {"/health": {"get": {"responses": {"200": {}}}}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    scenario_dir = tmp_path / ".csbox" / "api" / "scenarios"
+    scenario_dir.mkdir(parents=True)
+    existing = scenario_dir / "existing.toml"
+    _scenario(existing, name="已有场景")
+    monkeypatch.setattr(api_screen_module, "write_scenario_templates", lambda *_args, **_kwargs: ())
+    repository = ApiRunRepository.from_cwd(tmp_path)
+    app = ApiApp(repository, ScenarioLoader(), lambda: FakeRunner(_run("unused")), load_locale())
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        assert app.screen.selected_scenario_index == 0
+        app.screen._open_openapi_import()  # type: ignore[attr-defined]
+        await pilot.pause()
+        path_input = app.screen.query_one("#api-openapi-path", Input)
+        path_input.value = str(source)
+        path_input.focus()
+        await pilot.press("enter")
+        await _wait_until(pilot, lambda: isinstance(app.screen, ApiScreen))
+        assert app.screen.selected_scenario_index == 0
+        assert app.screen.scenarios[0].path == existing
+
+
+@pytest.mark.asyncio
+async def test_api_openapi_import_invalid_path_keeps_dialog_and_path(tmp_path: Path) -> None:
+    repository = ApiRunRepository.from_cwd(tmp_path)
+    app = ApiApp(repository, ScenarioLoader(), lambda: FakeRunner(_run("unused")), load_locale())
+    missing = tmp_path / "不存在 文件.yaml"
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await pilot.click("#api-openapi-import")
+        await pilot.pause()
+        path_input = app.screen.query_one("#api-openapi-path", Input)
+        path_input.value = str(missing)
+        await pilot.click("#api-openapi-submit")
+        await _wait_until(pilot, lambda: app.screen.name == "api-openapi-import")
+
+        assert app.screen.query_one("#api-openapi-path", Input).value == str(missing)
+        assert "失败" in _screen_text(app.screen) or "无法" in _screen_text(app.screen)
+        assert not (tmp_path / ".csbox/api/scenarios").exists()
+
+
+@pytest.mark.asyncio
+async def test_api_openapi_import_conflict_requires_confirmation_and_cancel_keeps_path(
+    tmp_path: Path,
+) -> None:
+    source = _write_openapi_fixture(tmp_path / "课程 资料.json")
+    scenario_dir = tmp_path / ".csbox" / "api" / "scenarios"
+    scenario_dir.mkdir(parents=True)
+    existing = scenario_dir / "GET-zeta-item.toml"
+    existing.write_text(
+        'name = "旧场景"\n\n[[steps]]\nname = "请求"\nmethod = "GET"\n'
+        'url = "http://localhost/old"\n',
+        encoding="utf-8",
+    )
+    repository = ApiRunRepository.from_cwd(tmp_path)
+    app = ApiApp(repository, ScenarioLoader(), lambda: FakeRunner(_run("unused")), load_locale())
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.screen._open_openapi_import()  # type: ignore[attr-defined]
+        await pilot.pause()
+        app.screen.query_one("#api-openapi-path", Input).value = str(source)
+        await pilot.click("#api-openapi-submit")
+        await _wait_until(pilot, lambda: app.screen.name == "api-openapi-overwrite")
+
+        assert "替换" in _screen_text(app.screen)
+        await pilot.press("escape")
+        await _wait_until(pilot, lambda: app.screen.name == "api-openapi-import")
+        assert app.screen.query_one("#api-openapi-path", Input).value == str(source)
+        assert "旧场景" in existing.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
@@ -297,8 +693,11 @@ async def test_api_export_success_and_failure_are_safe_user_actions(tmp_path: Pa
         app.screen.select_run(0)
         await pilot.press("e")
         await pilot.pause()
+        assert app.screen.name == "api-export"
+        await pilot.click("#api-export-submit")
+        await _wait_until(pilot, lambda: _api_export_result_rendered(app))
         assert (tmp_path / "evidence" / "api-evidence.md").is_file()
-        assert "已导出 API 证据" in str(app.screen.query_one("#api-status").renderable)
+        assert "导出完成" in _screen_text(app.screen)
         assert SECRET not in _screen_text(app.screen)
 
     failing = ApiApp(
@@ -312,12 +711,11 @@ async def test_api_export_success_and_failure_are_safe_user_actions(tmp_path: Pa
         await pilot.pause()
         failing.screen.select_run(0)
         await pilot.press("e")
-        await pilot.pause()
+        await pilot.click("#api-export-submit")
+        await _wait_until(pilot, lambda: "导出失败" in _screen_text(failing.screen))
         text = _screen_text(failing.screen)
         assert "导出失败" in text
-        assert "发生了什么" in text
-        assert "在哪里" in text
-        assert "怎么处理" in text
+        assert failing.screen.name == "api-export"
         assert SECRET not in text
 
     missing_font = ApiApp(
@@ -331,11 +729,191 @@ async def test_api_export_success_and_failure_are_safe_user_actions(tmp_path: Pa
         await pilot.pause()
         missing_font.screen.select_run(0)
         await pilot.press("e")
-        await pilot.pause()
+        await pilot.click("#api-export-submit")
+        await _wait_until(pilot, lambda: "导出失败" in _screen_text(missing_font.screen))
         text = _screen_text(missing_font.screen)
         assert "导出失败" in text
-        assert "发生了什么" in text
+        assert missing_font.screen.name == "api-export"
         assert SECRET not in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(80, 24), (100, 30), (120, 35), (160, 45)])
+async def test_api_export_dialog_default_custom_restore_and_exact_result(
+    tmp_path: Path, size: tuple[int, int]
+) -> None:
+    repository = ApiRunRepository.from_cwd(tmp_path)
+    run = _run("20260811T080010-eeeeeeeeeeee")
+    repository.save(run)
+    custom = tmp_path / ("课程资料" * 10) / "API 证据"
+
+    app = ApiApp(repository, ScenarioLoader(), lambda: FakeRunner(run), load_locale())
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        app.screen.select_run(0)
+        await pilot.press("e")
+        await pilot.pause()
+
+        assert app.screen.name == "api-export"
+        destination_input = app.screen.query_one("#api-export-destination", Input)
+        assert run.id in _screen_text(app.screen)
+        assert destination_input.value == str(tmp_path / "evidence")
+        destination_input.value = str(custom)
+        await pilot.click("#api-export-restore-default")
+        await pilot.pause()
+        assert destination_input.value == str(tmp_path / "evidence")
+        destination_input.value = str(custom)
+        await pilot.click("#api-export-submit")
+        await _wait_until(pilot, lambda: _api_export_result_rendered(app))
+
+        text = _screen_text(app.screen)
+        assert run.id in text
+        assert str(custom) in text.replace("\n", "")
+        assert "evidence/01-查询中文-JSON.png" in text
+        assert "api-evidence.md" in text
+        assert "results.json" in text
+        assert SECRET not in text
+
+
+@pytest.mark.asyncio
+async def test_api_export_dialog_supports_keyboard_submit_and_return(tmp_path: Path) -> None:
+    repository = ApiRunRepository.from_cwd(tmp_path)
+    run = _run("20260811T080015-444444444444")
+    repository.save(run)
+    calls: list[tuple[Path, str, bool]] = []
+    app = ApiApp(
+        repository,
+        ScenarioLoader(),
+        lambda: FakeRunner(run),
+        load_locale(),
+        exporter_factory=lambda: _RetryingExporter(calls, fail_once=False),
+    )
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.screen.select_run(0)
+        await pilot.press("e")
+        await pilot.pause()
+        assert app.screen.name == "api-export"
+        assert app.screen.focused.id == "api-export-destination"
+        await pilot.press("enter")
+        await _wait_until(pilot, lambda: _api_export_result_rendered(app))
+        await pilot.press("escape")
+        await _wait_until(pilot, lambda: app.screen.name == "api")
+        assert calls == [(tmp_path / "evidence", "dark", False)]
+
+
+@pytest.mark.asyncio
+async def test_api_export_existing_target_cancel_preserves_custom_destination(
+    tmp_path: Path,
+) -> None:
+    repository = ApiRunRepository.from_cwd(tmp_path)
+    run = _run("20260811T080011-ffffffffffff")
+    repository.save(run)
+    destination = tmp_path / "已有导出"
+    destination.mkdir()
+    app = ApiApp(repository, ScenarioLoader(), lambda: FakeRunner(run), load_locale())
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.screen.select_run(0)
+        await pilot.press("e")
+        await pilot.pause()
+        app.screen.query_one("#api-export-destination", Input).value = str(destination)
+        await pilot.click("#api-export-submit")
+        await _wait_until(pilot, lambda: app.screen.name == "api-export-overwrite")
+
+        assert "覆盖" in _screen_text(app.screen)
+        await pilot.press("escape")
+        await _wait_until(pilot, lambda: app.screen.name == "api-export")
+        assert app.screen.query_one("#api-export-destination", Input).value == str(destination)
+
+
+@pytest.mark.asyncio
+async def test_api_export_existing_target_requires_confirmation_then_forces_export(
+    tmp_path: Path,
+) -> None:
+    repository = ApiRunRepository.from_cwd(tmp_path)
+    run = _run("20260811T080013-222222222222")
+    repository.save(run)
+    destination = tmp_path / "已有 API 证据"
+    destination.mkdir()
+    (destination / "student-notes.txt").write_text("保留用户文件", encoding="utf-8")
+    app = ApiApp(repository, ScenarioLoader(), lambda: FakeRunner(run), load_locale())
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.screen.select_run(0)
+        await pilot.press("e")
+        await pilot.pause()
+        app.screen.query_one("#api-export-destination", Input).value = str(destination)
+        await pilot.click("#api-export-submit")
+        await _wait_until(pilot, lambda: app.screen.name == "api-export-overwrite")
+        await pilot.click("#api-export-overwrite-confirm")
+        await _wait_until(pilot, lambda: _api_export_result_rendered(app))
+
+        assert (destination / "api-evidence.md").is_file()
+        assert (destination / "results.json").is_file()
+        assert (destination / "student-notes.txt").read_text(encoding="utf-8") == "保留用户文件"
+
+
+@pytest.mark.asyncio
+async def test_api_export_regular_file_failure_is_controlled_and_untouched(tmp_path: Path) -> None:
+    repository = ApiRunRepository.from_cwd(tmp_path)
+    run = _run("20260811T080014-333333333333")
+    repository.save(run)
+    destination = tmp_path / "不是目录"
+    destination.write_text("user file", encoding="utf-8")
+    app = ApiApp(repository, ScenarioLoader(), lambda: FakeRunner(run), load_locale())
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.screen.select_run(0)
+        await pilot.press("e")
+        await pilot.pause()
+        app.screen.query_one("#api-export-destination", Input).value = str(destination)
+        await pilot.click("#api-export-submit")
+        await _wait_until(pilot, lambda: app.screen.name == "api-export")
+
+        text = _screen_text(app.screen)
+        assert "导出失败" in text
+        assert "Traceback" not in text
+        assert app.screen.query_one("#api-export-destination", Input).value == str(destination)
+        assert destination.read_text(encoding="utf-8") == "user file"
+
+
+@pytest.mark.asyncio
+async def test_api_export_failure_returns_to_dialog_and_retry_keeps_destination(
+    tmp_path: Path,
+) -> None:
+    repository = ApiRunRepository.from_cwd(tmp_path)
+    run = _run("20260811T080012-111111111111")
+    repository.save(run)
+    calls: list[tuple[Path, str, bool]] = []
+    exporter = _RetryingExporter(calls)
+    destination = tmp_path / "自定义 API 输出"
+    app = ApiApp(
+        repository,
+        ScenarioLoader(),
+        lambda: FakeRunner(run),
+        load_locale(),
+        exporter_factory=lambda: exporter,
+    )
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.screen.select_run(0)
+        await pilot.press("e")
+        await pilot.pause()
+        app.screen.query_one("#api-export-destination", Input).value = str(destination)
+        await pilot.click("#api-export-submit")
+        await _wait_until(pilot, lambda: app.screen.name == "api-export")
+
+        assert "导出失败" in _screen_text(app.screen)
+        assert app.screen.query_one("#api-export-destination", Input).value == str(destination)
+        await pilot.click("#api-export-submit")
+        await _wait_until(pilot, lambda: _api_export_result_rendered(app))
+        assert calls == [(destination, "dark", False), (destination, "dark", False)]
 
 
 @pytest.mark.asyncio
@@ -444,7 +1022,9 @@ async def test_api_screen_escape_returns_home_and_standalone_q_exits(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_home_renders_real_api_run_and_check_status(tmp_path: Path) -> None:
+async def test_home_keeps_api_and_check_workflows_out_of_lightweight_home(
+    tmp_path: Path,
+) -> None:
     repository = ApiRunRepository.from_cwd(tmp_path)
     repository.save(_run("20260811T080006-home12345678"))
 
@@ -468,11 +1048,12 @@ async def test_home_renders_real_api_run_and_check_status(tmp_path: Path) -> Non
 
     async with app.run_test(size=(120, 35)) as pilot:
         await pilot.pause()
-        api_text = str(app.screen.query_one("#recent-api-content").renderable)
-        check_text = str(app.screen.query_one("#home-check-status").renderable)
-        assert "中文 API 场景" in api_text
-        assert "通过" in api_text
-        assert "项目检查：通过" in check_text
+        project_text = str(app.screen.query_one("#home-project-path").renderable)
+        workflow_text = str(app.screen.query_one("#home-workflow-status").renderable)
+        assert project_text
+        assert "准备就绪" in workflow_text
+        assert "中文 API 场景" not in _screen_text(app.screen)
+        assert "项目检查：通过" not in _screen_text(app.screen)
         assert SECRET not in _screen_text(app.screen)
 
 

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import builtins
+import ctypes
 import inspect
+import io
 import os
 import subprocess
 import sys
@@ -9,14 +11,19 @@ import threading
 import time
 from collections import deque
 from collections.abc import Iterator, Mapping, Sequence
+from contextlib import nullcontext
 from pathlib import Path
 from typing import ClassVar
 
 import pytest
 
-from csbox.core.events import TerminalSize
-from csbox.core.terminal import TerminalBackendError
+import csbox.core.terminal_windows as terminal_windows
+from csbox.core.events import TerminalEvent, TerminalEventType, TerminalSize
+from csbox.core.terminal import TerminalBackendError, TerminalProcessExited
 from csbox.core.terminal_windows import WindowsConPTYBackend
+from csbox.lab.dispatcher import TerminalEventDispatcher
+from csbox.lab.proxy import TerminalProxy
+from csbox.lab.screen import TerminalEmulator
 
 
 class FakePtyProcess:
@@ -139,6 +146,7 @@ class FakePywinptyPtyProcess(FakePtyProcess):
 @pytest.fixture(autouse=True)
 def reset_fake() -> Iterator[None]:
     FakePtyProcess.next_process = None
+    FakePywinptyPtyProcess.next_process = None
     FakePtyProcess.spawn_calls = []
     FakePtyProcess.instances = []
     yield
@@ -146,6 +154,39 @@ def reset_fake() -> Iterator[None]:
         if not process.closed:
             process.close_failures.clear()
             process.close(force=True)
+
+
+class _RacingInput:
+    def __init__(self, chunks: Sequence[bytes | None], order: list[str]) -> None:
+        self.chunks = deque(chunks)
+        self.order = order
+        self.closed = False
+
+    def read(self, max_bytes: int = 4096, timeout: float = 0.05) -> bytes | None:
+        del max_bytes, timeout
+        return self.chunks.popleft() if self.chunks else None
+
+    def close(self) -> None:
+        self.order.append("input.close")
+        self.closed = True
+
+
+class _EventSink:
+    def __init__(self, events: list[TerminalEvent]) -> None:
+        self.events = events
+
+    def handle(self, event: TerminalEvent) -> None:
+        self.events.append(event)
+
+
+class _OrderedOutput(io.BytesIO):
+    def __init__(self, order: list[str]) -> None:
+        super().__init__()
+        self.order = order
+
+    def write(self, data: bytes) -> int:
+        self.order.append("output.write")
+        return super().write(data)
 
 
 def make_backend(
@@ -160,7 +201,7 @@ def make_backend(
 def test_background_reader_applies_bounded_output_backpressure(tmp_path: Path) -> None:
     limit = 1024
     chunk = "中" * 64
-    process = FakePtyProcess(frames=[chunk] * 40 + [EOFError()])
+    process = FakePtyProcess(frames=[chunk] * 40 + [EOFError()], alive=False, exitstatus=0)
     FakePtyProcess.next_process = process
     backend = WindowsConPTYBackend(
         pty_process_factory=FakePtyProcess,
@@ -239,6 +280,58 @@ def test_spawn_merges_environment_overrides_with_parent_environment(
         == "C:\\Windows"
     )
     assert spawned_env["CSBOX_TEST"] == "值"
+
+
+def test_spawn_classifies_invalid_shell_executable_and_reports_resolved_target(
+    tmp_path: Path,
+) -> None:
+    class InvalidExecutableFactory:
+        @classmethod
+        def spawn(cls, *args: object, **kwargs: object) -> FakePtyProcess:
+            del cls, args, kwargs
+            cause = OSError("not a valid Win32 application")
+            cause.winerror = 193  # type: ignore[attr-defined]
+            raise cause
+
+    executable = r"C:\Users\S.F. Wang\AppData\Local\Microsoft\WindowsApps\pwsh.exe"
+    backend = WindowsConPTYBackend(pty_process_factory=InvalidExecutableFactory)
+
+    with pytest.raises(Exception) as caught:
+        backend.spawn([executable, "-NoLogo"], cwd=tmp_path)
+
+    assert getattr(caught.value, "kind", None) == "shell_executable_unlaunchable"
+    assert f"resolved_executable={executable}" in getattr(caught.value, "debug_context", ())
+    assert f"cwd={tmp_path}" in getattr(caught.value, "debug_context", ())
+    assert "native_code=193" in getattr(caught.value, "debug_context", ())
+
+
+def test_spawn_classifies_unknown_factory_failure_as_conpty_initialization(
+    tmp_path: Path,
+) -> None:
+    class BrokenConPTYFactory:
+        @classmethod
+        def spawn(cls, *args: object, **kwargs: object) -> FakePtyProcess:
+            del cls, args, kwargs
+            raise RuntimeError("CreatePseudoConsole failed")
+
+    backend = WindowsConPTYBackend(pty_process_factory=BrokenConPTYFactory)
+
+    with pytest.raises(Exception) as caught:
+        backend.spawn([r"C:\Program Files\PowerShell\7\pwsh.exe"], cwd=tmp_path)
+
+    assert getattr(caught.value, "kind", None) == "conpty_initialization_failure"
+
+
+def test_empty_native_error_text_is_not_misclassified_as_file_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class NativeOS:
+        name = "nt"
+
+    monkeypatch.setattr(terminal_windows, "os", NativeOS)
+    monkeypatch.setattr(ctypes, "FormatError", lambda code: f"native error {code}", raising=False)
+
+    assert terminal_windows._windows_error_code(RuntimeError("")) is None
 
 
 def test_background_reader_encodes_utf8_and_returns_none_without_data(tmp_path: Path) -> None:
@@ -323,6 +416,108 @@ def test_write_zero_progress_is_bounded_and_preserves_cause(tmp_path: Path) -> N
     assert process.writes
 
 
+@pytest.mark.parametrize("exit_status", [0, 7])
+def test_proxy_drains_output_when_pending_input_races_child_exit(
+    tmp_path: Path,
+    exit_status: int,
+) -> None:
+    output_gate = threading.Event()
+
+    class ExitBeforeSecondWriteProcess(FakePtyProcess):
+        def write(self, data: str) -> int:
+            self.writes.append(data)
+            if len(self.writes) == 1:
+                return len(data.encode("utf-8"))
+            self.alive = False
+            output_gate.set()
+            raise EOFError("Pty is closed")
+
+    process = ExitBeforeSecondWriteProcess(
+        frames=["tail-output", EOFError("Pty is closed")],
+        alive=True,
+        exitstatus=exit_status,
+        read_gate=output_gate,
+    )
+    FakePywinptyPtyProcess.next_process = process
+    backend = WindowsConPTYBackend(pty_process_factory=FakePywinptyPtyProcess)
+    order: list[str] = []
+    input_adapter = _RacingInput([b"exit\r", b"late-input"], order)
+    output = _OrderedOutput(order)
+    events: list[TerminalEvent] = []
+    proxy = TerminalProxy(
+        backend,
+        command=("pwsh.exe",),
+        input_adapter=input_adapter,
+        output_adapter=output,
+        terminal_state_factory=nullcontext,
+        dispatcher=TerminalEventDispatcher([_EventSink(events)]),
+        emulator=TerminalEmulator(columns=80, rows=24),
+        cwd=tmp_path,
+    )
+
+    assert proxy.run() == exit_status
+    assert input_adapter.closed is True
+    assert output.getvalue() == b"tail-output"
+    assert process.writes == ["exit\r", "late-input"]
+    assert backend._input_buffer == b""
+    assert order == ["input.close", "output.write"]
+    input_events = [event.payload for event in events if event.type is TerminalEventType.INPUT]
+    assert input_events == [b"exit\r"]
+
+
+def test_write_close_while_child_is_still_alive_remains_backend_failure(tmp_path: Path) -> None:
+    process = FakePtyProcess(
+        frames=["prompt"],
+        alive=True,
+        write_results=[EOFError("Pty is closed")],
+    )
+    backend = make_backend(process)
+    spawn_backend(backend, tmp_path)
+
+    with pytest.raises(TerminalBackendError) as caught:
+        backend.write(b"ordinary-input")
+
+    assert isinstance(caught.value.cause, EOFError)
+
+
+def test_closed_input_handle_after_confirmed_child_exit_is_expected_shutdown(
+    tmp_path: Path,
+) -> None:
+    class ClosedInputHandle(OSError):
+        winerror = 109  # ERROR_BROKEN_PIPE
+
+    process = FakePtyProcess(
+        frames=[EOFError("Pty is closed")],
+        alive=False,
+        exitstatus=3,
+        write_results=[ClosedInputHandle("pipe closed")],
+    )
+    backend = make_backend(process)
+    spawn_backend(backend, tmp_path)
+
+    with pytest.raises(TerminalProcessExited) as caught:
+        backend.write(b"pending-input")
+
+    assert caught.value.exit_code == 3
+    assert isinstance(caught.value.__cause__, ClosedInputHandle)
+
+
+def test_unrelated_write_error_after_child_exit_remains_backend_failure(tmp_path: Path) -> None:
+    process = FakePtyProcess(
+        frames=[EOFError("Pty is closed")],
+        alive=False,
+        exitstatus=0,
+        write_results=[OSError("encoding bridge failed")],
+    )
+    backend = make_backend(process)
+    spawn_backend(backend, tmp_path)
+
+    with pytest.raises(TerminalBackendError) as caught:
+        backend.write(b"pending-input")
+
+    assert caught.value.cause.args == ("encoding bridge failed",)
+
+
 def test_resize_uses_rows_before_columns(tmp_path: Path) -> None:
     process = FakePtyProcess()
     backend = make_backend(process)
@@ -342,6 +537,94 @@ def test_eof_error_becomes_eof_and_captures_exit_status(tmp_path: Path) -> None:
     assert backend.exit_code == 9
     assert backend.wait(timeout=0.01) == 9
     assert not backend.is_alive()
+
+
+def test_closed_conpty_output_handle_after_child_exit_is_expected_eof(tmp_path: Path) -> None:
+    class ClosedOutputHandle(OSError):
+        winerror = 109  # ERROR_BROKEN_PIPE
+
+    process = FakePtyProcess(
+        frames=[ClosedOutputHandle("pipe closed")],
+        alive=False,
+        exitstatus=0,
+    )
+    backend = make_backend(process)
+    spawn_backend(backend, tmp_path)
+
+    assert backend.read(timeout=0.5) == b""
+    assert backend.exit_code == 0
+
+
+def test_eof_while_child_is_alive_is_backend_failure(tmp_path: Path) -> None:
+    process = FakePtyProcess(frames=[EOFError("pipe closed")], alive=True)
+    backend = make_backend(process)
+    spawn_backend(backend, tmp_path)
+
+    with pytest.raises(TerminalBackendError) as caught:
+        backend.read(timeout=1.0)
+
+    assert isinstance(caught.value.cause, RuntimeError)
+    backend.close()
+    assert process.close_forces == [True]
+
+
+def test_empty_pywinpty_sentinel_is_not_eof(tmp_path: Path) -> None:
+    class SentinelThenExitProcess(FakePtyProcess):
+        def read(self, size: int = 1024) -> str:
+            try:
+                return super().read(size)
+            except EOFError:
+                self.alive = False
+                raise
+
+    process = SentinelThenExitProcess(frames=["", "after-sentinel", EOFError()])
+    backend = make_backend(process)
+    spawn_backend(backend, tmp_path)
+
+    assert backend.read(timeout=0.5) == b"after-sentinel"
+    assert backend.read(timeout=0.5) == b""
+    backend.close()
+
+
+def test_eof_waits_for_a_racing_child_exit(tmp_path: Path) -> None:
+    class RacyExitProcess(FakePtyProcess):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.status_checks = 0
+
+        def isalive(self) -> bool:
+            self.status_checks += 1
+            if self.status_checks >= 2:
+                self.alive = False
+            return super().isalive()
+
+    process = RacyExitProcess(frames=[EOFError()], alive=True, exitstatus=7)
+    backend = make_backend(process)
+    spawn_backend(backend, tmp_path)
+
+    assert backend.read(timeout=0.5) == b""
+    assert backend.exit_code == 7
+    backend.close()
+
+
+def test_closed_conpty_handle_during_natural_cleanup_is_not_backend_failure(
+    tmp_path: Path,
+) -> None:
+    class ClosedHandle(OSError):
+        winerror = 6  # ERROR_INVALID_HANDLE
+
+    process = FakePtyProcess(
+        frames=[EOFError()],
+        alive=False,
+        exitstatus=0,
+        close_failures=[ClosedHandle("already closed")],
+    )
+    backend = make_backend(process)
+    spawn_backend(backend, tmp_path)
+
+    assert backend.read(timeout=0.5) == b""
+    backend.close()
+    assert backend.exit_code == 0
 
 
 def test_close_waits_for_delayed_final_frame_before_closing_dead_process(

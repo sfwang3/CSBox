@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -10,8 +11,9 @@ import csbox.lab.captures as captures_module
 from csbox.core.events import TerminalEvent, TerminalEventType
 from csbox.lab.captures import CaptureStore, CaptureStoreError
 from csbox.lab.dispatcher import DispatchError, TerminalEventDispatcher
+from csbox.lab.models import CaptureRecord
 from csbox.lab.recorder import RecorderError
-from csbox.lab.screen import TerminalCell, TerminalCursor, TerminalSnapshot
+from csbox.lab.screen import TerminalCell, TerminalCursor, TerminalEmulator, TerminalSnapshot
 
 
 def snapshot(text: str, relative_time: float) -> TerminalSnapshot:
@@ -101,6 +103,7 @@ def test_capture_store_recovers_backup_and_isolates_one_invalid_capture(tmp_path
     recovered = store.load()
 
     assert [capture.capture_id for capture in recovered.captures] == [first.capture_id]
+    assert store.count() == 1
     assert any("backup" in warning for warning in recovered.warnings)
 
     valid = first.model_dump(mode="json", by_alias=True)
@@ -110,7 +113,138 @@ def test_capture_store_recovers_backup_and_isolates_one_invalid_capture(tmp_path
     )
     isolated = store.load()
     assert len(isolated.captures) == 2
+    assert store.count() == 2
     assert any("capture 2" in warning for warning in isolated.warnings)
+
+
+def test_capture_store_lightweight_count_rejects_noncanonical_capture_shapes(
+    tmp_path: Path,
+) -> None:
+    captures_path = tmp_path / "captures.json"
+    store = make_store(captures_path)
+    capture = store.create_capture(snapshot("valid", 1.0), timestamp=1.0, cwd=tmp_path)
+    valid = capture.model_dump(mode="json", by_alias=True)
+
+    invalid_values: list[dict[str, object]] = []
+
+    invalid_cursor = deepcopy(valid)
+    invalid_cursor["snapshot"]["cursor"]["row"] = "not-an-int"
+    invalid_values.append(invalid_cursor)
+
+    invalid_cell = deepcopy(valid)
+    invalid_cell["snapshot"]["cells"][0][0]["character"] = []
+    invalid_values.append(invalid_cell)
+
+    missing_cwd = deepcopy(valid)
+    missing_cwd.pop("cwd")
+    invalid_values.append(missing_cwd)
+
+    invalid_state = deepcopy(valid)
+    invalid_state["snapshot"]["state"] = {"version": 1}
+    invalid_values.append(invalid_state)
+
+    oversized_timestamp = deepcopy(valid)
+    oversized_timestamp["timestamp"] = 10**400
+    invalid_values.append(oversized_timestamp)
+
+    oversized_relative_time = deepcopy(valid)
+    oversized_relative_time["snapshot"]["relative_time"] = 10**400
+    invalid_values.append(oversized_relative_time)
+
+    week_date = deepcopy(valid)
+    week_date["createdAt"] = "2026-W34-3T10:20:00+00:00"
+    invalid_values.append(week_date)
+
+    basic_date = deepcopy(valid)
+    basic_date["createdAt"] = "20260819T102000+0000"
+    invalid_values.append(basic_date)
+
+    emulator = TerminalEmulator(columns=8, rows=1)
+    state_capture = CaptureRecord(
+        id="state-capture",
+        createdAt=datetime(2026, 8, 19, 10, 20, tzinfo=UTC),
+        timestamp=1.0,
+        rows=1,
+        columns=8,
+        cwd=tmp_path,
+        snapshot=emulator.snapshot(),
+    ).model_dump(mode="json", by_alias=True)
+    state_capture["snapshot"]["state"]["pending_bytes"] = "\ud800"
+    invalid_values.append(state_capture)
+
+    for invalid in invalid_values:
+        captures_path.write_text(
+            json.dumps({"version": 1, "captures": [invalid]}), encoding="utf-8"
+        )
+        assert store.load().captures == ()
+        assert store.count() == 0
+
+
+def test_capture_store_lightweight_count_accepts_canonical_emulator_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captures_path = tmp_path / "captures.json"
+    store = make_store(captures_path)
+    emulator = TerminalEmulator(columns=8, rows=2)
+    emulator.apply(
+        TerminalEvent(
+            sequence=1,
+            monotonic_time=1.0,
+            relative_time=1.0,
+            type=TerminalEventType.OUTPUT,
+            payload="中文".encode(),
+        )
+    )
+
+    store.create_capture(emulator.snapshot(), timestamp=1.0, cwd=tmp_path)
+
+    def forbidden_model_rebuild(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("canonical count rebuilt Capture models")
+
+    monkeypatch.setattr(CaptureRecord, "model_validate", forbidden_model_rebuild)
+
+    assert store.count() == 1
+
+
+def test_capture_count_conservatively_rejects_legacy_coercions_without_changing_review(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captures_path = tmp_path / "captures.json"
+    store = make_store(captures_path)
+    capture = store.create_capture(snapshot("valid", 1.0), timestamp=1.0, cwd=tmp_path)
+    canonical = capture.model_dump(mode="json", by_alias=True)
+    legacy_values: list[dict[str, object]] = []
+
+    string_timestamp = deepcopy(canonical)
+    string_timestamp["timestamp"] = "1.0"
+    legacy_values.append(string_timestamp)
+
+    numeric_created_at = deepcopy(canonical)
+    numeric_created_at["createdAt"] = 1_700_000_000
+    legacy_values.append(numeric_created_at)
+
+    string_dimensions = deepcopy(canonical)
+    string_dimensions["rows"] = "1"
+    string_dimensions["snapshot"]["rows"] = "1"
+    legacy_values.append(string_dimensions)
+
+    string_relative_time = deepcopy(canonical)
+    string_relative_time["snapshot"]["relative_time"] = "0.0"
+    legacy_values.append(string_relative_time)
+
+    captures_path.write_text(
+        json.dumps({"version": 1, "captures": legacy_values}), encoding="utf-8"
+    )
+
+    assert len(store.load().captures) == len(legacy_values)
+
+    def forbidden_model_rebuild(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("count rebuilt Capture models")
+
+    monkeypatch.setattr(CaptureRecord, "model_validate", forbidden_model_rebuild)
+    assert store.count() == 0
 
 
 def test_capture_store_maps_pathologically_deep_json_to_a_safe_warning(tmp_path: Path) -> None:

@@ -4,10 +4,26 @@ import re
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
 from csbox.check.detectors import PRUNED_DIRECTORIES
+from csbox.check.messages import (
+    ARTIFACT_WARN_MESSAGE,
+    DEEP_SCAN_INCOMPLETE_MESSAGE,
+    DEEP_SECRET_FAIL_MESSAGE,
+    ENV_FILE_FAIL_MESSAGE,
+    GIT_DIRTY_WARN_MESSAGE,
+    GIT_TOO_LARGE_WARN_MESSAGE,
+    GIT_UNTRACKED_WARN_MESSAGE,
+    HARD_CODED_SECRET_FAIL_MESSAGE,
+    LARGE_FILE_WARN_MESSAGE,
+    PRIVATE_KEY_FAIL_MESSAGE,
+    README_MISSING_MESSAGE,
+    UNIX_ABSOLUTE_PATH_WARN_MESSAGE,
+    WINDOWS_ABSOLUTE_PATH_WARN_MESSAGE,
+)
 from csbox.check.models import CheckContext, CheckFinding, CheckStatus
 from csbox.core.subprocess_env import minimal_subprocess_environment
 
@@ -53,7 +69,9 @@ class ReadmeRule:
             None,
         )
         if found is None:
-            return (_finding(self.rule_id, CheckStatus.WARN, "未找到 README。", category="README"),)
+            return (
+                _finding(self.rule_id, CheckStatus.WARN, README_MISSING_MESSAGE, category="README"),
+            )
         return (
             _finding(
                 self.rule_id,
@@ -77,7 +95,7 @@ class EnvRule:
                 _finding(
                     self.rule_id,
                     CheckStatus.FAIL,
-                    "发现真实 .env 文件，请在交付前移除。",
+                    ENV_FILE_FAIL_MESSAGE,
                     path=entry.relative,
                     category="env",
                 )
@@ -107,7 +125,7 @@ class PrivateKeyRule:
                     _finding(
                         self.rule_id,
                         CheckStatus.FAIL,
-                        "发现私钥文件。",
+                        PRIVATE_KEY_FAIL_MESSAGE,
                         path=entry.relative,
                         category="private-key",
                     )
@@ -152,7 +170,7 @@ class ArtifactRule:
             _finding(
                 self.rule_id,
                 CheckStatus.WARN,
-                "发现可能不应提交的构建、缓存或日志产物。",
+                ARTIFACT_WARN_MESSAGE,
                 path=path,
                 category="artifact",
             )
@@ -177,7 +195,7 @@ class LargeFileRule:
             _finding(
                 self.rule_id,
                 CheckStatus.WARN,
-                "文件超过配置的大小阈值。",
+                LARGE_FILE_WARN_MESSAGE,
                 path=entry.relative,
                 category="large-file",
             )
@@ -193,15 +211,51 @@ _UNIX_ABSOLUTE_PATH_BYTES = re.compile(
 )
 SECRET_ASSIGNMENT = re.compile(
     r"(?i)\b(?:api[_-]?key|access[_-]?key|token|secret|password|passwd)\b"
-    r"[^\S\r\n]*[:=][^\S\r\n]*['\"][^'\"\r\n]{8}"
+    r"[^\S\r\n]*[:=][^\S\r\n]*['\"](?P<value>[^'\"\r\n]{8,})"
 )
 _SECRET_ASSIGNMENT_BYTES = re.compile(
     rb"(?i)\b(?:api[_-]?key|access[_-]?key|token|secret|password|passwd)\b"
-    rb"[^\S\r\n]*[:=][^\S\r\n]*['\"][^'\"\r\n]{8}"
+    rb"[^\S\r\n]*[:=][^\S\r\n]*['\"](?P<value>[^'\"\r\n]{8,})"
 )
 _STREAM_SCAN_CHUNK_BYTES = 1024 * 1024
 _STREAM_SCAN_OVERLAP_BYTES = 512
 _HORIZONTAL_WHITESPACE_BYTES = frozenset(b" \t\v\f")
+_PLACEHOLDER_VALUES = frozenset(
+    {
+        "password",
+        "changeme",
+        "change-me",
+        "replace-me",
+        "replace-me-token",
+        "example",
+        "example-token",
+        "dummy",
+        "dummy-token",
+        "placeholder",
+        "placeholder-token",
+        "your-token-here",
+        "your-password-here",
+        "your-api-key-here",
+    }
+)
+
+
+def _is_placeholder_value(value: str) -> bool:
+    """Recognize only complete, low-information teaching values."""
+    normalized = value.strip().casefold().replace("_", "-").replace(" ", "-")
+    return normalized in _PLACEHOLDER_VALUES
+
+
+def _is_non_placeholder_secret_match(match: re.Match[str]) -> bool:
+    return not _is_placeholder_value(match.group("value"))
+
+
+def _is_non_placeholder_secret_bytes_match(match: re.Match[bytes]) -> bool:
+    try:
+        value = match.group("value").decode("ascii")
+    except UnicodeDecodeError:
+        return True
+    return not _is_placeholder_value(value)
 
 
 def _stream_pattern_lines(
@@ -210,6 +264,7 @@ def _stream_pattern_lines(
     patterns: tuple[re.Pattern[bytes], ...],
     *,
     collapse_horizontal_whitespace: bool = False,
+    match_filter: Callable[[re.Match[bytes]], bool] | None = None,
 ) -> tuple[tuple[int, int], ...]:
     """Return pattern indexes and line numbers using bounded-memory reads."""
     matches: set[tuple[int, int]] = set()
@@ -235,6 +290,8 @@ def _stream_pattern_lines(
                     line = 1 + newlines_before_overlap
                     cursor = 0
                     for match in pattern.finditer(data):
+                        if match_filter is not None and not match_filter(match):
+                            continue
                         line += data[cursor : match.start()].count(b"\n")
                         cursor = match.start()
                         matches.add((pattern_index, line))
@@ -277,7 +334,7 @@ class AbsolutePathRule:
                         _finding(
                             self.rule_id,
                             CheckStatus.WARN,
-                            "发现 Windows 本机绝对路径引用。",
+                            WINDOWS_ABSOLUTE_PATH_WARN_MESSAGE,
                             path=entry.relative,
                             line=line_number,
                             category="windows-absolute-path",
@@ -288,7 +345,7 @@ class AbsolutePathRule:
                         _finding(
                             self.rule_id,
                             CheckStatus.WARN,
-                            "发现 Unix 本机绝对路径引用。",
+                            UNIX_ABSOLUTE_PATH_WARN_MESSAGE,
                             path=entry.relative,
                             line=line_number,
                             category="unix-absolute-path",
@@ -312,7 +369,10 @@ class HardCodedSecretRule:
                 lines = (
                     line_number
                     for line_number, line in enumerate(content.splitlines(), start=1)
-                    if SECRET_ASSIGNMENT.search(line)
+                    if any(
+                        _is_non_placeholder_secret_match(match)
+                        for match in SECRET_ASSIGNMENT.finditer(line)
+                    )
                 )
             else:
                 lines = (
@@ -322,6 +382,7 @@ class HardCodedSecretRule:
                         entry,
                         (_SECRET_ASSIGNMENT_BYTES,),
                         collapse_horizontal_whitespace=True,
+                        match_filter=_is_non_placeholder_secret_bytes_match,
                     )
                 )
             for line_number in lines:
@@ -329,7 +390,7 @@ class HardCodedSecretRule:
                     _finding(
                         self.rule_id,
                         CheckStatus.FAIL,
-                        "发现疑似硬编码 secret；仅报告位置，不输出匹配内容。",
+                        HARD_CODED_SECRET_FAIL_MESSAGE,
                         path=entry.relative,
                         line=line_number,
                         category="hard-coded-secret",
@@ -384,7 +445,7 @@ class GitStatusRule:
                 _finding(
                     self.rule_id,
                     CheckStatus.WARN,
-                    "Git 状态输出过大，无法可靠判断工作区状态。",
+                    GIT_TOO_LARGE_WARN_MESSAGE,
                     category="git",
                 ),
             )
@@ -392,16 +453,14 @@ class GitStatusRule:
         findings: list[CheckFinding] = []
         if any(not line.startswith("??") for line in lines):
             findings.append(
-                _finding(
-                    self.rule_id, CheckStatus.WARN, "Git 工作区存在已修改文件。", category="dirty"
-                )
+                _finding(self.rule_id, CheckStatus.WARN, GIT_DIRTY_WARN_MESSAGE, category="dirty")
             )
         if any(line.startswith("??") for line in lines):
             findings.append(
                 _finding(
                     self.rule_id,
                     CheckStatus.WARN,
-                    "Git 工作区存在未跟踪文件。",
+                    GIT_UNTRACKED_WARN_MESSAGE,
                     category="untracked",
                 )
             )
@@ -455,7 +514,7 @@ def run_deep_secret_scan(root: Path) -> CheckFinding:
         return _finding(
             "deep-secret-scan",
             CheckStatus.WARN,
-            "gitleaks 深度扫描未完成，工具无法可靠执行。",
+            DEEP_SCAN_INCOMPLETE_MESSAGE,
             category="deep-secret-scan",
         )
 
@@ -470,13 +529,13 @@ def run_deep_secret_scan(root: Path) -> CheckFinding:
         return _finding(
             "deep-secret-scan",
             CheckStatus.FAIL,
-            "gitleaks 深度扫描发现疑似 secret；请根据工具报告清理后重试。",
+            DEEP_SECRET_FAIL_MESSAGE,
             category="deep-secret-scan",
         )
     return _finding(
         "deep-secret-scan",
         CheckStatus.WARN,
-        "gitleaks 深度扫描未完成，工具返回错误。",
+        DEEP_SCAN_INCOMPLETE_MESSAGE,
         category="deep-secret-scan",
     )
 

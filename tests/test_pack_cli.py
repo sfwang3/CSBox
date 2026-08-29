@@ -4,10 +4,24 @@ import importlib
 import json
 from pathlib import Path
 
+from typer.main import get_command
 from typer.testing import CliRunner
 
 from csbox.cli.main import app
 from csbox.pack.models import PackReport
+
+
+def test_pack_help_makes_output_path_semantics_explicit() -> None:
+    result = CliRunner().invoke(app, ["pack", "--help"])
+
+    assert result.exit_code == 0
+    pack_command = get_command(app).commands["pack"]
+    output_option = next(
+        parameter for parameter in pack_command.params if parameter.name == "output"
+    )
+    assert output_option.help == (
+        "输出路径：已存在目录使用默认 ZIP 文件名，其他路径视为最终 ZIP 文件。"
+    )
 
 
 def test_pack_json_routes_to_service(monkeypatch, tmp_path: Path) -> None:

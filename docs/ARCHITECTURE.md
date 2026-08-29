@@ -24,7 +24,7 @@ Shell ←→ UnixPTYBackend / WindowsConPTYBackend
           └─ resize / exit / error → session metadata
 ```
 
-`TerminalProxy` 负责 raw terminal state、SIGWINCH（Unix）、Capture key matching、短写重试、EOF 和 cleanup。Capture 快捷键本身不会转发给 Shell；其他输入和输出按字节传递。recorder 关闭时 flush UTF-8 decoder tail，并将退出和失败状态写入 metadata。
+`TerminalProxy` 负责 raw terminal state、Lab alternate-screen enter/restore、SIGWINCH（Unix）、Capture key matching、短写重试、EOF 和 cleanup。Capture 快捷键本身不会转发给 Shell；其他输入和输出按字节传递，但新的 recorder 不持久化 raw input。recorder 关闭时 flush UTF-8 decoder tail，并将退出和失败状态写入 metadata。
 
 ## Replay 与导出
 
@@ -54,6 +54,6 @@ Unix backend 使用真实 PTY，支持初始尺寸、resize、Ctrl+C、EOF 和 c
 
 ## Distribution 与安装态
 
-项目使用 Hatchling 的 `src/csbox` package layout。wheel 只包含运行时 Python package、locale JSON、Textual TCSS 和 distribution metadata；sdist 只保留公开 README、许可证、用户文档、`src/csbox` 与构建所需配置，不包含测试、参考图片或内部开发资料。版本由 distribution metadata 提供给运行时，`csbox --version`、session/manifest 字段和 wheel metadata 使用同一个 `0.2.0` 版本。
+项目使用 Hatchling 的 `src/csbox` package layout。wheel 只包含运行时 Python package、locale JSON、Textual TCSS 和 distribution metadata；sdist 只保留公开 README、许可证、用户文档、`src/csbox` 与构建所需配置，不包含测试、参考图片或内部开发资料。版本由 distribution metadata 提供给运行时，`csbox --version`、session/manifest 字段和 wheel metadata 使用同一个 `0.3.0` 版本。
 
 安装后的入口是 `csbox` console script。用户可以用普通 venv 或 `uv tool install <wheel>` 安装，再从项目目录之外运行 `csbox --help`、`doctor`、`check` 和 `pack`；locale、TCSS 与 renderer 通过 package/resource 或系统字体查找，不依赖当前 Git checkout。

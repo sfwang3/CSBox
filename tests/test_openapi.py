@@ -7,7 +7,9 @@ import pytest
 from typer.testing import CliRunner
 
 import csbox.api.openapi as openapi_module
+import csbox.api.scenario_writer as writer_module
 from csbox.api.errors import ApiConfigError
+from csbox.api.models import ApiRequest, ApiStep
 from csbox.api.openapi import OpenApiImporter, write_scenario_templates
 from csbox.api.scenario import ScenarioLoader
 from csbox.cli.main import app
@@ -234,7 +236,7 @@ def test_template_publish_does_not_replace_a_destination_created_after_preflight
             replace_existing=replace_existing,
         )
 
-    monkeypatch.setattr(openapi_module, "safe_rename", race_publish, raising=False)
+    monkeypatch.setattr(writer_module, "safe_rename", race_publish, raising=False)
 
     with pytest.raises(FileExistsError):
         write_scenario_templates(scenario, destination)
@@ -256,7 +258,7 @@ def test_force_template_rollback_preserves_concurrent_destination_and_old_backup
     protected = first[0]
     old_generated = protected.read_text(encoding="utf-8")
     concurrent = "concurrent-user-data"
-    real_safe_rename = openapi_module.safe_rename
+    real_safe_rename = writer_module.safe_rename
     raced = False
 
     def race_after_backup(
@@ -273,7 +275,7 @@ def test_force_template_rollback_preserves_concurrent_destination_and_old_backup
             replace_existing=replace_existing,
         )
 
-    monkeypatch.setattr(openapi_module, "safe_rename", race_after_backup)
+    monkeypatch.setattr(writer_module, "safe_rename", race_after_backup)
 
     with pytest.raises(FileExistsError):
         write_scenario_templates(scenario, destination, force=True)
@@ -309,7 +311,7 @@ def test_force_template_restores_the_old_set_when_a_later_publish_fails(
             )
         }
     )
-    real_safe_rename = openapi_module.safe_rename
+    real_safe_rename = writer_module.safe_rename
     publish_calls = 0
 
     def fail_second_publish(
@@ -326,7 +328,7 @@ def test_force_template_restores_the_old_set_when_a_later_publish_fails(
             replace_existing=replace_existing,
         )
 
-    monkeypatch.setattr(openapi_module, "safe_rename", fail_second_publish)
+    monkeypatch.setattr(writer_module, "safe_rename", fail_second_publish)
 
     with pytest.raises(OSError, match="later publication failure"):
         write_scenario_templates(updated, destination, force=True)
@@ -334,6 +336,92 @@ def test_force_template_restores_the_old_set_when_a_later_publish_fails(
     assert publish_calls == 2
     assert {path: path.read_bytes() for path in generated} == old_contents
     assert tuple(destination.glob(".csbox-recovery-*.bak"))
+    assert not tuple(tmp_path.glob(".scenarios-*.partial"))
+
+
+def test_template_import_rolls_back_new_files_when_mixed_publication_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "pets.json"
+    _write_json_spec(source)
+    importer = OpenApiImporter()
+    scenario = importer.to_scenario(importer.load(source), "pets")
+    third = ApiStep(
+        name="third",
+        request=ApiRequest(method="GET", url="https://api.example.test/third"),
+    )
+    scenario = scenario.model_copy(update={"steps": (*scenario.steps, third)})
+    destination = tmp_path / "scenarios"
+    destination.mkdir()
+    existing = destination / "getPet.toml"
+    existing.write_text("old scenario", encoding="utf-8")
+    real_safe_rename = writer_module.safe_rename
+
+    def fail_third_publish(
+        source_path: Path, destination_path: Path, *, replace_existing: bool = True
+    ) -> None:
+        if source_path.name == "third.toml" and destination_path.name == "third.toml":
+            raise OSError("simulated mixed publication failure")
+        real_safe_rename(
+            source_path,
+            destination_path,
+            replace_existing=replace_existing,
+        )
+
+    monkeypatch.setattr(writer_module, "safe_rename", fail_third_publish)
+
+    with pytest.raises(OSError, match="mixed publication failure"):
+        write_scenario_templates(scenario, destination, force=True)
+
+    assert existing.read_text(encoding="utf-8") == "old scenario"
+    assert not (destination / "updatePet.toml").exists()
+    assert not (destination / "third.toml").exists()
+    assert not tuple(tmp_path.glob(".scenarios-*.partial"))
+
+
+def test_template_import_preserves_invalid_utf8_concurrent_new_file_on_rollback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "pets.json"
+    _write_json_spec(source)
+    importer = OpenApiImporter()
+    scenario = importer.to_scenario(importer.load(source), "pets")
+    third = ApiStep(
+        name="third",
+        request=ApiRequest(method="GET", url="https://api.example.test/third"),
+    )
+    scenario = scenario.model_copy(update={"steps": (*scenario.steps, third)})
+    destination = tmp_path / "scenarios"
+    destination.mkdir()
+    existing = destination / "getPet.toml"
+    existing.write_text("old scenario", encoding="utf-8")
+    real_safe_rename = writer_module.safe_rename
+
+    def mutate_new_file_then_fail(
+        source_path: Path, destination_path: Path, *, replace_existing: bool = True
+    ) -> None:
+        if source_path.name == "third.toml" and destination_path.name == "third.toml":
+            raise OSError("simulated invalid occupant publication failure")
+        real_safe_rename(
+            source_path,
+            destination_path,
+            replace_existing=replace_existing,
+        )
+        if source_path.name == "updatePet.toml" and destination_path.parent == destination:
+            destination_path.write_bytes(b"\xff\xfe concurrent occupant")
+
+    monkeypatch.setattr(writer_module, "safe_rename", mutate_new_file_then_fail)
+
+    with pytest.raises(OSError, match="invalid occupant publication failure"):
+        write_scenario_templates(scenario, destination, force=True)
+
+    assert existing.read_text(encoding="utf-8") == "old scenario"
+    assert not (destination / "updatePet.toml").exists()
+    assert not (destination / "third.toml").exists()
+    recovery = tuple(destination.glob(".csbox-recovery-*.bak"))
+    assert any(path.read_bytes() == b"\xff\xfe concurrent occupant" for path in recovery)
     assert not tuple(tmp_path.glob(".scenarios-*.partial"))
 
 
@@ -643,9 +731,7 @@ def test_template_staging_failure_leaves_no_new_target_directory(
     scenario = importer.to_scenario(importer.load(source), "pets")
     destination = tmp_path / "scenarios"
 
-    from csbox.api import openapi
-
-    original_write = openapi.atomic_write_text
+    original_write = writer_module.atomic_write_text
     write_count = 0
 
     def fail_second_staging_write(path: Path, text: str) -> None:
@@ -655,7 +741,7 @@ def test_template_staging_failure_leaves_no_new_target_directory(
             raise OSError("injected staging write failure")
         original_write(path, text)
 
-    monkeypatch.setattr(openapi, "atomic_write_text", fail_second_staging_write)
+    monkeypatch.setattr(writer_module, "atomic_write_text", fail_second_staging_write)
 
     with pytest.raises(OSError, match="injected staging write failure"):
         write_scenario_templates(scenario, destination)

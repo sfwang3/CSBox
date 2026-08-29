@@ -4,38 +4,50 @@ from collections.abc import Callable
 from pathlib import Path
 
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import Resize
 from textual.screen import Screen
 from textual.widgets import Button
 
-from csbox.check.service import CheckService, CheckServiceError
+from csbox.check.service import CheckServiceError, create_check_service
+from csbox.config import ConfigurationError
 from csbox.core.models import HomeSnapshot
-from csbox.lab.repository import SessionRepository, SessionRepositoryError
 from csbox.locales import Translator
+from csbox.tui.dialogs.lab_start import LabStartDialog
 from csbox.tui.dialogs.unavailable import UnavailableDialog
+from csbox.tui.lab_workflow import HomeNotice, LabStartRequest, ShellOption
 from csbox.tui.screens.pack import PackConfirmationScreen
 from csbox.tui.screens.project_check import ProjectCheckScreen
-from csbox.tui.screens.review import ReviewController, ReviewScreen
 from csbox.tui.widgets.home import (
     ACTION_DEFINITIONS,
     ActionPanel,
     BrandBlock,
-    EnvironmentPanel,
-    RecentPanel,
+    ProjectPanel,
     ShortcutBar,
+    WorkflowStatusPanel,
 )
 
 
 class HomeScreen(Screen[None]):
+    BINDINGS = [
+        Binding("up", "focus_previous_entry", "上一个入口", show=False, priority=True),
+        Binding("down", "focus_next_entry", "下一个入口", show=False, priority=True),
+    ]
+
     def __init__(
         self,
         *,
         snapshot: HomeSnapshot,
         locale: Translator,
         api_screen_factory: Callable[[], Screen[None]] | None = None,
-        pack_plan_factory: Callable[[], object] | None = None,
+        pack_plan_factory: Callable[..., object] | None = None,
         pack_action: Callable[[object], object] | None = None,
+        shell_options: tuple[ShellOption, ...] = (),
+        shell_error: str | None = None,
+        notice: HomeNotice | None = None,
+        records_screen_factory: Callable[[], Screen[None]] | None = None,
+        check_service: object | None = None,
     ) -> None:
         super().__init__(name="home")
         self.snapshot = snapshot
@@ -43,16 +55,28 @@ class HomeScreen(Screen[None]):
         self.api_screen_factory = api_screen_factory
         self.pack_plan_factory = pack_plan_factory
         self.pack_action = pack_action
+        self.shell_options = shell_options
+        self.shell_error = shell_error
+        self.notice = notice
+        self.records_screen_factory = records_screen_factory
+        self.check_service = check_service
         self.is_wide = False
 
     def compose(self) -> ComposeResult:
         yield Vertical(
             VerticalScroll(
                 BrandBlock(self.locale, id="brand-block"),
-                EnvironmentPanel(self.snapshot, self.locale, id="environment-panel"),
                 Horizontal(
                     ActionPanel(self.locale, id="action-panel"),
-                    RecentPanel(self.snapshot, self.locale, id="recent-panel"),
+                    Vertical(
+                        ProjectPanel(self.snapshot, self.locale, id="project-panel"),
+                        WorkflowStatusPanel(
+                            self.locale,
+                            self.notice,
+                            id="workflow-status-panel",
+                        ),
+                        id="home-context",
+                    ),
                     id="content-grid",
                 ),
                 id="main-scroll",
@@ -69,6 +93,18 @@ class HomeScreen(Screen[None]):
     def on_resize(self, event: Resize) -> None:
         self.is_wide = event.size.width >= 120
         self.set_class(self.is_wide, "wide")
+        self.call_after_refresh(self._keep_focused_entry_visible)
+
+    def _keep_focused_entry_visible(self) -> None:
+        focused = self.focused
+        if isinstance(focused, Button) and focused.has_class("entry-button"):
+            focused.scroll_visible(animate=False, immediate=True)
+
+    def action_focus_next_entry(self) -> None:
+        self.focus_next(".entry-button")
+
+    def action_focus_previous_entry(self) -> None:
+        self.focus_previous(".entry-button")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id or ""
@@ -77,13 +113,18 @@ class HomeScreen(Screen[None]):
         label_key = action_keys.get(action_id)
         if label_key is None:
             return
-        if action_id == "replay":
-            self._open_latest_review()
+        if action_id == "records":
+            self._open_records()
             return
         if action_id == "start":
-            self._show_action_error(
-                self.locale("home.entry.start"),
-                self.locale("home.start.guidance"),
+            self.app.push_screen(
+                LabStartDialog(
+                    locale=self.locale,
+                    project_dir=self.snapshot.project_dir or Path.cwd(),
+                    shell_options=self.shell_options,
+                    shell_error=self.shell_error,
+                ),
+                self._handle_start_request,
             )
             return
         if action_id == "check":
@@ -114,6 +155,23 @@ class HomeScreen(Screen[None]):
             return
         self.app.push_screen(screen)
 
+    def _open_records(self) -> None:
+        if self.records_screen_factory is None:
+            self._show_action_error(
+                self.locale("home.entry.records"),
+                "实验记录暂时无法打开，请稍后重试。",
+            )
+            return
+        try:
+            screen = self.records_screen_factory()
+        except Exception:
+            self._show_action_error(
+                self.locale("home.entry.records"),
+                "实验记录暂时无法打开，请稍后重试。",
+            )
+            return
+        self.app.push_screen(screen)
+
     def _open_pack(self) -> None:
         if self.pack_plan_factory is None:
             self._show_action_error(
@@ -134,39 +192,27 @@ class HomeScreen(Screen[None]):
                 plan=plan,
                 locale=self.locale,
                 pack_action=self.pack_action,
+                plan_factory=self.pack_plan_factory,
             )
         )
 
     def _show_action_error(self, title: str, message: str) -> None:
         self.app.push_screen(UnavailableDialog(title=title, locale=self.locale, message=message))
 
-    def _open_latest_review(self) -> None:
-        project_dir = self.snapshot.project_dir or Path.cwd()
-        try:
-            repository = SessionRepository.from_cwd(project_dir)
-            target = repository.latest()
-            if target is None:
-                raise SessionRepositoryError("暂无可回看的 session，请先运行 csbox lab start。")
-            self.app.push_screen(
-                ReviewScreen(
-                    controller=ReviewController.from_session(target.paths),
-                    locale=self.locale,
-                )
-            )
-        except (OSError, UnicodeError, ValueError, SessionRepositoryError):
-            self.app.push_screen(
-                UnavailableDialog(
-                    title=self.locale("home.entry.replay"),
-                    locale=self.locale,
-                    message_key="home.replay.empty",
-                )
-            )
+    def _handle_start_request(self, request: LabStartRequest | None) -> None:
+        if request is not None:
+            self.app.exit(request)
 
     def _open_project_check(self) -> None:
         project_dir = self.snapshot.project_dir or Path.cwd()
         try:
-            report = CheckService().run(project_dir)
-        except (OSError, UnicodeError, ValueError, CheckServiceError):
+            checker = (
+                self.check_service
+                if self.check_service is not None
+                else create_check_service(project_dir)
+            )
+            report = checker.run(project_dir)
+        except (ConfigurationError, OSError, UnicodeError, ValueError, CheckServiceError):
             self.app.push_screen(
                 UnavailableDialog(
                     title=self.locale("home.entry.check"),
@@ -179,5 +225,8 @@ class HomeScreen(Screen[None]):
 
     def update_snapshot(self, snapshot: HomeSnapshot) -> None:
         self.snapshot = snapshot
-        self.query_one(EnvironmentPanel).update_snapshot(snapshot)
-        self.query_one(RecentPanel).update_snapshot(snapshot)
+        self.query_one(ProjectPanel).update_snapshot(snapshot)
+
+    def update_notice(self, notice: HomeNotice | None) -> None:
+        self.notice = notice
+        self.query_one(WorkflowStatusPanel).update_notice(notice)

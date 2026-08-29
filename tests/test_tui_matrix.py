@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 from textual.widget import Widget
-from textual.widgets import Button, Input, Static
+from textual.widgets import Button, Input, Select, Static
 
 from csbox.api.repository import ApiRunRepository
 from csbox.api.scenario import ScenarioLoader
@@ -21,11 +21,14 @@ from csbox.locales import load_locale
 from csbox.tui.app import ApiApp, CheckApp, CSBoxApp, ReviewApp
 from csbox.tui.dialogs.capture_title import CaptureTitleDialog
 from csbox.tui.dialogs.confirm import ConfirmDialog
+from csbox.tui.dialogs.lab_start import LabStartDialog
 from csbox.tui.dialogs.unavailable import UnavailableDialog
+from csbox.tui.lab_workflow import ShellOption
 from csbox.tui.screens.api import ApiScreen
 from csbox.tui.screens.home import HomeScreen
 from csbox.tui.screens.pack import PackConfirmationScreen
 from csbox.tui.screens.project_check import ProjectCheckScreen
+from csbox.tui.screens.records import RecordsScreen
 from csbox.tui.screens.review import ReviewController, ReviewScreen
 
 SECRET = "CSBOX_SECRET_SENTINEL_task15"
@@ -178,7 +181,7 @@ async def test_home_geometry_and_tab_navigation_are_usable(
         assert app.screen.focused.id == "entry-start"
         assert_visible_geometry(app.screen)
         assert_static_lines_fit(app.screen)
-        for expected_id in ("entry-replay", "entry-api", "entry-check", "entry-pack"):
+        for expected_id in ("entry-records", "entry-check", "entry-pack", "entry-api"):
             await pilot.press("tab")
             await pilot.pause()
             assert app.screen.focused is not None
@@ -258,17 +261,56 @@ async def test_home_error_dialog_is_returnable_at_all_layouts(
         await pilot.pause()
         await pilot.press("enter")
         await pilot.pause()
-        assert isinstance(app.screen, UnavailableDialog)
+        assert isinstance(app.screen, LabStartDialog)
         assert_visible_geometry(app.screen)
+        assert_static_lines_fit(app.screen)
         assert app.screen.focused is not None
-        assert app.screen.focused.id == "dialog-close"
+        assert app.screen.focused.id == "lab-start-name"
         text = screen_text(app.screen)
-        assert "发生了什么" in text
-        assert "csbox lab start" in text
+        assert "当前项目" in text
+        assert "csbox lab start" not in text
+        assert "F5" not in text
         assert SECRET not in text
         await pilot.press("escape")
         await pilot.pause()
         assert isinstance(app.screen, HomeScreen)
+
+
+@pytest.mark.asyncio
+async def test_start_dialog_continuous_resize_preserves_cjk_form_state(
+    tmp_path: Path,
+) -> None:
+    project_dir = tmp_path.joinpath(*(["中文课程项目"] * 18))
+    app = CSBoxApp(
+        data_source=RealHomeDataSource(SessionRepository.from_cwd(project_dir), project_dir),
+        environment=environment(),
+        locale=load_locale(),
+        shell_options=(
+            ShellOption("bash", "Bash"),
+            ShellOption("zsh", "Zsh"),
+        ),
+    )
+
+    async with app.run_test(size=(160, 45)) as pilot:
+        await pilot.press("enter")
+        await pilot.pause()
+        name_input = app.screen.query_one("#lab-start-name", Input)
+        name_input.value = "中文实验名称"
+        await pilot.click("#lab-start-advanced")
+        shell_select = app.screen.query_one("#lab-start-shell-select", Select)
+        shell_select.value = "zsh"
+        await pilot.pause()
+
+        for size in ((120, 35), (80, 24), (160, 45), (100, 30)):
+            await pilot.resize_terminal(*size)
+            await pilot.pause()
+            assert isinstance(app.screen, LabStartDialog)
+            assert name_input.value == "中文实验名称"
+            assert shell_select.display is True
+            assert app.screen.selected_shell == "zsh"
+            assert str(app.screen.query_one("#lab-start-shell-display", Static).renderable) == "Zsh"
+            assert_visible_geometry(app.screen)
+            assert_static_lines_fit(app.screen)
 
 
 @pytest.mark.asyncio
@@ -506,7 +548,8 @@ async def test_api_empty_state_keeps_focus_safe_and_resize_preserves_pane(
         await pilot.pause()
         assert isinstance(app.screen, ApiScreen)
         assert app.screen.query_one("#api-title").content_region.height >= 1
-        assert app.screen.focused is None
+        assert app.screen.focused is not None
+        assert app.screen.focused.id == "api-quick-create"
         assert_static_lines_fit(app.screen)
         for key, pane in (("tab", "runs"), ("tab", "detail"), ("tab", "scenarios")):
             await pilot.press(key)
@@ -528,7 +571,7 @@ async def test_api_empty_state_keeps_focus_safe_and_resize_preserves_pane(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("size", LAYOUTS)
 @pytest.mark.parametrize("corrupt", (False, True))
-async def test_home_replay_empty_and_corrupt_states_are_returnable(
+async def test_home_records_screen_ignores_session_corruption(
     tmp_path: Path, size: tuple[int, int], corrupt: bool
 ) -> None:
     sessions_root = tmp_path / ".csbox" / "sessions"
@@ -544,16 +587,19 @@ async def test_home_replay_empty_and_corrupt_states_are_returnable(
 
     async with app.run_test(size=size) as pilot:
         await pilot.pause()
-        app.screen.query_one("#entry-replay").focus()
+        app.screen.query_one("#entry-records").focus()
         await pilot.press("enter")
         await pilot.pause()
-        assert isinstance(app.screen, UnavailableDialog)
+        assert isinstance(app.screen, RecordsScreen)
         assert_visible_geometry(app.screen)
         text = screen_text(app.screen)
-        assert "暂无可回看的" in text
+        assert "下一阶段" not in text
+        assert "暂无实验记录" in text
+        assert "lab list" not in text
+        assert "F5" not in text
         assert SECRET not in text
         assert app.screen.focused is not None
-        assert app.screen.focused.id == "dialog-close"
+        assert app.screen.focused.id == "records-start"
         await pilot.press("escape")
         await pilot.pause()
         assert isinstance(app.screen, HomeScreen)

@@ -175,6 +175,35 @@ def test_resize_shrink_then_grow_does_not_revive_a_truncated_wide_pair() -> None
     assert_valid_grid(grown)
 
 
+def test_repeated_resize_preserves_valid_cjk_ansi_crlf_state_and_replays_deterministically() -> (
+    None
+):
+    events = [
+        event(
+            1,
+            0.1,
+            TerminalEventType.OUTPUT,
+            "\x1b[31m中文\u0301 mixed\r\n下一行".encode(),
+        ),
+        event(2, 0.2, TerminalEventType.RESIZE, TerminalSize(5, 3)),
+        event(3, 0.3, TerminalEventType.OUTPUT, "\x1b[0m宽中\r\n".encode()),
+        event(4, 0.4, TerminalEventType.RESIZE, TerminalSize(12, 4)),
+        event(5, 0.5, TerminalEventType.RESIZE, TerminalSize(6, 2)),
+    ]
+    continuous = TerminalEmulator(columns=12, rows=4)
+    replayed = TerminalEmulator(columns=12, rows=4)
+
+    for terminal_event in events:
+        continuous.apply(terminal_event)
+        replayed.apply(terminal_event)
+        snapshot = continuous.snapshot()
+        assert_valid_grid(snapshot)
+        assert 0 <= snapshot.cursor.row < snapshot.rows
+        assert 0 <= snapshot.cursor.column < snapshot.columns
+
+    assert replayed.snapshot() == continuous.snapshot()
+
+
 def test_emulator_advances_timeline_for_non_screen_events_without_changing_grid() -> None:
     emulator = TerminalEmulator(columns=8, rows=2)
     before = emulator.snapshot()
