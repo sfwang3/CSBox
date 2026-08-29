@@ -327,6 +327,9 @@ class ApiExportOverwriteDialog(ModalScreen[bool]):
         )
 
     def on_mount(self) -> None:
+        self.call_after_refresh(self._focus_confirm)
+
+    def _focus_confirm(self) -> None:
         self.query_one("#api-export-overwrite-confirm", Button).focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:

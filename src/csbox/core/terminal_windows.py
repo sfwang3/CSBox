@@ -309,8 +309,14 @@ class WindowsConPTYBackend(TerminalBackend):
                     raise TypeError(f"PtyProcess.read returned {type(text).__name__}")
                 if text == "":
                     # pywinpty uses an empty string for its internal
-                    # ``0011Ignore`` no-output sentinel.  Actual EOF is
-                    # reported as EOFError by PtyProcess.read().
+                    # ``0011Ignore`` no-output sentinel.  On some native
+                    # PowerShell 5.1 exits the sentinel is the final read,
+                    # so pair it with child liveness before treating it as
+                    # no output.  Actual EOF is also reported as EOFError
+                    # by PtyProcess.read().
+                    if not bool(process.isalive()):
+                        self._capture_exit_status()
+                        break
                     continue
                 encoded = text.encode("utf-8")
                 offset = 0
