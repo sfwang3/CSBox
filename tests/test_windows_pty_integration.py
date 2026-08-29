@@ -383,6 +383,7 @@ def test_native_windows_conpty_shell_unicode_resize_and_exit(
     ):
         backend.resize(size.columns, size.rows)
     output = _read_until_interactive_prompt(backend)
+    cwd_marker = f"CSBOX_CWD_{tmp_path}"
     backend.write(
         (
             ""
@@ -390,18 +391,18 @@ def test_native_windows_conpty_shell_unicode_resize_and_exit(
             "Write-Output ('CSBOX_SIZE_{0}x{1}' -f $size.Width, $size.Height); "
             "Write-Output 'CSBOX_NATIVE_中文_OK'; "
             "1..20 | ForEach-Object { Write-Output ('CSBOX_FLOW_{0}' -f $_) }; "
-            "Write-Output (Get-Location); exit 0\r\n"
+            "Write-Output ('CSBOX_CWD_{0}' -f $PWD.Path); exit 0\r\n"
         ).encode()
     )
 
     output += _read_until(backend, b"CSBOX_SIZE_160x45")
     output += _read_until(backend, b"CSBOX_FLOW_20")
-    output += _read_until(backend, str(tmp_path).encode())
+    output += _read_until(backend, cwd_marker.encode())
 
     assert b"CSBOX_SIZE_160x45" in output
     assert "CSBOX_NATIVE_中文_OK".encode() in output
     assert b"CSBOX_FLOW_20" in output
-    assert str(tmp_path).encode() in output
+    assert cwd_marker.encode() in output
     # PowerShell 5.1 may finish the child before pywinpty reports PTY EOF.
     # The smoke contract is complete output markers plus the native exit code.
     assert backend.wait(timeout=2.0) == 0

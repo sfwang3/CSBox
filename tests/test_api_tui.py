@@ -434,7 +434,10 @@ async def test_api_openapi_import_success_reports_count_todo_and_deterministic_s
         path_input.value = str(source)
         path_input.focus()
         await pilot.press("enter")
-        await _wait_until(pilot, lambda: isinstance(app.screen, ApiScreen))
+        await _wait_until(
+            pilot,
+            lambda: isinstance(app.screen, ApiScreen) and len(app.screen.scenarios) == 2,
+        )
 
         assert isinstance(app.screen, ApiScreen)
         text = _screen_text(app.screen)
