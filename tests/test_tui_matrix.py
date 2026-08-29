@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from time import monotonic
+from typing import Any
 
 import pytest
 from textual.widget import Widget
@@ -98,6 +101,15 @@ def screen_text(screen: Widget) -> str:
             *(input_widget.value for input_widget in screen.query(Input)),
         ]
     )
+
+
+async def _wait_until(pilot: Any, predicate: Callable[[], bool], *, timeout: float = 3.0) -> None:
+    deadline = monotonic() + timeout
+    while monotonic() < deadline:
+        if predicate():
+            return
+        await pilot.pause()
+    assert predicate()
 
 
 def assert_visible_geometry(screen: Widget) -> None:
@@ -598,8 +610,14 @@ async def test_home_records_screen_ignores_session_corruption(
         assert "lab list" not in text
         assert "F5" not in text
         assert SECRET not in text
-        assert app.screen.focused is not None
-        assert app.screen.focused.id == "records-start"
+        await _wait_until(
+            pilot,
+            lambda: (
+                isinstance(app.screen, RecordsScreen)
+                and app.screen.focused is not None
+                and app.screen.focused.id == "records-start"
+            ),
+        )
         await pilot.press("escape")
         await pilot.pause()
         assert isinstance(app.screen, HomeScreen)

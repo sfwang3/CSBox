@@ -441,6 +441,9 @@ class ApiExportDialog(ModalScreen[ApiExportRequest | None]):
         )
 
     def on_mount(self) -> None:
+        self.call_after_refresh(self._initialize)
+
+    def _initialize(self) -> None:
         self.query_one("#api-export-destination", Input).focus()
         self._refresh_validation()
 
