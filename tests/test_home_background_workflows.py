@@ -345,6 +345,17 @@ async def test_pack_overwrite_confirmation_is_single_use(tmp_path: Path) -> None
         ]
         assert len(overwrite_screens) == 1
 
+        await _wait_until(
+            pilot,
+            lambda: (
+                isinstance(app.screen, PackOverwriteDialog)
+                and bool(tuple(app.screen.query("#pack-overwrite-confirm")))
+                and bool(tuple(app.screen.query("#pack-overwrite-message")))
+                and bool(
+                    str(app.screen.query_one("#pack-overwrite-message", Static).renderable).strip()
+                )
+            ),
+        )
         await pilot.click("#pack-overwrite-confirm")
         await _wait_until(pilot, lambda: pack.started.is_set())
         assert pack.calls == 1

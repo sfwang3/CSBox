@@ -96,6 +96,13 @@ def _api_export_failure_ready(app: ApiApp) -> bool:
     return _api_export_dialog_ready(app) and "导出失败" in _screen_text(app.screen)
 
 
+def _api_import_result_ready(app: ApiApp) -> bool:
+    if not isinstance(app.screen, ApiScreen) or len(app.screen.scenarios) != 2:
+        return False
+    text = _screen_text(app.screen)
+    return "生成场景：2 个" in text and "保存位置" in text
+
+
 def _environment() -> EnvironmentSnapshot:
     return EnvironmentSnapshot(
         os_name="Linux",
@@ -463,7 +470,7 @@ async def test_api_openapi_import_success_reports_count_todo_and_deterministic_s
         await pilot.press("enter")
         await _wait_until(
             pilot,
-            lambda: isinstance(app.screen, ApiScreen) and len(app.screen.scenarios) == 2,
+            lambda: _api_import_result_ready(app),
         )
 
         assert isinstance(app.screen, ApiScreen)

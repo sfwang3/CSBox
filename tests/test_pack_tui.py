@@ -42,6 +42,28 @@ async def _wait_until(pilot: Any, predicate, *, timeout: float = 5.0) -> None:
     assert predicate()
 
 
+def _pack_overwrite_dialog_ready(app: Any) -> bool:
+    if not isinstance(app.screen, PackOverwriteDialog):
+        return False
+    confirm = list(app.screen.query("#pack-overwrite-confirm"))
+    message = list(app.screen.query("#pack-overwrite-message"))
+    return bool(
+        confirm
+        and message
+        and confirm[0].visible
+        and confirm[0].size.width > 0
+        and confirm[0].size.height > 0
+        and bool(str(message[0].renderable).strip())
+    )
+
+
+def _pack_result_ready(app: Any) -> bool:
+    if not isinstance(app.screen, PackResultScreen):
+        return False
+    body = list(app.screen.query("#pack-result-body"))
+    return bool(body and str(body[0].renderable).strip())
+
+
 def _environment() -> EnvironmentSnapshot:
     return EnvironmentSnapshot(
         os_name="Linux",
@@ -476,7 +498,7 @@ async def test_real_pack_race_target_is_recoverable_with_exact_force_publish(
         await pilot.pause()
         assert isinstance(app.screen, PackOverwriteDialog)
         await pilot.click("#pack-overwrite-confirm")
-        await pilot.pause()
+        await _wait_until(pilot, lambda: _pack_result_ready(app))
 
         assert isinstance(app.screen, PackResultScreen)
         assert destination.read_bytes() != b"user archive"
@@ -555,13 +577,14 @@ async def test_invalid_directory_destination_can_be_corrected_without_leaving_pa
             lambda: (
                 isinstance(app.screen, PackConfirmationScreen)
                 and app.screen.focused is destination_input
-                and not app.screen.query_one("#pack-update-preview", Button).has_class("-active")
+                and not app.screen.query_one("#pack-update-preview", Button).disabled
                 and "目录" in str(app.screen.query_one("#pack-status", Static).renderable)
             ),
         )
 
         destination_input.value = str(corrected)
-        await pilot.click("#pack-update-preview")
+        destination_input.focus()
+        await pilot.press("enter")
         await _wait_until(
             pilot,
             lambda: (
@@ -790,7 +813,7 @@ async def test_pack_result_shows_exact_path_size_verify_and_summary(
             lambda: not app.screen.query_one("#pack-confirm", Button).has_class("-active"),
         )
         await pilot.press("enter")
-        await _wait_until(pilot, lambda: isinstance(app.screen, PackResultScreen))
+        await _wait_until(pilot, lambda: _pack_result_ready(app))
 
         assert isinstance(app.screen, PackResultScreen)
         result_text = _screen_text(app.screen)
