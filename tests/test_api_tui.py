@@ -80,8 +80,11 @@ def _api_export_dialog_ready(app: ApiApp) -> bool:
     if not (destinations and submits and selects):
         return False
     submit = submits[0]
+    focused = app.screen.focused
     return bool(
         list(selects[0].query("SelectOverlay"))
+        and focused is not None
+        and focused.id == "api-export-destination"
         and submit.visible
         and submit.size.width > 0
         and submit.size.height > 0
