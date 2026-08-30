@@ -745,7 +745,7 @@ async def test_api_export_success_and_failure_are_safe_user_actions(tmp_path: Pa
         await pilot.press("e")
         await _wait_until(pilot, lambda: _api_export_dialog_ready(app))
         await pilot.click("#api-export-submit")
-        await _wait_until(pilot, lambda: _api_export_result_rendered(app))
+        await _wait_until(pilot, lambda: _api_export_result_rendered(app), timeout=5.0)
         assert (tmp_path / "evidence" / "api-evidence.md").is_file()
         assert "导出完成" in _screen_text(app.screen)
         assert SECRET not in _screen_text(app.screen)
@@ -815,7 +815,7 @@ async def test_api_export_dialog_default_custom_restore_and_exact_result(
         assert destination_input.value == str(tmp_path / "evidence")
         destination_input.value = str(custom)
         await pilot.click("#api-export-submit")
-        await _wait_until(pilot, lambda: _api_export_result_rendered(app))
+        await _wait_until(pilot, lambda: _api_export_result_rendered(app), timeout=5.0)
 
         text = _screen_text(app.screen)
         assert run.id in text
@@ -847,7 +847,7 @@ async def test_api_export_dialog_supports_keyboard_submit_and_return(tmp_path: P
         await _wait_until(pilot, lambda: _api_export_dialog_ready(app))
         assert app.screen.focused.id == "api-export-destination"
         await pilot.press("enter")
-        await _wait_until(pilot, lambda: _api_export_result_rendered(app))
+        await _wait_until(pilot, lambda: _api_export_result_rendered(app), timeout=5.0)
         await pilot.press("escape")
         await _wait_until(pilot, lambda: app.screen.name == "api")
         assert calls == [(tmp_path / "evidence", "dark", False)]
@@ -912,7 +912,7 @@ async def test_api_export_existing_target_requires_confirmation_then_forces_expo
             ),
         )
         await pilot.click("#api-export-overwrite-confirm")
-        await _wait_until(pilot, lambda: _api_export_result_rendered(app))
+        await _wait_until(pilot, lambda: _api_export_result_rendered(app), timeout=5.0)
 
         assert (destination / "api-evidence.md").is_file()
         assert (destination / "results.json").is_file()
@@ -974,7 +974,7 @@ async def test_api_export_failure_returns_to_dialog_and_retry_keeps_destination(
         assert "导出失败" in _screen_text(app.screen)
         assert app.screen.query_one("#api-export-destination", Input).value == str(destination)
         await pilot.click("#api-export-submit")
-        await _wait_until(pilot, lambda: _api_export_result_rendered(app))
+        await _wait_until(pilot, lambda: _api_export_result_rendered(app), timeout=5.0)
         assert calls == [(destination, "dark", False), (destination, "dark", False)]
 
 
