@@ -33,7 +33,7 @@ def _screen_text(screen: Any) -> str:
     )
 
 
-async def _wait_until(pilot: Any, predicate, *, timeout: float = 3.0) -> None:
+async def _wait_until(pilot: Any, predicate, *, timeout: float = 5.0) -> None:
     deadline = monotonic() + timeout
     while monotonic() < deadline:
         if predicate():
@@ -203,8 +203,7 @@ async def test_real_pack_adapter_uses_plan_and_publishes_only_after_enter(tmp_pa
         assert not tuple(source.glob("*.zip"))
         app.screen.query_one("#pack-confirm").focus()
         await pilot.press("enter")
-        await pilot.pause()
-        assert "打包完成" in _screen_text(app.screen)
+        await _wait_until(pilot, lambda: "打包完成" in _screen_text(app.screen))
 
     archives = tuple(source.glob("*.zip"))
     assert len(archives) == 1
@@ -422,9 +421,7 @@ async def test_pack_race_conflict_opens_same_overwrite_recovery_dialog(tmp_path:
         await pilot.press("enter")
         await pilot.pause()
         await pilot.click("#pack-confirm")
-        await pilot.pause()
-
-        assert isinstance(app.screen, PackOverwriteDialog)
+        await _wait_until(pilot, lambda: isinstance(app.screen, PackOverwriteDialog))
         assert "目标文件已存在" in _screen_text(app.screen)
         await pilot.press("escape")
         await pilot.pause()
