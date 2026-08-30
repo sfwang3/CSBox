@@ -47,6 +47,9 @@ class UnavailableDialog(ModalScreen[None]):
         )
 
     def on_mount(self) -> None:
+        self.call_after_refresh(self._focus_close)
+
+    def _focus_close(self) -> None:
         self.query_one("#dialog-close", Button).focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:

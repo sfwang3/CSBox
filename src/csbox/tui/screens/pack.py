@@ -123,7 +123,10 @@ class PackConfirmationScreen(Screen[None]):
         )
 
     def on_mount(self) -> None:
-        self._refresh_content()
+        self.call_after_refresh(self._refresh_content)
+        self.call_after_refresh(self._focus_destination)
+
+    def _focus_destination(self) -> None:
         self.query_one("#pack-destination-input", Input).focus()
 
     @property
@@ -132,7 +135,7 @@ class PackConfirmationScreen(Screen[None]):
 
     def on_resize(self, event: Resize) -> None:
         del event
-        self._refresh_content()
+        self.call_after_refresh(self._refresh_content)
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id != "pack-destination-input":
@@ -554,12 +557,15 @@ class PackOverwriteDialog(ModalScreen[bool]):
         )
 
     def on_mount(self) -> None:
-        self._refresh()
-        self.query_one("#pack-overwrite-confirm", Button).focus()
+        self.call_after_refresh(self._refresh)
+        self.call_after_refresh(self._focus_confirm)
 
     def on_resize(self, event: Resize) -> None:
         del event
-        self._refresh()
+        self.call_after_refresh(self._refresh)
+
+    def _focus_confirm(self) -> None:
+        self.query_one("#pack-overwrite-confirm", Button).focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "pack-overwrite-confirm":
@@ -615,12 +621,15 @@ class PackResultScreen(Screen[None]):
         )
 
     def on_mount(self) -> None:
-        self._refresh()
-        self.query_one("#pack-result-return", Button).focus()
+        self.call_after_refresh(self._refresh)
+        self.call_after_refresh(self._focus_return)
 
     def on_resize(self, event: Resize) -> None:
         del event
-        self._refresh()
+        self.call_after_refresh(self._refresh)
+
+    def _focus_return(self) -> None:
+        self.query_one("#pack-result-return", Button).focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "pack-result-return":

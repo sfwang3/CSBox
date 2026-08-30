@@ -124,9 +124,8 @@ async def test_pack_confirmation_requires_enter_before_pack_action(tmp_path: Pat
         await pilot.pause()
         app.screen.query_one("#pack-confirm").focus()
         await pilot.press("enter")
-        await pilot.pause()
-        assert calls == ["packed"]
-        assert "打包完成" in _screen_text(app.screen)
+        await _wait_until(pilot, lambda: calls == ["packed"])
+        await _wait_until(pilot, lambda: "打包完成" in _screen_text(app.screen))
         assert "未返回交付报告" in _screen_text(app.screen)
 
 
@@ -249,9 +248,8 @@ async def test_pack_preview_exposes_destination_and_restore_default_keeps_full_t
         destination_input.focus()
         destination_input.value = str(custom)
         await pilot.press("enter")
-        await pilot.pause()
-        assert requested[-1] == custom
-        assert str(custom) in _screen_text(app.screen)
+        await _wait_until(pilot, lambda: requested[-1:] == [custom])
+        await _wait_until(pilot, lambda: str(custom) in _screen_text(app.screen))
 
         await pilot.click("#pack-restore-default")
         await pilot.pause()
@@ -374,10 +372,14 @@ async def test_existing_target_requires_confirmation_and_cancel_retains_destinat
         await pilot.pause()
         app.screen.query_one("#pack-confirm").focus()
         await pilot.press("enter")
-        await pilot.pause()
-
-        assert isinstance(app.screen, PackOverwriteDialog)
-        assert str(destination) in _screen_text(app.screen).replace("\n", "")
+        await _wait_until(
+            pilot,
+            lambda: (
+                isinstance(app.screen, PackOverwriteDialog)
+                and bool(tuple(app.screen.query("#pack-overwrite-confirm")))
+                and str(destination) in _screen_text(app.screen).replace("\n", "")
+            ),
+        )
         assert packed == []
 
         await pilot.press("escape")
@@ -421,8 +423,14 @@ async def test_pack_race_conflict_opens_same_overwrite_recovery_dialog(tmp_path:
         await pilot.press("enter")
         await pilot.pause()
         await pilot.click("#pack-confirm")
-        await _wait_until(pilot, lambda: isinstance(app.screen, PackOverwriteDialog))
-        assert "目标文件已存在" in _screen_text(app.screen)
+        await _wait_until(
+            pilot,
+            lambda: (
+                isinstance(app.screen, PackOverwriteDialog)
+                and bool(tuple(app.screen.query("#pack-overwrite-message")))
+                and "目标文件已存在" in _screen_text(app.screen)
+            ),
+        )
         await pilot.press("escape")
         await pilot.pause()
         assert isinstance(app.screen, PackConfirmationScreen)
@@ -544,7 +552,12 @@ async def test_invalid_directory_destination_can_be_corrected_without_leaving_pa
         assert packed == []
         await _wait_until(
             pilot,
-            lambda: not app.screen.query_one("#pack-update-preview", Button).has_class("-active"),
+            lambda: (
+                isinstance(app.screen, PackConfirmationScreen)
+                and app.screen.focused is destination_input
+                and not app.screen.query_one("#pack-update-preview", Button).has_class("-active")
+                and "目录" in str(app.screen.query_one("#pack-status", Static).renderable)
+            ),
         )
 
         destination_input.value = str(corrected)
@@ -686,7 +699,7 @@ async def test_pack_verification_failure_is_distinguished_from_publish_failure(
         await pilot.pause()
         app.screen.query_one("#pack-confirm").focus()
         await pilot.press("enter")
-        await pilot.pause()
+        await _wait_until(pilot, lambda: "验证未通过" in _screen_text(app.screen))
         text = _screen_text(app.screen)
         assert "验证未通过" in text
         assert "未发布" in text
@@ -845,9 +858,17 @@ async def test_real_pack_delivery_keeps_source_and_excludes_build_cache_and_self
         destination_input = app.screen.query_one("#pack-destination-input", Input)
         destination_input.value = str(destination)
         await pilot.press("enter")
-        await pilot.pause()
+        await _wait_until(
+            pilot,
+            lambda: (
+                isinstance(app.screen, PackConfirmationScreen)
+                and app.screen.destination == destination.absolute()
+                and app.screen.focused is not None
+                and app.screen.focused.id == "pack-confirm"
+            ),
+        )
         await pilot.press("enter")
-        await pilot.pause()
+        await _wait_until(pilot, lambda: isinstance(app.screen, PackResultScreen))
 
         assert isinstance(app.screen, PackResultScreen)
         result_text = _screen_text(app.screen)

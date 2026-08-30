@@ -40,11 +40,11 @@ class ProjectCheckScreen(Screen[None]):
 
     def on_mount(self) -> None:
         self._set_layout(self.size.width >= 120)
-        self._refresh()
+        self.call_after_refresh(self._refresh)
 
     def on_resize(self, event: Resize) -> None:
         self._set_layout(event.size.width >= 120)
-        self._refresh()
+        self.call_after_refresh(self._refresh)
 
     def _set_layout(self, wide: bool) -> None:
         self.is_wide = wide
