@@ -72,10 +72,25 @@ def _api_export_result_rendered(app: ApiApp) -> bool:
 def _api_export_dialog_ready(app: ApiApp) -> bool:
     if app.screen.name != "api-export":
         return False
+    if app.screen.size.width <= 0 or app.screen.size.height <= 0:
+        return False
+    destinations = list(app.screen.query("#api-export-destination"))
+    submits = list(app.screen.query("#api-export-submit"))
     selects = list(app.screen.query("#api-export-theme"))
-    return bool(list(app.screen.query("#api-export-destination"))) and bool(
-        selects and list(selects[0].query("SelectOverlay"))
+    if not (destinations and submits and selects):
+        return False
+    submit = submits[0]
+    return bool(
+        list(selects[0].query("SelectOverlay"))
+        and submit.visible
+        and submit.size.width > 0
+        and submit.size.height > 0
+        and app.screen.region.contains_region(submit.region)
     )
+
+
+def _api_export_failure_ready(app: ApiApp) -> bool:
+    return _api_export_dialog_ready(app) and "导出失败" in _screen_text(app.screen)
 
 
 def _environment() -> EnvironmentSnapshot:
@@ -508,7 +523,15 @@ async def test_api_openapi_import_zero_or_one_selection_is_deterministic(
         path_input.value = str(source)
         path_input.focus()
         await pilot.press("enter")
-        await _wait_until(pilot, lambda: isinstance(app.screen, ApiScreen))
+        await _wait_until(
+            pilot,
+            lambda: (
+                isinstance(app.screen, ApiScreen)
+                and len(app.screen.scenarios) == expected_count
+                and app.screen.selected_scenario_index == expected_selection
+                and f"生成场景：{expected_count} 个" in _screen_text(app.screen)
+            ),
+        )
 
         assert app.screen.selected_scenario_index == expected_selection
         assert f"生成场景：{expected_count} 个" in _screen_text(app.screen)
@@ -567,7 +590,14 @@ async def test_api_openapi_import_invalid_path_keeps_dialog_and_path(tmp_path: P
         path_input = app.screen.query_one("#api-openapi-path", Input)
         path_input.value = str(missing)
         await pilot.click("#api-openapi-submit")
-        await _wait_until(pilot, lambda: app.screen.name == "api-openapi-import")
+        await _wait_until(
+            pilot,
+            lambda: (
+                app.screen.name == "api-openapi-import"
+                and bool(list(app.screen.query("#api-openapi-path")))
+                and ("失败" in _screen_text(app.screen) or "无法" in _screen_text(app.screen))
+            ),
+        )
 
         assert app.screen.query_one("#api-openapi-path", Input).value == str(missing)
         assert "失败" in _screen_text(app.screen) or "无法" in _screen_text(app.screen)
@@ -730,7 +760,7 @@ async def test_api_export_success_and_failure_are_safe_user_actions(tmp_path: Pa
         await pilot.press("e")
         await _wait_until(pilot, lambda: _api_export_dialog_ready(failing))
         await pilot.click("#api-export-submit")
-        await _wait_until(pilot, lambda: "导出失败" in _screen_text(failing.screen))
+        await _wait_until(pilot, lambda: _api_export_failure_ready(failing))
         text = _screen_text(failing.screen)
         assert "导出失败" in text
         assert failing.screen.name == "api-export"
@@ -749,7 +779,7 @@ async def test_api_export_success_and_failure_are_safe_user_actions(tmp_path: Pa
         await pilot.press("e")
         await _wait_until(pilot, lambda: _api_export_dialog_ready(missing_font))
         await pilot.click("#api-export-submit")
-        await _wait_until(pilot, lambda: "导出失败" in _screen_text(missing_font.screen))
+        await _wait_until(pilot, lambda: _api_export_failure_ready(missing_font))
         text = _screen_text(missing_font.screen)
         assert "导出失败" in text
         assert missing_font.screen.name == "api-export"
@@ -902,7 +932,7 @@ async def test_api_export_regular_file_failure_is_controlled_and_untouched(tmp_p
         await _wait_until(pilot, lambda: _api_export_dialog_ready(app))
         app.screen.query_one("#api-export-destination", Input).value = str(destination)
         await pilot.click("#api-export-submit")
-        await _wait_until(pilot, lambda: app.screen.name == "api-export")
+        await _wait_until(pilot, lambda: _api_export_failure_ready(app))
 
         text = _screen_text(app.screen)
         assert "导出失败" in text
@@ -936,7 +966,7 @@ async def test_api_export_failure_returns_to_dialog_and_retry_keeps_destination(
         await _wait_until(pilot, lambda: _api_export_dialog_ready(app))
         app.screen.query_one("#api-export-destination", Input).value = str(destination)
         await pilot.click("#api-export-submit")
-        await _wait_until(pilot, lambda: app.screen.name == "api-export")
+        await _wait_until(pilot, lambda: _api_export_failure_ready(app))
 
         assert "导出失败" in _screen_text(app.screen)
         assert app.screen.query_one("#api-export-destination", Input).value == str(destination)
