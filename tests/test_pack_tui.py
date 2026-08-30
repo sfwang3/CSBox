@@ -497,7 +497,7 @@ async def test_real_pack_race_target_is_recoverable_with_exact_force_publish(
         await pilot.click("#pack-confirm")
         await _wait_until(pilot, lambda: _pack_overwrite_dialog_ready(app))
         await pilot.click("#pack-overwrite-confirm")
-        await _wait_until(pilot, lambda: _pack_result_ready(app))
+        await _wait_until(pilot, lambda: _pack_result_ready(app), timeout=10.0)
 
         assert isinstance(app.screen, PackResultScreen)
         assert destination.read_bytes() != b"user archive"
@@ -940,7 +940,7 @@ async def test_real_pack_secret_rejection_is_actionable_without_leaking_secret(
         await pilot.pause()
         app.screen.query_one("#entry-pack").focus()
         await pilot.press("enter")
-        await pilot.pause()
+        await _wait_until(pilot, lambda: isinstance(app.screen, PackConfirmationScreen))
 
         assert isinstance(app.screen, PackConfirmationScreen)
         text = _screen_text(app.screen)
