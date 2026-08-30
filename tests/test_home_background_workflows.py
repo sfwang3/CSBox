@@ -46,7 +46,7 @@ def _app(tmp_path: Path, **kwargs: object) -> CSBoxApp:
     )
 
 
-async def _wait_until(pilot: object, predicate, *, timeout: float = 3.0) -> None:
+async def _wait_until(pilot: object, predicate, *, timeout: float = 5.0) -> None:
     deadline = monotonic() + timeout
     while monotonic() < deadline:
         if predicate():

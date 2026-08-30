@@ -495,8 +495,7 @@ async def test_real_pack_race_target_is_recoverable_with_exact_force_publish(
         sibling.write_bytes(b"keep sibling")
 
         await pilot.click("#pack-confirm")
-        await pilot.pause()
-        assert isinstance(app.screen, PackOverwriteDialog)
+        await _wait_until(pilot, lambda: _pack_overwrite_dialog_ready(app))
         await pilot.click("#pack-overwrite-confirm")
         await _wait_until(pilot, lambda: _pack_result_ready(app))
 
@@ -891,7 +890,7 @@ async def test_real_pack_delivery_keeps_source_and_excludes_build_cache_and_self
             ),
         )
         await pilot.press("enter")
-        await _wait_until(pilot, lambda: isinstance(app.screen, PackResultScreen))
+        await _wait_until(pilot, lambda: _pack_result_ready(app))
 
         assert isinstance(app.screen, PackResultScreen)
         result_text = _screen_text(app.screen)

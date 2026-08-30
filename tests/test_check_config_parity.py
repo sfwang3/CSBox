@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from time import monotonic
 
 import pytest
 from textual.app import App
@@ -19,6 +20,15 @@ from csbox.pack.service import PackService, create_pack_service
 from csbox.tui.dialogs.unavailable import UnavailableDialog
 from csbox.tui.screens.home import HomeScreen
 from csbox.tui.screens.project_check import ProjectCheckScreen
+
+
+async def _wait_until(pilot: object, predicate, *, timeout: float = 5.0) -> None:
+    deadline = monotonic() + timeout
+    while monotonic() < deadline:
+        if predicate():
+            return
+        await pilot.pause()  # type: ignore[attr-defined]
+    assert predicate()
 
 
 def _environment() -> EnvironmentSnapshot:
@@ -113,7 +123,7 @@ async def test_home_uses_project_configured_check_service_owned_by_pack(
         await pilot.pause()
         app.screen.query_one("#entry-check", Button).focus()
         await pilot.press("enter")
-        await pilot.pause()
+        await _wait_until(pilot, lambda: isinstance(app.screen, ProjectCheckScreen))
 
         assert isinstance(app.screen, ProjectCheckScreen)
         assert app.screen.report is expected
@@ -136,7 +146,7 @@ async def test_home_check_applies_the_project_threshold_from_the_shared_service(
         await pilot.pause()
         app.screen.query_one("#entry-check", Button).focus()
         await pilot.press("enter")
-        await pilot.pause()
+        await _wait_until(pilot, lambda: isinstance(app.screen, ProjectCheckScreen))
 
         assert isinstance(app.screen, ProjectCheckScreen)
         assert any(
@@ -163,7 +173,7 @@ async def test_home_placeholder_project_check_and_pack_remain_delivery_safe(
         await pilot.pause()
         app.screen.query_one("#entry-check", Button).focus()
         await pilot.press("enter")
-        await pilot.pause()
+        await _wait_until(pilot, lambda: isinstance(app.screen, ProjectCheckScreen))
 
         assert isinstance(app.screen, ProjectCheckScreen)
         assert not any(
