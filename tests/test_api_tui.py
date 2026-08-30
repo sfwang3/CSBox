@@ -69,6 +69,15 @@ def _api_export_result_rendered(app: ApiApp) -> bool:
     )
 
 
+def _api_export_dialog_ready(app: ApiApp) -> bool:
+    if app.screen.name != "api-export":
+        return False
+    selects = list(app.screen.query("#api-export-theme"))
+    return bool(list(app.screen.query("#api-export-destination"))) and bool(
+        selects and list(selects[0].query("SelectOverlay"))
+    )
+
+
 def _environment() -> EnvironmentSnapshot:
     return EnvironmentSnapshot(
         os_name="Linux",
@@ -587,7 +596,13 @@ async def test_api_openapi_import_conflict_requires_confirmation_and_cancel_keep
         await pilot.pause()
         app.screen.query_one("#api-openapi-path", Input).value = str(source)
         await pilot.click("#api-openapi-submit")
-        await _wait_until(pilot, lambda: app.screen.name == "api-openapi-overwrite")
+        await _wait_until(
+            pilot,
+            lambda: (
+                app.screen.name == "api-openapi-overwrite"
+                and bool(list(app.screen.query("#api-openapi-overwrite-confirm")))
+            ),
+        )
 
         assert "替换" in _screen_text(app.screen)
         await pilot.press("escape")
@@ -695,8 +710,7 @@ async def test_api_export_success_and_failure_are_safe_user_actions(tmp_path: Pa
         await pilot.pause()
         app.screen.select_run(0)
         await pilot.press("e")
-        await pilot.pause()
-        assert app.screen.name == "api-export"
+        await _wait_until(pilot, lambda: _api_export_dialog_ready(app))
         await pilot.click("#api-export-submit")
         await _wait_until(pilot, lambda: _api_export_result_rendered(app))
         assert (tmp_path / "evidence" / "api-evidence.md").is_file()
@@ -714,6 +728,7 @@ async def test_api_export_success_and_failure_are_safe_user_actions(tmp_path: Pa
         await pilot.pause()
         failing.screen.select_run(0)
         await pilot.press("e")
+        await _wait_until(pilot, lambda: _api_export_dialog_ready(failing))
         await pilot.click("#api-export-submit")
         await _wait_until(pilot, lambda: "导出失败" in _screen_text(failing.screen))
         text = _screen_text(failing.screen)
@@ -732,6 +747,7 @@ async def test_api_export_success_and_failure_are_safe_user_actions(tmp_path: Pa
         await pilot.pause()
         missing_font.screen.select_run(0)
         await pilot.press("e")
+        await _wait_until(pilot, lambda: _api_export_dialog_ready(missing_font))
         await pilot.click("#api-export-submit")
         await _wait_until(pilot, lambda: "导出失败" in _screen_text(missing_font.screen))
         text = _screen_text(missing_font.screen)
@@ -755,9 +771,8 @@ async def test_api_export_dialog_default_custom_restore_and_exact_result(
         await pilot.pause()
         app.screen.select_run(0)
         await pilot.press("e")
-        await pilot.pause()
+        await _wait_until(pilot, lambda: _api_export_dialog_ready(app))
 
-        assert app.screen.name == "api-export"
         destination_input = app.screen.query_one("#api-export-destination", Input)
         assert run.id in _screen_text(app.screen)
         assert destination_input.value == str(tmp_path / "evidence")
@@ -796,8 +811,7 @@ async def test_api_export_dialog_supports_keyboard_submit_and_return(tmp_path: P
         await pilot.pause()
         app.screen.select_run(0)
         await pilot.press("e")
-        await pilot.pause()
-        assert app.screen.name == "api-export"
+        await _wait_until(pilot, lambda: _api_export_dialog_ready(app))
         assert app.screen.focused.id == "api-export-destination"
         await pilot.press("enter")
         await _wait_until(pilot, lambda: _api_export_result_rendered(app))
@@ -821,10 +835,16 @@ async def test_api_export_existing_target_cancel_preserves_custom_destination(
         await pilot.pause()
         app.screen.select_run(0)
         await pilot.press("e")
-        await pilot.pause()
+        await _wait_until(pilot, lambda: _api_export_dialog_ready(app))
         app.screen.query_one("#api-export-destination", Input).value = str(destination)
         await pilot.click("#api-export-submit")
-        await _wait_until(pilot, lambda: app.screen.name == "api-export-overwrite")
+        await _wait_until(
+            pilot,
+            lambda: (
+                app.screen.name == "api-export-overwrite"
+                and bool(list(app.screen.query("#api-export-overwrite-confirm")))
+            ),
+        )
 
         assert "覆盖" in _screen_text(app.screen)
         await pilot.press("escape")
@@ -848,10 +868,16 @@ async def test_api_export_existing_target_requires_confirmation_then_forces_expo
         await pilot.pause()
         app.screen.select_run(0)
         await pilot.press("e")
-        await pilot.pause()
+        await _wait_until(pilot, lambda: _api_export_dialog_ready(app))
         app.screen.query_one("#api-export-destination", Input).value = str(destination)
         await pilot.click("#api-export-submit")
-        await _wait_until(pilot, lambda: app.screen.name == "api-export-overwrite")
+        await _wait_until(
+            pilot,
+            lambda: (
+                app.screen.name == "api-export-overwrite"
+                and bool(list(app.screen.query("#api-export-overwrite-confirm")))
+            ),
+        )
         await pilot.click("#api-export-overwrite-confirm")
         await _wait_until(pilot, lambda: _api_export_result_rendered(app))
 
@@ -873,7 +899,7 @@ async def test_api_export_regular_file_failure_is_controlled_and_untouched(tmp_p
         await pilot.pause()
         app.screen.select_run(0)
         await pilot.press("e")
-        await pilot.pause()
+        await _wait_until(pilot, lambda: _api_export_dialog_ready(app))
         app.screen.query_one("#api-export-destination", Input).value = str(destination)
         await pilot.click("#api-export-submit")
         await _wait_until(pilot, lambda: app.screen.name == "api-export")
@@ -907,7 +933,7 @@ async def test_api_export_failure_returns_to_dialog_and_retry_keeps_destination(
         await pilot.pause()
         app.screen.select_run(0)
         await pilot.press("e")
-        await pilot.pause()
+        await _wait_until(pilot, lambda: _api_export_dialog_ready(app))
         app.screen.query_one("#api-export-destination", Input).value = str(destination)
         await pilot.click("#api-export-submit")
         await _wait_until(pilot, lambda: app.screen.name == "api-export")

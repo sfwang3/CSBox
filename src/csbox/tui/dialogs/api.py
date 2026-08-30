@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
+from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
@@ -28,6 +29,13 @@ class ApiOpenApiPathInput(Input):
     """Keep OpenAPI path typing local to the import modal."""
 
     value = reactive("", layout=False, init=False)
+
+
+class ApiSelect(Select[str]):
+    """Initialize Textual Select options after its composed children mount."""
+
+    def _on_mount(self, event: events.Mount) -> None:
+        self.call_after_refresh(super()._on_mount, event)
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +115,9 @@ class ApiOpenApiImportDialog(ModalScreen[Path | None]):
         )
 
     def on_mount(self) -> None:
+        self.call_after_refresh(self._initialize)
+
+    def _initialize(self) -> None:
         self.query_one("#api-openapi-path", Input).focus()
         self._refresh_validation()
 
@@ -200,6 +211,9 @@ class ApiScenarioOverwriteDialog(ModalScreen[bool]):
         )
 
     def on_mount(self) -> None:
+        self.call_after_refresh(self._focus_confirm)
+
+    def _focus_confirm(self) -> None:
         self.query_one("#api-scenario-overwrite-confirm", Button).focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -258,6 +272,9 @@ class ApiOpenApiOverwriteDialog(ModalScreen[bool]):
         )
 
     def on_mount(self) -> None:
+        self.call_after_refresh(self._focus_confirm)
+
+    def _focus_confirm(self) -> None:
         self.query_one("#api-openapi-overwrite-confirm", Button).focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -409,7 +426,7 @@ class ApiExportDialog(ModalScreen[ApiExportRequest | None]):
                         classes="api-export-control",
                     ),
                     Static(self.locale("api.export.theme"), classes="field-label"),
-                    Select(
+                    ApiSelect(
                         [
                             (self.locale("api.export.theme.dark"), "dark"),
                             (self.locale("api.export.theme.light"), "light"),
@@ -552,7 +569,7 @@ class ApiQuickCreateDialog(ModalScreen[ApiQuickCreateRequest | None]):
                         classes="api-quick-create-control",
                     ),
                     Static(self.locale("api.quick_create.method"), classes="field-label"),
-                    Select(
+                    ApiSelect(
                         [(method, method) for method in ("GET", "POST", "PUT", "PATCH", "DELETE")],
                         value=self.method,
                         allow_blank=False,
@@ -590,6 +607,9 @@ class ApiQuickCreateDialog(ModalScreen[ApiQuickCreateRequest | None]):
         )
 
     def on_mount(self) -> None:
+        self.call_after_refresh(self._initialize)
+
+    def _initialize(self) -> None:
         self.query_one("#api-quick-create-name", Input).focus()
         self._refresh_validation()
 
