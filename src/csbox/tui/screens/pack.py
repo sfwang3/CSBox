@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import stat
 from collections.abc import Callable
 from dataclasses import fields, is_dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -23,6 +24,7 @@ from csbox.core.text_layout import wrap_cells
 from csbox.locales import Translator
 
 PackPlanFactory = Callable[..., object]
+_WorkflowState = Literal["idle", "awaiting_overwrite", "planning", "publishing"]
 
 _REJECTION_LABELS = {
     "env": "真实 .env",
@@ -74,6 +76,10 @@ class PackConfirmationScreen(Screen[None]):
         self.default_destination = _absolute_path(_plan_destination(plan))
         self.destination = self.default_destination
         self.confirmed = False
+        self._working = False
+        self._workflow_state: _WorkflowState = "idle"
+        self._overwrite_token = 0
+        self._pending_overwrite_plan: object | None = None
         self._status_message = ""
 
     def compose(self) -> ComposeResult:
@@ -120,6 +126,10 @@ class PackConfirmationScreen(Screen[None]):
         self._refresh_content()
         self.query_one("#pack-destination-input", Input).focus()
 
+    @property
+    def is_working(self) -> bool:
+        return self._working
+
     def on_resize(self, event: Resize) -> None:
         del event
         self._refresh_content()
@@ -155,53 +165,63 @@ class PackConfirmationScreen(Screen[None]):
         self.focus_previous(self._control_selector())
 
     def action_cancel(self) -> None:
+        if self._workflow_state != "idle":
+            return
         self.app.pop_screen()
 
     def action_confirm(self) -> None:
-        if self.confirmed:
+        if self.confirmed or self._workflow_state != "idle":
             return
         if not self._apply_destination():
             return
         if _rejected(self.plan):
             return
         if bool(getattr(self.plan, "output_exists", False)):
-            self.app.push_screen(
-                PackOverwriteDialog(
-                    destination=_plan_destination(self.plan),
-                    locale=self.locale,
-                ),
-                self._handle_overwrite,
-            )
+            self._start_overwrite_confirmation(self.plan)
             return
         self._execute(self.plan)
 
     def _execute(self, plan: object) -> None:
+        if self._workflow_state != "idle":
+            return
+        self._workflow_state = "publishing"
         self.confirmed = True
+        self._set_working(True, self.locale("pack.status.packing"))
+        self.run_worker(
+            self._execute_in_background(plan),
+            name="pack-publish",
+            group="pack-publish",
+            exclusive=True,
+            exit_on_error=False,
+        )
+
+    async def _execute_in_background(self, plan: object) -> None:
         try:
             if self.pack_action is None:
                 self.confirmed = False
+                self._set_working(False)
                 self._set_status(self.locale("pack.no_service"))
                 return
-            result = self.pack_action(plan)
+            result = await asyncio.to_thread(self.pack_action, plan)
+            if inspect.isawaitable(result):
+                result = await result
         except Exception as error:
             self.confirmed = False
+            self._set_working(False)
             if _is_conflict_error(error) or (
                 _is_plan_changed_error(error) and _is_regular_target(_plan_destination(plan))
             ):
-                self.app.push_screen(
-                    PackOverwriteDialog(
-                        destination=_plan_destination(plan),
-                        locale=self.locale,
-                    ),
-                    self._handle_overwrite,
-                )
+                self._workflow_state = "idle"
+                self._start_overwrite_confirmation(plan)
                 return
             self._set_status(self._failure_message(error))
             self.query_one("#pack-destination-input", Input).focus()
             return
 
         self.confirmed = False
+        self._set_working(False)
         if _looks_like_report(result):
+            self._set_status("")
             self.app.push_screen(PackResultScreen(report=result, locale=self.locale))
             return
         self._set_status(
@@ -211,13 +231,43 @@ class PackConfirmationScreen(Screen[None]):
             )
         )
 
-    def _handle_overwrite(self, confirmed: bool) -> None:
-        if confirmed:
-            self._execute(_copy_plan(self.plan, force=True))
-        else:
+    def _start_overwrite_confirmation(self, plan: object) -> None:
+        if self._workflow_state != "idle":
+            return
+        self._workflow_state = "awaiting_overwrite"
+        self._pending_overwrite_plan = plan
+        self._overwrite_token += 1
+        token = self._overwrite_token
+        self.app.push_screen(
+            PackOverwriteDialog(
+                destination=_plan_destination(plan),
+                locale=self.locale,
+            ),
+            lambda confirmed: self._handle_overwrite(token, confirmed),
+        )
+
+    def _handle_overwrite(self, token: int, confirmed: bool) -> None:
+        if token != self._overwrite_token or self._workflow_state != "awaiting_overwrite":
+            return
+        plan = self._pending_overwrite_plan
+        self._pending_overwrite_plan = None
+        self._overwrite_token += 1
+        self._workflow_state = "idle"
+        if not confirmed:
             self._set_status(self.locale("pack.overwrite.cancelled"))
+            return
+        if plan is None:
+            return
+        try:
+            force_plan = _copy_plan(plan, force=True)
+        except Exception as error:
+            self._set_status(self._failure_message(error))
+            return
+        self._execute(force_plan)
 
     def _apply_destination(self) -> bool:
+        if self._workflow_state != "idle":
+            return False
         destination_input = self.query_one("#pack-destination-input", Input)
         value = destination_input.value
         validation = _local_destination_error(value, self.locale)
@@ -238,24 +288,44 @@ class PackConfirmationScreen(Screen[None]):
             self._refresh_destination_validation(value)
             return True
 
-        try:
-            candidate = self._build_plan(requested)
-        except Exception as error:
-            self._show_destination_error(self._plan_failure_message(error))
-            return False
+        self._start_plan_update(requested)
+        return False
 
-        candidate_destination = _absolute_path(_plan_destination(candidate))
-        if candidate_destination != requested:
+    def _start_plan_update(self, destination: Path) -> None:
+        if self._workflow_state != "idle":
+            return
+        self._workflow_state = "planning"
+        self._set_working(True, self.locale("pack.status.planning"))
+        self.run_worker(
+            self._update_plan_in_background(destination),
+            name="pack-plan",
+            group="pack-plan",
+            exclusive=True,
+            exit_on_error=False,
+        )
+
+    async def _update_plan_in_background(self, destination: Path) -> None:
+        try:
+            candidate = await asyncio.to_thread(self._build_plan, destination)
+            candidate_destination = _absolute_path(_plan_destination(candidate))
+        except Exception as error:
+            self._set_working(False)
+            self._show_destination_error(self._plan_failure_message(error))
+            return
+
+        if candidate_destination != destination:
+            self._set_working(False)
             self._show_destination_error(
-                self.locale("pack.destination.directory", path=str(requested))
+                self.locale("pack.destination.directory", path=str(destination))
             )
-            return False
+            return
 
         self.plan = candidate
-        self.destination = requested
+        self.destination = destination
+        self._set_working(False)
         self._set_status("")
         self._refresh_content()
-        return True
+        self.query_one("#pack-confirm", Button).focus()
 
     def _build_plan(self, destination: Path) -> object:
         factory = self.plan_factory
@@ -264,6 +334,8 @@ class PackConfirmationScreen(Screen[None]):
         return _call_plan_factory(factory, destination)
 
     def _restore_default(self) -> None:
+        if self._workflow_state != "idle":
+            return
         self.plan = self.default_plan
         self.destination = self.default_destination
         destination_input = self.query_one("#pack-destination-input", Input)
@@ -300,8 +372,8 @@ class PackConfirmationScreen(Screen[None]):
                 self._content_width("#pack-destination-validation"),
             )
         )
-        self.query_one("#pack-confirm", Button).disabled = validation is not None or bool(
-            _rejected(self.plan)
+        self.query_one("#pack-confirm", Button).disabled = (
+            self._working or validation is not None or bool(_rejected(self.plan))
         )
 
     def _show_destination_error(self, message: str) -> None:
@@ -312,6 +384,23 @@ class PackConfirmationScreen(Screen[None]):
         self._status_message = message
         if self.is_mounted:
             self._render_status()
+
+    def _set_working(self, working: bool, message: str | None = None) -> None:
+        self._working = working
+        if not working and self._workflow_state in {"planning", "publishing"}:
+            self._workflow_state = "idle"
+        if message is not None:
+            self._set_status(message)
+        for widget_id in (
+            "pack-destination-input",
+            "pack-edit-destination",
+            "pack-restore-default",
+            "pack-update-preview",
+            "pack-confirm",
+            "pack-cancel",
+        ):
+            self.query_one(f"#{widget_id}").disabled = working
+        self._refresh_destination_validation(self.query_one("#pack-destination-input", Input).value)
 
     def _render_status(self) -> None:
         try:

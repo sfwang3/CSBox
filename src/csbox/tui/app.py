@@ -32,6 +32,7 @@ from csbox.tui.lab_workflow import (
 )
 from csbox.tui.screens.api import ApiScreen
 from csbox.tui.screens.home import HomeScreen
+from csbox.tui.screens.pack import PackConfirmationScreen
 from csbox.tui.screens.project_check import ProjectCheckScreen
 from csbox.tui.screens.records import ExportAction, RecordsScreen
 from csbox.tui.screens.review import ReviewController, ReviewScreen
@@ -138,7 +139,15 @@ class CSBoxApp(App[LabStartRequest | None]):
             export_action=self.export_action,
         )
 
+    def _critical_workflow_active(self) -> bool:
+        screen = self.screen
+        return (isinstance(screen, HomeScreen) and screen.is_working) or (
+            isinstance(screen, PackConfirmationScreen) and screen.is_working
+        )
+
     def action_show_help(self) -> None:
+        if self._critical_workflow_active():
+            return
         self.push_screen(
             UnavailableDialog(
                 title=self.locale("home.help.title"),
@@ -179,7 +188,14 @@ class CSBoxApp(App[LabStartRequest | None]):
         self.home_notice = notice
         self.home_screen.update_notice(notice)
 
+    async def action_quit(self) -> None:
+        if self._critical_workflow_active():
+            return
+        self.exit(None)
+
     def action_quit_app(self) -> None:
+        if self._critical_workflow_active():
+            return
         self.exit(None)
 
 

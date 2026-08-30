@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from pathlib import Path
+from time import monotonic
 from typing import Any
 from zipfile import ZipFile
 
@@ -30,6 +31,15 @@ def _screen_text(screen: Any) -> str:
             *(input_widget.value for input_widget in screen.query(Input)),
         ]
     )
+
+
+async def _wait_until(pilot: Any, predicate, *, timeout: float = 3.0) -> None:
+    deadline = monotonic() + timeout
+    while monotonic() < deadline:
+        if predicate():
+            return
+        await pilot.pause()
+    assert predicate()
 
 
 def _environment() -> EnvironmentSnapshot:
@@ -535,13 +545,25 @@ async def test_invalid_directory_destination_can_be_corrected_without_leaving_pa
         await pilot.pause()
         assert "目录" in _screen_text(app.screen)
         assert packed == []
+        await _wait_until(
+            pilot,
+            lambda: not app.screen.query_one("#pack-update-preview", Button).has_class("-active"),
+        )
 
         destination_input.value = str(corrected)
         await pilot.click("#pack-update-preview")
-        await pilot.pause()
+        await _wait_until(
+            pilot,
+            lambda: (
+                isinstance(app.screen, PackConfirmationScreen)
+                and app.screen.destination == corrected.absolute()
+                and app.screen.focused is not None
+                and app.screen.focused.id == "pack-confirm"
+            ),
+        )
         await pilot.click("#pack-confirm")
-        await pilot.pause()
-        assert packed and packed[0].destination == corrected
+        await _wait_until(pilot, lambda: packed)
+        assert packed[0].destination == corrected
 
 
 @pytest.mark.asyncio
@@ -574,7 +596,21 @@ async def test_pack_publish_failure_keeps_destination_and_allows_retry(tmp_path:
         destination_input = app.screen.query_one("#pack-destination-input", Input)
         destination_input.value = str(destination)
         await pilot.click("#pack-confirm")
-        await pilot.pause()
+        await _wait_until(
+            pilot,
+            lambda: (
+                isinstance(app.screen, PackConfirmationScreen)
+                and app.screen.destination == destination.absolute()
+                and app.screen.focused is not None
+                and app.screen.focused.id == "pack-confirm"
+            ),
+        )
+        await _wait_until(
+            pilot,
+            lambda: not app.screen.query_one("#pack-confirm", Button).has_class("-active"),
+        )
+        await pilot.press("enter")
+        await _wait_until(pilot, lambda: "打包失败" in _screen_text(app.screen))
         assert "打包失败" in _screen_text(app.screen)
         assert "输出权限" in _screen_text(app.screen)
         assert "CSBOX_SECRET_SENTINEL_publish" not in _screen_text(app.screen)
@@ -584,7 +620,7 @@ async def test_pack_publish_failure_keeps_destination_and_allows_retry(tmp_path:
         while app.screen.query_one("#pack-confirm").has_class("-active"):
             await pilot.pause()
         await pilot.press("enter")
-        await pilot.pause()
+        await _wait_until(pilot, lambda: attempts == 2)
         assert attempts == 2
 
 
@@ -730,7 +766,21 @@ async def test_pack_result_shows_exact_path_size_verify_and_summary(
         destination_input = app.screen.query_one("#pack-destination-input", Input)
         destination_input.value = str(destination)
         await pilot.click("#pack-confirm")
-        await pilot.pause()
+        await _wait_until(
+            pilot,
+            lambda: (
+                isinstance(app.screen, PackConfirmationScreen)
+                and app.screen.destination == destination.absolute()
+                and app.screen.focused is not None
+                and app.screen.focused.id == "pack-confirm"
+            ),
+        )
+        await _wait_until(
+            pilot,
+            lambda: not app.screen.query_one("#pack-confirm", Button).has_class("-active"),
+        )
+        await pilot.press("enter")
+        await _wait_until(pilot, lambda: isinstance(app.screen, PackResultScreen))
 
         assert isinstance(app.screen, PackResultScreen)
         result_text = _screen_text(app.screen)
@@ -751,6 +801,7 @@ async def test_pack_result_shows_exact_path_size_verify_and_summary(
         await pilot.pause()
         assert isinstance(app.screen, PackConfirmationScreen)
         assert app.screen.query_one("#pack-destination-input", Input).value == str(destination)
+        assert "正在打包并验证" not in _screen_text(app.screen)
 
 
 @pytest.mark.asyncio

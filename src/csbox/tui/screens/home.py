@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from pathlib import Path
 
@@ -10,8 +11,7 @@ from textual.events import Resize
 from textual.screen import Screen
 from textual.widgets import Button
 
-from csbox.check.service import CheckServiceError, create_check_service
-from csbox.config import ConfigurationError
+from csbox.check.service import create_check_service
 from csbox.core.models import HomeSnapshot
 from csbox.locales import Translator
 from csbox.tui.dialogs.lab_start import LabStartDialog
@@ -61,6 +61,8 @@ class HomeScreen(Screen[None]):
         self.records_screen_factory = records_screen_factory
         self.check_service = check_service
         self.is_wide = False
+        self._busy_workflow: str | None = None
+        self._workflow_status: HomeNotice | None = None
 
     def compose(self) -> ComposeResult:
         yield Vertical(
@@ -90,6 +92,10 @@ class HomeScreen(Screen[None]):
         self.set_class(self.is_wide, "wide")
         self.query_one("#entry-start", Button).focus()
 
+    @property
+    def is_working(self) -> bool:
+        return self._busy_workflow is not None
+
     def on_resize(self, event: Resize) -> None:
         self.is_wide = event.size.width >= 120
         self.set_class(self.is_wide, "wide")
@@ -111,7 +117,7 @@ class HomeScreen(Screen[None]):
         action_id = button_id.removeprefix("entry-")
         action_keys = dict(ACTION_DEFINITIONS)
         label_key = action_keys.get(action_id)
-        if label_key is None:
+        if label_key is None or self._busy_workflow is not None:
             return
         if action_id == "records":
             self._open_records()
@@ -179,21 +185,14 @@ class HomeScreen(Screen[None]):
                 self.locale("home.pack.unavailable"),
             )
             return
-        try:
-            plan = self.pack_plan_factory()
-        except Exception:
-            self._show_action_error(
-                self.locale("home.entry.pack"),
-                self.locale("home.pack.error"),
-            )
+        if not self._begin_workflow("pack", self.locale("home.status.pack_preparing")):
             return
-        self.app.push_screen(
-            PackConfirmationScreen(
-                plan=plan,
-                locale=self.locale,
-                pack_action=self.pack_action,
-                plan_factory=self.pack_plan_factory,
-            )
+        self.run_worker(
+            self._prepare_pack(),
+            name="home-pack-plan",
+            group="home-pack-plan",
+            exclusive=True,
+            exit_on_error=False,
         )
 
     def _show_action_error(self, title: str, message: str) -> None:
@@ -205,14 +204,48 @@ class HomeScreen(Screen[None]):
 
     def _open_project_check(self) -> None:
         project_dir = self.snapshot.project_dir or Path.cwd()
-        try:
-            checker = (
-                self.check_service
-                if self.check_service is not None
-                else create_check_service(project_dir)
+        if not self._begin_workflow("check", self.locale("home.status.checking")):
+            return
+        self.run_worker(
+            self._prepare_project_check(project_dir),
+            name="home-project-check",
+            group="home-project-check",
+            exclusive=True,
+            exit_on_error=False,
+        )
+
+    async def _prepare_pack(self) -> None:
+        factory = self.pack_plan_factory
+        if factory is None:
+            self._finish_workflow()
+            self._show_action_error(
+                self.locale("home.entry.pack"),
+                self.locale("home.pack.unavailable"),
             )
-            report = checker.run(project_dir)
-        except (ConfigurationError, OSError, UnicodeError, ValueError, CheckServiceError):
+            return
+        try:
+            plan = await asyncio.to_thread(factory)
+            screen = PackConfirmationScreen(
+                plan=plan,
+                locale=self.locale,
+                pack_action=self.pack_action,
+                plan_factory=factory,
+            )
+        except Exception:
+            self._finish_workflow()
+            self._show_action_error(
+                self.locale("home.entry.pack"),
+                self.locale("home.pack.error"),
+            )
+            return
+        self._finish_workflow()
+        self.app.push_screen(screen)
+
+    async def _prepare_project_check(self, project_dir: Path) -> None:
+        try:
+            report = await asyncio.to_thread(self._run_project_check, project_dir)
+        except Exception:
+            self._finish_workflow()
             self.app.push_screen(
                 UnavailableDialog(
                     title=self.locale("home.entry.check"),
@@ -221,7 +254,36 @@ class HomeScreen(Screen[None]):
                 )
             )
             return
+        self._finish_workflow()
         self.app.push_screen(ProjectCheckScreen(report=report, locale=self.locale))
+
+    def _run_project_check(self, project_dir: Path) -> object:
+        checker = (
+            self.check_service
+            if self.check_service is not None
+            else create_check_service(project_dir)
+        )
+        return checker.run(project_dir)
+
+    def _begin_workflow(self, workflow: str, message: str) -> bool:
+        if self._busy_workflow is not None:
+            return False
+        self._busy_workflow = workflow
+        self._workflow_status = HomeNotice(message, "running")
+        for button in self.query(Button).filter(".entry-button"):
+            button.disabled = True
+        self._refresh_workflow_status()
+        return True
+
+    def _finish_workflow(self) -> None:
+        self._busy_workflow = None
+        self._workflow_status = None
+        for button in self.query(Button).filter(".entry-button"):
+            button.disabled = False
+        self._refresh_workflow_status()
+
+    def _refresh_workflow_status(self) -> None:
+        self.query_one(WorkflowStatusPanel).update_notice(self._workflow_status or self.notice)
 
     def update_snapshot(self, snapshot: HomeSnapshot) -> None:
         self.snapshot = snapshot
@@ -229,4 +291,4 @@ class HomeScreen(Screen[None]):
 
     def update_notice(self, notice: HomeNotice | None) -> None:
         self.notice = notice
-        self.query_one(WorkflowStatusPanel).update_notice(notice)
+        self._refresh_workflow_status()
