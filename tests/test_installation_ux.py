@@ -48,3 +48,12 @@ def test_readme_describes_the_complete_v05_delivery_surface() -> None:
     ):
         assert surface in readme
     assert "不生成实验分析、结论、答案" in readme
+
+
+def test_changelog_leads_with_the_current_v05_surface() -> None:
+    changelog = (PROJECT_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+
+    assert changelog.startswith("# Changelog\n\n## 0.5.0.dev0")
+    assert "本版本为 Release Candidate" not in changelog
+    for surface in ("Lab Evidence", "API Evidence", "Evidence Collection", "Report Handoff"):
+        assert surface in changelog
