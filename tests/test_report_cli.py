@@ -79,8 +79,7 @@ def test_default_report_profile_uses_existing_config_without_generating_prose(
     config_path = tmp_path / ".csbox" / "config.toml"
     config_path.parent.mkdir()
     config_path.write_text(
-        '[student]\nid = "2026001"\nname = "张三"\n'
-        '[course]\nname = "计算机网络"\n',
+        '[student]\nid = "2026001"\nname = "张三"\n[course]\nname = "计算机网络"\n',
         encoding="utf-8",
     )
 
@@ -100,9 +99,7 @@ def test_report_export_cli_uses_saved_profile_and_prints_outputs(
     profile = ReportProfile(
         report_title="课程报告",
         course_name="计算机网络",
-        sections=(
-            ReportSection(heading="用户章节", body="用户填写的正文", include_evidence=True),
-        ),
+        sections=(ReportSection(heading="用户章节", body="用户填写的正文", include_evidence=True),),
     )
     ReportProfileRepository.from_cwd(tmp_path).save(evidence_set.evidence_set_id, profile)
     monkeypatch.chdir(tmp_path)

@@ -214,9 +214,7 @@ def test_profile_refresh_does_not_trust_report_hash_in_asset_manifest(
     destination, evidence_set = _export(tmp_path, _profile())
     manifest_path = destination / ".csbox-generated-report.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    report_entry = next(
-        item for item in manifest["generated"] if item["path"] == "report.md"
-    )
+    report_entry = next(item for item in manifest["generated"] if item["path"] == "report.md")
     manifest["generated"].remove(report_entry)
     manifest["files"].append(report_entry)
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")

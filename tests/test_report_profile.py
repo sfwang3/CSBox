@@ -26,9 +26,7 @@ def test_default_profile_is_separate_and_places_evidence() -> None:
     assert profile.course_name == "计算机网络"
     assert profile.student_name == "张三"
     assert profile.student_id == "2026001"
-    assert profile.sections == (
-        ReportSection(heading="实验记录", include_evidence=True),
-    )
+    assert profile.sections == (ReportSection(heading="实验记录", include_evidence=True),)
     assert "sections" not in EvidenceSet.model_fields
     assert "course_name" not in EvidenceSet.model_fields
 
@@ -38,8 +36,7 @@ def test_report_profile_rejects_blank_headings_and_duplicate_evidence_slots() ->
         ReportSection(heading="   ")
 
     sections = tuple(
-        ReportSection(heading=f"第 {index}")
-        for index in range(MAX_REPORT_SECTIONS + 1)
+        ReportSection(heading=f"第 {index}") for index in range(MAX_REPORT_SECTIONS + 1)
     )
     with pytest.raises(ValueError, match="sections"):
         ReportProfile(sections=sections)

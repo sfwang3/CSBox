@@ -681,9 +681,7 @@ class EvidenceSetEditorScreen(Screen[None]):
                             kind="profile",
                         ),
                         on_retry=lambda: self._start_report_export(request),
-                        on_change_destination=lambda: self._open_report_dialog(
-                            request.destination
-                        ),
+                        on_change_destination=lambda: self._open_report_dialog(request.destination),
                     )
                 )
                 return

@@ -455,9 +455,7 @@ class ReportProfileDialog(ModalScreen[ReportProfile | None]):
     def _refresh_hint(self) -> None:
         hint = self.query_one("#report-profile-hint", Static)
         width = max(2, hint.content_region.width or self.size.width - 8)
-        hint.update(
-            "\n".join(wrap_cells(self.locale("evidence.report_profile.hint"), width))
-        )
+        hint.update("\n".join(wrap_cells(self.locale("evidence.report_profile.hint"), width)))
 
 
 __all__ = [

@@ -472,9 +472,7 @@ def _preflight_output(
     ):
         if _path_exists(path):
             relative = PurePosixPath(path.name)
-            if protect_report_targets and (
-                not manifest.valid or relative not in manifest.entries
-            ):
+            if protect_report_targets and (not manifest.valid or relative not in manifest.entries):
                 raise ReportExportError(
                     "现有报告文件未被 CSBox 标记为可覆盖，请选择其他目录。",
                     destination=output,
