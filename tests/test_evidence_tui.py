@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from time import monotonic
 
 import pytest
 from textual.widget import Widget
@@ -266,6 +267,24 @@ def assert_visible_geometry(screen: Widget) -> None:
             assert widget.region.y >= 0
             assert widget.region.right <= screen.size.width
             assert widget.region.bottom <= screen.size.height
+
+
+async def wait_for_report_result_text(
+    app: CSBoxApp,
+    pilot: object,
+    expected: str,
+    *,
+    timeout: float = 5.0,
+) -> None:
+    """Wait for the result screen's deferred layout refresh to publish text."""
+
+    deadline = monotonic() + timeout
+    while monotonic() < deadline:
+        if isinstance(app.screen, ReportExportResultScreen) and expected in screen_text(app.screen):
+            return
+        await pilot.pause()
+    assert isinstance(app.screen, ReportExportResultScreen)
+    assert expected in screen_text(app.screen)
 
 
 @pytest.mark.asyncio
@@ -1009,7 +1028,7 @@ async def test_realistic_report_handoff_uses_configured_renderer_and_publishes_b
         await pilot.pause()
 
         assert isinstance(app.screen, ReportExportResultScreen)
-        assert "导出完成" in screen_text(app.screen)
+        await wait_for_report_result_text(app, pilot, "导出完成")
 
     markdown = (destination / "report.md").read_text(encoding="utf-8")
     assert "图 1 查看网络接口" in markdown
