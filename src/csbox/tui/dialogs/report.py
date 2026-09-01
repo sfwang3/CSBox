@@ -9,11 +9,12 @@ from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Static
+from textual.widgets import Button, Checkbox, Input, Static, TextArea
 
 from csbox.core.text_layout import wrap_cells
 from csbox.evidence.exporter import ReportExportRequest
 from csbox.locales import Translator
+from csbox.report.models import MAX_REPORT_SECTIONS, ReportProfile, ReportSection
 
 
 class ReportExportOverwriteDialog(ModalScreen[bool]):
@@ -257,8 +258,211 @@ class ReportExportDialog(ModalScreen[ReportExportRequest | None]):
         hint.update("\n".join(wrap_cells(self.locale("evidence.export.hint"), width)))
 
 
+class ReportProfileDialog(ModalScreen[ReportProfile | None]):
+    """Edit a bounded report profile with one explicit save action."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "取消"),
+        Binding("ctrl+s", "save", "保存", show=False, priority=True),
+    ]
+
+    _METADATA_FIELDS = (
+        "report_title",
+        "course_name",
+        "course_code",
+        "student_name",
+        "student_id",
+        "instructor",
+        "semester",
+        "report_date",
+    )
+
+    def __init__(
+        self,
+        *,
+        locale: Translator,
+        profile: ReportProfile,
+        error: str = "",
+    ) -> None:
+        super().__init__(name="report-profile")
+        self.locale = locale
+        self.profile = profile
+        self.error = error
+
+    def compose(self) -> ComposeResult:
+        fields: list[object] = []
+        for field_name in self._METADATA_FIELDS:
+            fields.extend(
+                (
+                    Static(
+                        self.locale(f"evidence.report_profile.{field_name}.label"),
+                        classes="report-profile-field-label",
+                        markup=False,
+                    ),
+                    Input(
+                        value=getattr(self.profile, field_name),
+                        id=f"report-profile-{field_name.replace('_', '-')}-input",
+                    ),
+                )
+            )
+
+        sections = self.profile.sections
+        for index in range(MAX_REPORT_SECTIONS):
+            section = sections[index] if index < len(sections) else None
+            fields.append(
+                Vertical(
+                    Static(
+                        self.locale(
+                            "evidence.report_profile.section.title",
+                            index=index + 1,
+                        ),
+                        classes="report-profile-section-title",
+                        markup=False,
+                    ),
+                    Static(
+                        self.locale("evidence.report_profile.section.heading.label"),
+                        classes="report-profile-field-label",
+                        markup=False,
+                    ),
+                    Input(
+                        value=section.heading if section is not None else "",
+                        id=f"report-profile-section-{index + 1}-heading-input",
+                    ),
+                    Static(
+                        self.locale("evidence.report_profile.section.body.label"),
+                        classes="report-profile-field-label",
+                        markup=False,
+                    ),
+                    TextArea(
+                        section.body if section is not None else "",
+                        id=f"report-profile-section-{index + 1}-body-input",
+                        soft_wrap=True,
+                    ),
+                    Checkbox(
+                        self.locale("evidence.report_profile.section.evidence"),
+                        value=section.include_evidence if section is not None else False,
+                        id=f"report-profile-section-{index + 1}-evidence-input",
+                    ),
+                    classes="report-profile-section",
+                )
+            )
+
+        yield Container(
+            Vertical(
+                Static(
+                    self.locale("evidence.report_profile.title"),
+                    id="report-profile-heading",
+                    markup=False,
+                ),
+                Static(
+                    self.locale("evidence.report_profile.hint"),
+                    id="report-profile-hint",
+                    markup=False,
+                ),
+                VerticalScroll(
+                    *fields,
+                    id="report-profile-fields",
+                ),
+                Static(id="report-profile-error", markup=False),
+                Horizontal(
+                    Button(
+                        self.locale("evidence.report_profile.save"),
+                        id="report-profile-save",
+                        variant="primary",
+                    ),
+                    Button(
+                        self.locale("evidence.report_profile.cancel"),
+                        id="report-profile-cancel",
+                    ),
+                    id="report-profile-actions",
+                ),
+                id="report-profile-card",
+            ),
+            id="report-profile-dialog",
+        )
+
+    def on_mount(self) -> None:
+        self._show_error(self.error)
+        self._refresh_hint()
+        self.query_one("#report-profile-report-title-input", Input).focus()
+
+    def on_resize(self) -> None:
+        self.call_after_refresh(self._refresh_hint)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "report-profile-save":
+            self.action_save()
+        elif event.button.id == "report-profile-cancel":
+            self.action_cancel()
+
+    def action_save(self) -> None:
+        sections: list[ReportSection] = []
+        for index in range(MAX_REPORT_SECTIONS):
+            heading_input = self.query_one(
+                f"#report-profile-section-{index + 1}-heading-input",
+                Input,
+            )
+            body_input = self.query_one(
+                f"#report-profile-section-{index + 1}-body-input",
+                TextArea,
+            )
+            evidence_input = self.query_one(
+                f"#report-profile-section-{index + 1}-evidence-input",
+                Checkbox,
+            )
+            heading = heading_input.value
+            body = body_input.text
+            include_evidence = evidence_input.value
+            if not heading.strip():
+                if body.strip() or include_evidence:
+                    self._show_error(
+                        self.locale(
+                            "evidence.report_profile.validation.section_heading",
+                            index=index + 1,
+                        )
+                    )
+                    heading_input.focus()
+                    return
+                continue
+            sections.append(
+                ReportSection(
+                    heading=heading,
+                    body=body,
+                    include_evidence=include_evidence,
+                )
+            )
+
+        values = {
+            field_name: self.query_one(
+                f"#report-profile-{field_name.replace('_', '-')}-input",
+                Input,
+            ).value
+            for field_name in self._METADATA_FIELDS
+        }
+        try:
+            profile = self.profile.model_copy(update={**values, "sections": tuple(sections)})
+        except ValueError:
+            self._show_error(self.locale("evidence.report_profile.validation.invalid"))
+            return
+        self.dismiss(profile)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def _show_error(self, value: str) -> None:
+        self.query_one("#report-profile-error", Static).update(value)
+
+    def _refresh_hint(self) -> None:
+        hint = self.query_one("#report-profile-hint", Static)
+        width = max(2, hint.content_region.width or self.size.width - 8)
+        hint.update(
+            "\n".join(wrap_cells(self.locale("evidence.report_profile.hint"), width))
+        )
+
+
 __all__ = [
     "ReportDestinationInput",
     "ReportExportDialog",
     "ReportExportOverwriteDialog",
+    "ReportProfileDialog",
 ]

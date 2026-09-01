@@ -390,3 +390,13 @@ def test_verbose_failure_includes_bounded_backend_spawn_context(
     verbose_error = capsys.readouterr().err.replace("\n", " ")
     assert r"resolved_executable=C:\Program Files\WindowsApps\PowerShell\pwsh.exe" in verbose_error
     assert r"cwd=E:\test\CSBox" in verbose_error
+
+
+def test_root_help_names_evidence_and_report_handoff_surface() -> None:
+    result = runner.invoke(app, ["--help"])
+
+    assert result.exit_code == 0
+    assert "整理证据" in result.stdout
+    assert "Evidence Collection" in result.stdout
+    assert "csbox report" in result.stdout
+    assert "课程报告格式化和导出" in result.stdout

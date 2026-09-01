@@ -132,6 +132,8 @@ class ReportExportResultScreen(Screen[None]):
             next_step = (
                 "evidence.export.result.next"
                 if error is None or error.kind == "missing_source"
+                else "evidence.export.result.next.profile"
+                if error.kind == "profile"
                 else "evidence.export.result.next.destination"
             )
             lines = [

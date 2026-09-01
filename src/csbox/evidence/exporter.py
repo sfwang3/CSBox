@@ -39,6 +39,7 @@ from csbox.evidence.models import EvidenceItem, EvidenceSet
 from csbox.evidence.resolver import LabCaptureResolver
 from csbox.lab.models import CaptureRecord
 from csbox.lab.renderer import TerminalEvidenceRenderer
+from csbox.report.models import ReportProfile, ReportSection
 
 _COMPONENT_BUDGET = 240
 _MANIFEST_NAME = ".csbox-generated-report.json"
@@ -160,7 +161,7 @@ class EvidenceReportExporter:
     ) -> None:
         self.resolver = resolver
         self.renderer = renderer
-        self.docx_writer = docx_writer or _write_docx
+        self.docx_writer = docx_writer
 
     def export(
         self,
@@ -169,9 +170,12 @@ class EvidenceReportExporter:
         *,
         force: bool = False,
         phase_callback: PhaseCallback | None = None,
+        report_profile: ReportProfile | None = None,
     ) -> ReportExportResult:
         if not isinstance(evidence_set, EvidenceSet):
             raise TypeError("evidence_set must be an EvidenceSet")
+        if report_profile is not None and not isinstance(report_profile, ReportProfile):
+            raise TypeError("report_profile must be a ReportProfile")
 
         output = Path(destination)
         self._emit(phase_callback, ReportExportPhase.GENERATING)
@@ -188,6 +192,7 @@ class EvidenceReportExporter:
                         _asset_name(index, item.title)
                         for index, item in enumerate(evidence_set.items, start=1)
                     ),
+                    protect_report_targets=report_profile is not None,
                 )
                 staging = _new_staging(output)
                 assets = staging / "assets"
@@ -200,13 +205,36 @@ class EvidenceReportExporter:
                     rendered.append((item, image_path))
 
                 markdown_path = staging / "report.md"
-                _write_markdown(markdown_path, evidence_set, rendered)
+                if report_profile is None:
+                    _write_markdown(markdown_path, evidence_set, rendered)
+                else:
+                    _write_profile_markdown(markdown_path, evidence_set, rendered, report_profile)
                 docx_path = staging / "report.docx"
-                self.docx_writer(evidence_set, tuple(rendered), docx_path)
+                if self.docx_writer is None:
+                    if report_profile is None:
+                        _write_docx(evidence_set, tuple(rendered), docx_path)
+                    else:
+                        _write_profile_docx(
+                            evidence_set,
+                            tuple(rendered),
+                            docx_path,
+                            report_profile,
+                        )
+                else:
+                    self.docx_writer(evidence_set, tuple(rendered), docx_path)
                 manifest_path = staging / _MANIFEST_NAME
-                _write_manifest(manifest_path, rendered, staging)
+                _write_manifest(
+                    manifest_path,
+                    rendered,
+                    staging,
+                    include_report_targets=report_profile is not None,
+                )
                 expected_names = tuple(path.name for _item, path in rendered)
-                _validate_bundle(staging, expected_names)
+                _validate_bundle(
+                    staging,
+                    expected_names,
+                    require_report_targets=report_profile is not None,
+                )
 
                 self._emit(phase_callback, ReportExportPhase.PUBLISHING)
                 warnings = _publish_bundle(
@@ -216,6 +244,7 @@ class EvidenceReportExporter:
                     owned_assets=manifest.entries if manifest.valid else {},
                     existing_targets=manifest.existing_targets,
                     expected_names=expected_names,
+                    require_report_targets=report_profile is not None,
                 )
                 warnings = (*warnings, *_cleanup_staging(staging))
                 result = ReportExportResult(
@@ -388,6 +417,7 @@ def _preflight_output(
     *,
     force: bool,
     expected_names: tuple[str, ...],
+    protect_report_targets: bool = False,
 ) -> _ManifestState:
     _reject_parent_links(output.parent)
     metadata = _path_metadata(output)
@@ -439,10 +469,20 @@ def _preflight_output(
     for path in (
         output / "report.md",
         output / "report.docx",
-        output / _MANIFEST_NAME,
     ):
         if _path_exists(path):
-            existing_targets.add(PurePosixPath(path.name))
+            relative = PurePosixPath(path.name)
+            if protect_report_targets and (
+                not manifest.valid or relative not in manifest.entries
+            ):
+                raise ReportExportError(
+                    "现有报告文件未被 CSBox 标记为可覆盖，请选择其他目录。",
+                    destination=output,
+                    kind="existing_target",
+                )
+            existing_targets.add(relative)
+    if _path_exists(output / _MANIFEST_NAME):
+        existing_targets.add(PurePosixPath(_MANIFEST_NAME))
     for name in expected_names:
         path = assets / name
         if not _path_exists(path):
@@ -583,10 +623,82 @@ def _write_markdown(
     atomic_write_text(destination, "".join(parts))
 
 
+_PROFILE_METADATA_FIELDS: tuple[tuple[str, str], ...] = (
+    ("课程名称", "course_name"),
+    ("课程代码", "course_code"),
+    ("学生姓名", "student_name"),
+    ("学生编号", "student_id"),
+    ("指导教师", "instructor"),
+    ("学期", "semester"),
+    ("报告日期", "report_date"),
+)
+
+
+def _profile_title(evidence_set: EvidenceSet, profile: ReportProfile) -> str:
+    return profile.report_title if profile.report_title != "" else evidence_set.title
+
+
+def _profile_metadata(profile: ReportProfile) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (label, getattr(profile, field_name))
+        for label, field_name in _PROFILE_METADATA_FIELDS
+        if getattr(profile, field_name).strip()
+    )
+
+
+def _profile_sections(profile: ReportProfile) -> tuple[ReportSection, ...]:
+    if any(section.include_evidence for section in profile.sections):
+        return profile.sections
+    return (*profile.sections, ReportSection(heading="实验记录", include_evidence=True))
+
+
+def _append_markdown_evidence(
+    parts: list[str],
+    rendered: tuple[tuple[EvidenceItem, Path], ...],
+    root: Path,
+) -> None:
+    for index, (item, image_path) in enumerate(rendered, start=1):
+        caption = item.caption if item.caption != "" else item.title
+        relative = image_path.relative_to(root).as_posix()
+        parts.append(
+            f"\n### {_markdown_user_text(item.title)}\n\n"
+            f"![图 {index}]({_markdown_url(relative)})\n\n"
+            f"图 {index} {_markdown_user_text(caption)}\n"
+        )
+        if item.note != "":
+            parts.append(f"\n{_markdown_user_text(item.note)}\n")
+
+
+def _write_profile_markdown(
+    destination: Path,
+    evidence_set: EvidenceSet,
+    rendered: list[tuple[EvidenceItem, Path]],
+    profile: ReportProfile,
+) -> None:
+    root = destination.parent
+    parts = [f"# {_markdown_user_text(_profile_title(evidence_set, profile))}\n"]
+    metadata = _profile_metadata(profile)
+    if metadata:
+        parts.extend(("\n| 字段 | 内容 |\n| --- | --- |\n",))
+        for label, value in metadata:
+            parts.append(f"| {label} | {_markdown_user_text(value)} |\n")
+
+    sections = _profile_sections(profile)
+    for section in sections:
+        parts.append(f"\n## {_markdown_user_text(section.heading)}\n")
+        if section.body != "":
+            parts.append(f"\n{_markdown_user_text(section.body)}\n")
+        if section.include_evidence:
+            _append_markdown_evidence(parts, tuple(rendered), root)
+    atomic_write_text(destination, "".join(parts))
+
+
 def _write_manifest(
     destination: Path,
     rendered: list[tuple[EvidenceItem, Path]],
     root: Path,
+    *,
+    include_report_targets: bool = False,
 ) -> None:
     files = [
         {
@@ -595,9 +707,18 @@ def _write_manifest(
         }
         for _item, image in rendered
     ]
+    payload: dict[str, object] = {"version": 1, "files": files}
+    if include_report_targets:
+        payload["generated"] = [
+            {
+                "path": name,
+                "sha256": _file_sha256(root / name),
+            }
+            for name in ("report.md", "report.docx")
+        ]
     atomic_write_text(
         destination,
-        json.dumps({"version": 1, "files": files}, ensure_ascii=False, indent=2) + "\n",
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
     )
 
 
@@ -607,12 +728,15 @@ def _read_manifest(root: Path) -> _ManifestState:
         return _ManifestState(valid=False, entries={})
     try:
         raw = json.loads(read_regular_text(path, max_bytes=_MAX_MANIFEST_BYTES))
+        if not isinstance(raw, dict):
+            return _ManifestState(valid=False, entries={})
+        if set(raw) not in ({"version", "files"}, {"version", "files", "generated"}):
+            return _ManifestState(valid=False, entries={})
         if (
-            not isinstance(raw, dict)
-            or set(raw) != {"version", "files"}
-            or type(raw["version"]) is not int
+            type(raw["version"]) is not int
             or raw["version"] != 1
             or not isinstance(raw["files"], list)
+            or not isinstance(raw.get("generated", []), list)
         ):
             return _ManifestState(valid=False, entries={})
         entries: dict[PurePosixPath, str] = {}
@@ -626,6 +750,20 @@ def _read_manifest(root: Path) -> _ManifestState:
             ):
                 return _ManifestState(valid=False, entries={})
             relative = _resolve_asset_component(item["path"])
+            if relative in entries:
+                return _ManifestState(valid=False, entries={})
+            entries[relative] = item["sha256"]
+        for item in raw.get("generated", []):
+            if (
+                not isinstance(item, dict)
+                or set(item) != {"path", "sha256"}
+                or not isinstance(item["path"], str)
+                or not isinstance(item["sha256"], str)
+                or not re.fullmatch(r"[0-9a-f]{64}", item["sha256"])
+                or item["path"] not in {"report.md", "report.docx"}
+            ):
+                return _ManifestState(valid=False, entries={})
+            relative = PurePosixPath(item["path"])
             if relative in entries:
                 return _ManifestState(valid=False, entries={})
             entries[relative] = item["sha256"]
@@ -648,7 +786,12 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _validate_bundle(root: Path, expected_names: tuple[str, ...]) -> None:
+def _validate_bundle(
+    root: Path,
+    expected_names: tuple[str, ...],
+    *,
+    require_report_targets: bool = False,
+) -> None:
     assets = root / "assets"
     if not _is_directory(assets):
         raise ValueError("report assets directory is invalid")
@@ -675,6 +818,13 @@ def _validate_bundle(root: Path, expected_names: tuple[str, ...]) -> None:
         PurePosixPath("assets", name): _file_sha256(root / "assets" / name)
         for name in expected_names
     }
+    if require_report_targets:
+        expected_entries.update(
+            {
+                PurePosixPath(name): _file_sha256(root / name)
+                for name in ("report.md", "report.docx")
+            }
+        )
     if not manifest.valid or manifest.entries != expected_entries:
         raise ValueError("report manifest is invalid")
 
@@ -809,6 +959,70 @@ def _write_docx(
                 temporary_image.unlink()
 
 
+def _write_profile_docx(
+    evidence_set: EvidenceSet,
+    rendered: tuple[tuple[EvidenceItem, Path], ...],
+    destination: Path,
+    profile: ReportProfile,
+) -> None:
+    """Create the built-in structured report with embedded rendered images."""
+
+    from docx import Document
+    from docx.shared import Inches
+
+    document = Document()
+    title = _profile_title(evidence_set, profile)
+    document.core_properties.title = title
+    document.add_heading(title, level=0)
+
+    metadata = _profile_metadata(profile)
+    if metadata:
+        table = document.add_table(rows=1, cols=2)
+        table.style = "Table Grid"
+        header = table.rows[0].cells
+        header[0].text = "字段"
+        header[1].text = "内容"
+        for label, value in metadata:
+            cells = table.add_row().cells
+            _add_preserved_text(cells[0].paragraphs[0], label)
+            _add_preserved_text(cells[1].paragraphs[0], value)
+
+    section = document.sections[0]
+    available_width = section.page_width - section.left_margin - section.right_margin
+    if available_width <= 0:
+        available_width = Inches(6)
+
+    temporary_images: list[Path] = []
+    try:
+        for report_section in _profile_sections(profile):
+            document.add_heading(report_section.heading, level=1)
+            if report_section.body != "":
+                body_paragraph = document.add_paragraph()
+                _add_preserved_text(body_paragraph, report_section.body)
+            if not report_section.include_evidence:
+                continue
+            for index, (item, image_path) in enumerate(rendered, start=1):
+                document.add_heading(item.title, level=2)
+                temporary_image = destination.parent / (
+                    f".csbox-docx-image-{index}-{secrets.token_hex(8)}.png"
+                )
+                _copy_png_with_unique_bytes(image_path, temporary_image, index)
+                temporary_images.append(temporary_image)
+                document.add_picture(str(temporary_image), width=available_width)
+
+                caption = item.caption if item.caption != "" else item.title
+                caption_paragraph = document.add_paragraph()
+                _add_preserved_text(caption_paragraph, f"图 {index} {caption}")
+                if item.note != "":
+                    note_paragraph = document.add_paragraph()
+                    _add_preserved_text(note_paragraph, item.note)
+        document.save(destination)
+    finally:
+        for temporary_image in temporary_images:
+            with suppress(OSError):
+                temporary_image.unlink()
+
+
 def _copy_png_with_unique_bytes(source: Path, destination: Path, index: int) -> None:
     """Give each DOCX picture distinct PNG bytes so every item embeds one image."""
 
@@ -837,6 +1051,7 @@ def _publish_bundle(
     owned_assets: dict[PurePosixPath, str],
     existing_targets: frozenset[PurePosixPath],
     expected_names: tuple[str, ...],
+    require_report_targets: bool = False,
 ) -> tuple[str, ...]:
     """Publish a validated bundle through a rollback-capable per-file transaction."""
 
@@ -907,9 +1122,7 @@ def _publish_bundle(
                 destination,
                 staging,
                 len(backups) + 1,
-                expected_owner=expected_owner
-                if relative.parts and relative.parts[0] == "assets"
-                else None,
+                expected_owner=expected_owner,
                 report_destination=output,
             )
             if backup is not None:
@@ -922,6 +1135,8 @@ def _publish_bundle(
             )
 
         for relative, expected_owner in owned_assets.items():
+            if not relative.parts or relative.parts[0] != "assets":
+                continue
             if relative in {PurePosixPath("assets", name) for name in expected_names}:
                 continue
             if relative not in existing_targets:
@@ -939,7 +1154,11 @@ def _publish_bundle(
             if backup is not None:
                 backups.append(backup)
 
-        _validate_bundle(output, expected_names)
+        _validate_bundle(
+            output,
+            expected_names,
+            require_report_targets=require_report_targets,
+        )
     except Exception as exc:
         rollback_errors = _rollback_publication(
             created_targets,

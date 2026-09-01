@@ -13,6 +13,7 @@ from textual.events import Resize
 from textual.screen import Screen
 from textual.widgets import Button, Static
 
+from csbox.config.loader import ConfigurationError
 from csbox.core.display_width import truncate_cells
 from csbox.core.text_layout import wrap_cells
 from csbox.evidence.exporter import (
@@ -27,9 +28,12 @@ from csbox.evidence.resolver import LabCaptureResolver
 from csbox.evidence.service import create_report_handoff_service
 from csbox.lab.repository import SessionRepository
 from csbox.locales import Translator
+from csbox.report.models import ReportProfile
+from csbox.report.repository import ReportProfilePersistenceError, ReportProfileRepository
+from csbox.report.service import default_report_profile
 from csbox.tui.dialogs.confirm import ConfirmDialog
 from csbox.tui.dialogs.evidence import EvidenceItemDialog, EvidenceSetTitleDialog
-from csbox.tui.dialogs.report import ReportExportDialog
+from csbox.tui.dialogs.report import ReportExportDialog, ReportProfileDialog
 from csbox.tui.dialogs.unavailable import UnavailableDialog
 from csbox.tui.screens.evidence_sources import EvidenceCaptureBrowserScreen
 from csbox.tui.screens.report import ReportExportResultScreen
@@ -290,6 +294,7 @@ class EvidenceSetEditorScreen(Screen[None]):
         Binding("ctrl+down", "move_down", "下移", show=False, priority=True),
         Binding("r", "retry_save", "重试保存", show=False, priority=True),
         Binding("p", "export_report", "导出报告材料", show=False, priority=True),
+        Binding("c", "configure_report", "配置报告", show=False, priority=True),
         Binding("escape", "go_back", "返回", show=False, priority=True),
         Binding("q", "go_back", "返回", show=False, priority=True),
     )
@@ -310,6 +315,7 @@ class EvidenceSetEditorScreen(Screen[None]):
         self.locale = locale
         self.project_dir = Path(project_dir) if project_dir is not None else Path.cwd()
         self.report_export_action = report_export_action
+        self.report_profile_repository = ReportProfileRepository.from_cwd(self.project_dir)
         self.working_set = evidence_set
         self.resolver = LabCaptureResolver(session_repository)
         self.selected_index = 0
@@ -318,6 +324,7 @@ class EvidenceSetEditorScreen(Screen[None]):
         self._report_exporting = False
         self._report_request: ReportExportRequest | None = None
         self._report_export_set: EvidenceSet | None = None
+        self._report_profile: ReportProfile | None = None
         self._focus_export_on_resume = False
 
     def compose(self) -> ComposeResult:
@@ -576,6 +583,65 @@ class EvidenceSetEditorScreen(Screen[None]):
             )
         )
 
+    def action_configure_report(self) -> None:
+        if self._report_exporting:
+            return
+        try:
+            profile = self._load_report_profile()
+        except (
+            ConfigurationError,
+            OSError,
+            ReportProfilePersistenceError,
+            UnicodeError,
+            ValueError,
+        ):
+            self.app.push_screen(
+                UnavailableDialog(
+                    title=self.locale("evidence.report_profile.title"),
+                    locale=self.locale,
+                    message=self.locale("evidence.report_profile.load_failed"),
+                )
+            )
+            return
+        self.app.push_screen(
+            ReportProfileDialog(locale=self.locale, profile=profile),
+            self._handle_report_profile,
+        )
+
+    def _load_report_profile(self) -> ReportProfile:
+        return self.report_profile_repository.load_or_default(
+            self.working_set.evidence_set_id,
+            default=default_report_profile(self.project_dir),
+        )
+
+    def _handle_report_profile(self, profile: ReportProfile | None) -> None:
+        if profile is None or self._report_exporting:
+            return
+        try:
+            self.report_profile_repository.save(
+                self.working_set.evidence_set_id,
+                profile,
+            )
+        except (
+            OSError,
+            ReportProfilePersistenceError,
+            UnicodeError,
+            ValueError,
+        ):
+            self.status = self.locale("evidence.report_profile.save_failed")
+            self._refresh()
+            self.app.push_screen(
+                ReportProfileDialog(
+                    locale=self.locale,
+                    profile=profile,
+                    error=self.locale("evidence.report_profile.save_failed"),
+                ),
+                self._handle_report_profile,
+            )
+            return
+        self.status = self.locale("evidence.report_profile.saved")
+        self._refresh()
+
     def _open_report_dialog(self, destination: Path) -> None:
         self.app.push_screen(
             ReportExportDialog(
@@ -593,6 +659,36 @@ class EvidenceSetEditorScreen(Screen[None]):
 
     def _start_report_export(self, request: ReportExportRequest) -> None:
         self._report_request = request
+        if self.report_export_action is None:
+            try:
+                self._report_profile = self._load_report_profile()
+            except (
+                ConfigurationError,
+                OSError,
+                ReportProfilePersistenceError,
+                UnicodeError,
+                ValueError,
+            ):
+                self._report_exporting = False
+                self.status = self.locale("evidence.export.status.failed")
+                self._refresh()
+                self.app.push_screen(
+                    ReportExportResultScreen(
+                        locale=self.locale,
+                        error=ReportExportError(
+                            self.locale("evidence.report_profile.load_failed"),
+                            destination=request.destination,
+                            kind="profile",
+                        ),
+                        on_retry=lambda: self._start_report_export(request),
+                        on_change_destination=lambda: self._open_report_dialog(
+                            request.destination
+                        ),
+                    )
+                )
+                return
+        else:
+            self._report_profile = None
         self._report_export_set = self.working_set
         self._report_exporting = True
         self._focus_export_on_resume = True
@@ -620,12 +716,20 @@ class EvidenceSetEditorScreen(Screen[None]):
                 selected = action
                 if selected is None:
                     selected = create_report_handoff_service(cwd=self.project_dir).export
-                result = selected(
-                    evidence_set,
-                    request.destination,
-                    force=request.force,
-                    phase_callback=self._report_phase_from_worker,
-                )
+                    result = selected(
+                        evidence_set,
+                        request.destination,
+                        force=request.force,
+                        phase_callback=self._report_phase_from_worker,
+                        report_profile=self._report_profile,
+                    )
+                else:
+                    result = selected(
+                        evidence_set,
+                        request.destination,
+                        force=request.force,
+                        phase_callback=self._report_phase_from_worker,
+                    )
                 if not isinstance(result, ReportExportResult):
                     raise TypeError("report export action returned an invalid result")
                 return result

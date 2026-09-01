@@ -553,6 +553,11 @@ ReportExportResultScreen {
     background: rgba(0, 0, 0, 0.72);
 }
 
+ReportProfileDialog {
+    align: center middle;
+    background: rgba(0, 0, 0, 0.72);
+}
+
 #export-dialog,
 #export-overwrite-dialog,
 #export-result-dialog,
@@ -631,6 +636,86 @@ ReportExportResultScreen {
 
 #report-result-dialog {
     height: 30;
+}
+
+#report-profile-dialog {
+    width: 88;
+    max-width: 94%;
+    height: 90%;
+    max-height: 96%;
+}
+
+#report-profile-card {
+    height: 100%;
+}
+
+#report-profile-heading {
+    color: #9da4ff;
+    text-style: bold;
+    height: 1;
+    margin-bottom: 1;
+}
+
+#report-profile-hint {
+    color: #86c8ae;
+    height: auto;
+    margin-bottom: 1;
+}
+
+#report-profile-fields {
+    height: 1fr;
+    overflow-y: auto;
+    scrollbar-size: 1 1;
+}
+
+.report-profile-field-label {
+    color: #8ea5b9;
+    height: 1;
+    margin-top: 1;
+}
+
+.report-profile-section {
+    height: auto;
+    border-top: solid #29455f;
+    padding-top: 1;
+    margin-top: 1;
+}
+
+.report-profile-section-title {
+    color: #6fc7e8;
+    text-style: bold;
+    height: 1;
+}
+
+#report-profile-card Input,
+#report-profile-card TextArea {
+    width: 100%;
+}
+
+#report-profile-card TextArea {
+    height: 5;
+}
+
+#report-profile-error {
+    color: #f0bd60;
+    height: auto;
+    min-height: 1;
+    margin-top: 1;
+}
+
+#report-profile-actions {
+    height: 3;
+    align: right middle;
+    margin-top: 1;
+}
+
+#report-profile-actions Button {
+    min-width: 14;
+    height: 3;
+}
+
+#report-profile-save {
+    margin-right: 1;
 }
 
 #report-export-heading,

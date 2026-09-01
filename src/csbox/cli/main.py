@@ -17,9 +17,13 @@ from csbox.core.display_width import display_width, truncate_cells
 from csbox.core.environment import detect_environment
 from csbox.core.safe_paths import safe_relative_path
 from csbox.core.schema import with_schema_version
+from csbox.evidence.repository import EvidenceSetRepository
+from csbox.evidence.service import create_report_handoff_service
 from csbox.lab.service import create_lab_service
 from csbox.locales import Translator, load_locale
 from csbox.pack.service import create_pack_service
+from csbox.report.repository import ReportProfileRepository
+from csbox.report.service import default_report_profile
 
 _locale = load_locale()
 app = typer.Typer(
@@ -31,8 +35,10 @@ app = typer.Typer(
     no_args_is_help=False,
 )
 lab_app = typer.Typer(help="实验记录、回看和导出。", no_args_is_help=True)
+report_app = typer.Typer(help="课程报告格式化和导出。", no_args_is_help=True)
 app.add_typer(lab_app, name="lab")
 app.add_typer(api_app, name="api")
+app.add_typer(report_app, name="report")
 
 
 def _yes_no(translator: Translator, value: bool) -> str:
@@ -606,6 +612,47 @@ def lab_export(
         )
         raise typer.Exit(code=1) from error
     console.print(f"实验证据已导出：{result.destination}")
+
+
+@report_app.command("export")
+def report_export(
+    evidence_set_id: str = typer.Argument(..., help="Evidence Set ID。"),
+    output: Annotated[Path | None, typer.Option("--output", help="报告输出目录。")] = None,
+    force: Annotated[bool, typer.Option("--force", help="允许刷新已存在报告目录。")] = False,
+    verbose: Annotated[bool, typer.Option("--verbose", help="显示受控调试类型。")] = False,
+) -> None:
+    project_dir = Path.cwd()
+    destination = (
+        output
+        if output is not None and output.is_absolute()
+        else project_dir / (output or f"{evidence_set_id}-report")
+    )
+    try:
+        evidence_repository = EvidenceSetRepository.from_cwd(project_dir)
+        evidence_set = evidence_repository.load(evidence_set_id)
+        profile = ReportProfileRepository.from_cwd(project_dir).load_or_default(
+            evidence_set.evidence_set_id,
+            default=default_report_profile(project_dir),
+        )
+        result = create_report_handoff_service(project_dir).export(
+            evidence_set,
+            destination,
+            force=force,
+            report_profile=profile,
+        )
+    except Exception as error:
+        _print_safe_failure(
+            "发生了什么：课程报告导出失败。在哪里：报告结构、证据来源或输出目录。"
+            "怎么处理：检查 Evidence Set、报告配置和输出目录后重试。",
+            error,
+            verbose=verbose,
+        )
+        raise typer.Exit(code=1) from error
+    console = Console(markup=False)
+    console.print(f"课程报告已导出：{result.destination}")
+    console.print(f"Markdown：{result.markdown}")
+    console.print(f"DOCX：{result.docx}")
+    console.print(f"Images：{len(result.images)}")
 
 
 @lab_app.command("review")

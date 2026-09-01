@@ -4,6 +4,15 @@ CSBox 是面向计算机专业学生的本地实验记录与课程项目交付�
 
 当前 0.5.0.dev0 开发版尚未发布到 PyPI，支持 Python 3.11+。现在请从源码同步环境，或从本地构建的 wheel 安装；不要使用尚未提供的公开索引安装命令。
 
+v0.5 的交付工作流包括：
+
+- Lab Evidence：记录终端实验、Capture、回看和证据导出。
+- API Evidence：运行 API 场景并导出脱敏证据。
+- Project Check：检查项目结构、敏感文件和可选构建。
+- Safe Pack：安全预览并打包提交材料。
+- Evidence Collection：整理已有 Lab Capture，保存可编辑的证据集。
+- Report Handoff / Course Report Formatting：按用户保存的报告结构导出 Markdown、DOCX 和图片材料。
+
 ## 安装
 
 从源码运行（当前开发版）：
@@ -82,6 +91,20 @@ csbox api export <RUN_ID> --output evidence --theme dark
 
 请求、响应、变量和断言结果在保存与导出前经过脱敏；`--json` 输出使用稳定的 `schema_version: 1` 接口。API 运行需要场景文件中配置可用的 URL、变量和请求字段；README 不提供真实凭据示例。
 
+### Evidence Collection 与 Report Handoff：整理证据和课程报告
+
+Evidence Collection 和 Report Handoff 是主交互界面中的“整理证据”入口。直接运行 `csbox`，选择“整理证据”后，可以新建 Evidence Set，从已结束的 Lab session 添加 Capture，编辑用户自己的展示标题、图注和备注，并按顺序整理材料。
+
+在 Evidence Set 中选择“配置报告”，可保存课程信息和用户自己填写的章节正文；选择“导出报告材料”会生成 Markdown、DOCX 和 PNG 图片。也可以用 CLI 导出已经保存的 Evidence Set：
+
+```bash
+csbox
+# 整理证据 → 打开或新建 Evidence Set → 配置报告 → 导出报告材料
+csbox report export <EVIDENCE_SET_ID> --output "报告 输出"
+```
+
+报告导出只整理和格式化已有 Evidence Set 及用户填写的内容，不生成实验分析、结论、答案或其他课程正文；Lab session、Capture 和 Evidence Set 源文件不会被导出流程改写。
+
 ### Check：检查项目
 
 Check 默认只扫描，不执行构建：
@@ -118,7 +141,9 @@ Linux/WSL 开发环境覆盖 Unix PTY、Bash、中文、ANSI、resize、Ctrl+C�
 
 ## 明确边界
 
-当前版本聚焦本地终端实验、API 场景、项目 Check、证据导出和 Pack；安装后即可从任意项目目录使用这些入口。
+当前版本聚焦本地终端实验、API 场景、项目 Check、Safe Pack、Evidence Collection、Report Handoff 和 Course Report Formatting；安装后即可从任意项目目录使用这些入口。
+
+CSBox 只组织、格式化和导出用户提供的材料，不是 AI 报告生成器、通用 Word 编辑器或云端工作区；它不会生成实验分析、结论或课程答案。
 
 ## License
 

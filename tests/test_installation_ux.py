@@ -32,3 +32,19 @@ def test_readme_console_script_matches_metadata() -> None:
 
     assert 'csbox = "csbox.cli:main"' in pyproject
     assert "csbox --help" in readme
+
+
+def test_readme_describes_the_complete_v05_delivery_surface() -> None:
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+
+    for surface in (
+        "Lab Evidence",
+        "API Evidence",
+        "Project Check",
+        "Safe Pack",
+        "Evidence Collection",
+        "Report Handoff",
+        "Course Report Formatting",
+    ):
+        assert surface in readme
+    assert "不生成实验分析、结论、答案" in readme

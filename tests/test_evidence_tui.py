@@ -6,7 +6,7 @@ from time import monotonic
 
 import pytest
 from textual.widget import Widget
-from textual.widgets import Button, Input, Static, TextArea
+from textual.widgets import Button, Checkbox, Input, Static, TextArea
 
 from csbox.core.display_width import display_width
 from csbox.core.events import TerminalSize
@@ -23,9 +23,15 @@ from csbox.lab.home_data import RealHomeDataSource
 from csbox.lab.repository import SessionRepository
 from csbox.lab.screen import TerminalCell, TerminalCursor, TerminalSnapshot
 from csbox.locales import load_locale
+from csbox.report.models import ReportProfile, ReportSection
+from csbox.report.repository import ReportProfileRepository
 from csbox.tui.app import CSBoxApp
 from csbox.tui.dialogs.evidence import EvidenceItemDialog, EvidenceSetTitleDialog
-from csbox.tui.dialogs.report import ReportExportDialog, ReportExportOverwriteDialog
+from csbox.tui.dialogs.report import (
+    ReportExportDialog,
+    ReportExportOverwriteDialog,
+    ReportProfileDialog,
+)
 from csbox.tui.screens.evidence import EvidenceSetEditorScreen, EvidenceSetsScreen
 from csbox.tui.screens.evidence_sources import EvidenceCaptureBrowserScreen
 from csbox.tui.screens.home import HomeScreen
@@ -1012,6 +1018,19 @@ async def test_realistic_report_handoff_uses_configured_renderer_and_publishes_b
         )
     )
     destination = tmp_path / "中文 报告材料"
+    ReportProfileRepository.from_cwd(tmp_path).save(
+        created.evidence_set_id,
+        ReportProfile(
+            report_title="我的课程报告",
+            sections=(
+                ReportSection(
+                    heading="用户章节",
+                    body="用户填写的正文",
+                    include_evidence=True,
+                ),
+            ),
+        ),
+    )
     source_files = (paths.captures, paths.metadata, paths.cast)
     evidence_file = tmp_path / ".csbox" / "evidence" / f"{created.evidence_set_id}.json"
     source_before = {path: path.read_bytes() for path in source_files}
@@ -1031,6 +1050,9 @@ async def test_realistic_report_handoff_uses_configured_renderer_and_publishes_b
         await wait_for_report_result_text(app, pilot, "导出完成")
 
     markdown = (destination / "report.md").read_text(encoding="utf-8")
+    assert markdown.startswith("# 我的课程报告\n")
+    assert "## 用户章节" in markdown
+    assert "用户填写的正文" in markdown
     assert "图 1 查看网络接口" in markdown
     assert "图 2 自定义路由输出" in markdown
     assert "第一行备注<br>第二行备注" in markdown
@@ -1038,3 +1060,92 @@ async def test_realistic_report_handoff_uses_configured_renderer_and_publishes_b
     assert (destination / "report.docx").is_file()
     assert {path: path.read_bytes() for path in source_files} == source_before
     assert evidence_file.read_bytes() == evidence_before
+
+
+@pytest.mark.asyncio
+async def test_report_profile_dialog_saves_metadata_and_authored_section(
+    tmp_path: Path,
+) -> None:
+    app, _paths, _captures = evidence_app_with_three_captures(tmp_path)
+
+    async with app.run_test(size=(120, 35)) as pilot:
+        await open_editor_with_first_capture(app, pilot)
+        evidence_set_id = app.screen.working_set.evidence_set_id  # type: ignore[attr-defined]
+        await pilot.press("c")
+        await pilot.pause()
+        assert isinstance(app.screen, ReportProfileDialog)
+
+        app.screen.query_one("#report-profile-course-name-input", Input).value = "计算机网络"
+        app.screen.query_one("#report-profile-section-1-heading-input", Input).value = "实验目的"
+        app.screen.query_one(
+            "#report-profile-section-1-body-input", TextArea
+        ).text = "用户填写的目的"
+        app.screen.query_one("#report-profile-section-1-evidence-input", Checkbox).value = False
+        await pilot.click("#report-profile-save")
+        await pilot.pause()
+
+        assert isinstance(app.screen, EvidenceSetEditorScreen)
+        saved = ReportProfileRepository.from_cwd(tmp_path).load(evidence_set_id)
+        assert saved.course_name == "计算机网络"
+        assert saved.sections[0].heading == "实验目的"
+        assert saved.sections[0].body == "用户填写的目的"
+
+
+@pytest.mark.asyncio
+async def test_report_profile_cancel_does_not_write(tmp_path: Path) -> None:
+    app, _paths, _captures = evidence_app_with_three_captures(tmp_path)
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await open_editor_with_first_capture(app, pilot)
+        evidence_set_id = app.screen.working_set.evidence_set_id  # type: ignore[attr-defined]
+        await pilot.press("c")
+        await pilot.pause()
+        assert isinstance(app.screen, ReportProfileDialog)
+        app.screen.query_one("#report-profile-course-name-input", Input).value = "不应保存"
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert isinstance(app.screen, EvidenceSetEditorScreen)
+        assert not ReportProfileRepository.from_cwd(tmp_path).path_for(evidence_set_id).exists()
+
+
+@pytest.mark.asyncio
+async def test_report_export_with_invalid_profile_is_retryable(
+    tmp_path: Path,
+) -> None:
+    app, _paths, _captures = evidence_app_with_three_captures(tmp_path)
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await open_editor_with_first_capture(app, pilot)
+        evidence_set_id = app.screen.working_set.evidence_set_id  # type: ignore[attr-defined]
+        profile_repository = ReportProfileRepository.from_cwd(tmp_path)
+        profile_path = profile_repository.path_for(evidence_set_id)
+        profile_path.parent.mkdir(parents=True)
+        profile_path.write_text('{"version": 99}', encoding="utf-8")
+
+        await pilot.press("p")
+        await pilot.pause()
+        assert isinstance(app.screen, ReportExportDialog)
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert isinstance(app.screen, ReportExportResultScreen)
+        assert "报告结构不可读取" in screen_text(app.screen)
+        assert not (tmp_path / f"{evidence_set_id}-report").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", ((80, 24), (100, 30), (120, 35)))
+async def test_report_profile_dialog_fits_cjk_viewports(
+    tmp_path: Path,
+    size: tuple[int, int],
+) -> None:
+    app, _paths, _captures = evidence_app_with_three_captures(tmp_path)
+
+    async with app.run_test(size=size) as pilot:
+        await open_editor_with_first_capture(app, pilot)
+        await pilot.press("c")
+        await pilot.pause()
+        assert isinstance(app.screen, ReportProfileDialog)
+        assert_visible_geometry(app.screen)
+        assert_static_lines_fit(app.screen)

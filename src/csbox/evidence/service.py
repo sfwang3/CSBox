@@ -11,6 +11,7 @@ from csbox.evidence.resolver import LabCaptureResolver
 from csbox.lab.fonts import FontResolver
 from csbox.lab.renderer import TerminalEvidenceRenderer
 from csbox.lab.repository import SessionRepository
+from csbox.report.models import ReportProfile
 
 
 class ReportHandoffService:
@@ -26,12 +27,14 @@ class ReportHandoffService:
         *,
         force: bool = False,
         phase_callback: PhaseCallback | None = None,
+        report_profile: ReportProfile | None = None,
     ) -> ReportExportResult:
         return self.exporter.export(
             evidence_set,
             destination,
             force=force,
             phase_callback=phase_callback,
+            report_profile=report_profile,
         )
 
 
