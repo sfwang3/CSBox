@@ -2,7 +2,7 @@
 
 CSBox 是面向计算机专业学生的本地实验记录与课程项目交付工具。需要记录终端操作、保留关键画面、检查项目或整理提交材料时，就使用 CSBox；数据保存在本地，不需要云端账号或远程服务。
 
-当前 0.4.0.dev0 开发版尚未发布到 PyPI，支持 Python 3.11+。现在请从源码同步环境，或从本地构建的 wheel 安装；不要使用尚未提供的公开索引安装命令。
+当前 0.5.0.dev0 开发版尚未发布到 PyPI，支持 Python 3.11+。现在请从源码同步环境，或从本地构建的 wheel 安装；不要使用尚未提供的公开索引安装命令。
 
 ## 安装
 
@@ -20,7 +20,7 @@ uv run csbox --help
 
 ```bash
 uv build
-uv tool install dist/csbox-0.4.0.dev0-py3-none-any.whl
+uv tool install dist/csbox-0.5.0.dev0-py3-none-any.whl
 csbox
 csbox --help
 ```

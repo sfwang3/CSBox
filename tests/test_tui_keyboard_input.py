@@ -132,7 +132,7 @@ async def test_home_enter_activates_arrow_focused_button_and_tab_still_works(
         assert app.screen.focused.id == "entry-records"
         await pilot.press("tab")
         assert app.screen.focused is not None
-        assert app.screen.focused.id == "entry-check"
+        assert app.screen.focused.id == "entry-evidence"
 
 
 @pytest.mark.asyncio

@@ -279,6 +279,191 @@ LabStartDialog {
     padding: 1 2 0 2;
 }
 
+#evidence-list-layout,
+#evidence-editor-layout {
+    height: 100%;
+    padding: 1 2 0 2;
+}
+
+#evidence-list-title,
+#evidence-editor-title {
+    color: #9da4ff;
+    text-style: bold;
+    height: 2;
+}
+
+#evidence-list-scroll {
+    height: 1fr;
+    background: #0e1a26;
+    border: round #29455f;
+    padding: 1;
+    overflow-y: auto;
+}
+
+#evidence-list,
+#evidence-list-message,
+#evidence-item-detail,
+#evidence-items,
+#evidence-editor-message {
+    color: #d7e6f3;
+    height: auto;
+}
+
+#evidence-list-message,
+#evidence-editor-message {
+    color: #f0bd60;
+    height: 2;
+}
+
+#evidence-list-actions,
+#evidence-editor-actions {
+    height: 3;
+    align: right middle;
+}
+
+#evidence-list-actions Button,
+#evidence-editor-actions Button {
+    min-width: 10;
+    height: 3;
+}
+
+#evidence-export {
+    min-width: 16;
+}
+
+#evidence-list-footer,
+#evidence-editor-footer {
+    height: 1;
+    color: #a5bacd;
+}
+
+#evidence-browser-layout {
+    height: 100%;
+    padding: 1 2 0 2;
+}
+
+#evidence-browser-title {
+    color: #9da4ff;
+    text-style: bold;
+    height: 2;
+    border-bottom: solid #25384b;
+    margin-bottom: 1;
+}
+
+#evidence-browser-list {
+    height: 1fr;
+    background: #0e1a26;
+    border: round #29455f;
+    color: #d7e6f3;
+    padding: 1;
+    overflow-y: auto;
+}
+
+#evidence-browser-message {
+    color: #f0bd60;
+    height: auto;
+    min-height: 1;
+    margin-top: 1;
+}
+
+#evidence-browser-footer {
+    height: 2;
+    color: #a5bacd;
+}
+
+#evidence-set-dialog,
+#evidence-item-dialog {
+    align: center middle;
+    background: rgba(0, 0, 0, 0.72);
+}
+
+#evidence-set-card,
+#evidence-item-card {
+    width: 70;
+    max-width: 92%;
+    max-height: 90%;
+    height: auto;
+    border: round #6d79e8;
+    background: #101c29;
+    padding: 1 2;
+}
+
+#evidence-item-card {
+    overflow-y: auto;
+}
+
+#evidence-set-heading,
+#evidence-item-heading {
+    color: #9da4ff;
+    text-style: bold;
+    height: 1;
+    margin-bottom: 1;
+}
+
+.evidence-field-label {
+    color: #8ea5b9;
+    height: 1;
+    margin-top: 1;
+}
+
+#evidence-item-title-input,
+#evidence-item-caption-input,
+#evidence-item-note-input {
+    width: 100%;
+}
+
+#evidence-item-note-input {
+    height: 7;
+}
+
+#evidence-set-title-error,
+#evidence-item-error {
+    color: #f0bd60;
+    height: auto;
+    min-height: 1;
+    margin-top: 1;
+}
+
+#evidence-set-actions,
+#evidence-item-actions {
+    height: 3;
+    align: right middle;
+    margin-top: 1;
+}
+
+#evidence-set-actions Button,
+#evidence-item-actions Button {
+    min-width: 12;
+    margin-left: 1;
+}
+
+#evidence-editor-body {
+    height: 1fr;
+    layout: horizontal;
+}
+
+#evidence-items,
+#evidence-item-detail {
+    width: 1fr;
+    background: #0e1a26;
+    border: round #29455f;
+    padding: 1;
+    overflow-y: auto;
+}
+
+#evidence-item-detail {
+    margin-left: 1;
+}
+
+.narrow #evidence-editor-body {
+    layout: vertical;
+}
+
+.narrow #evidence-item-detail {
+    margin-left: 0;
+    margin-top: 1;
+}
+
 #records-title {
     color: #9da4ff;
     text-style: bold;
@@ -360,14 +545,20 @@ LabStartDialog {
 
 ExportDialog,
 ExportOverwriteDialog,
-ExportResultScreen {
+ExportResultScreen,
+ReportExportDialog,
+ReportExportOverwriteDialog,
+ReportExportResultScreen {
     align: center middle;
     background: rgba(0, 0, 0, 0.72);
 }
 
 #export-dialog,
 #export-overwrite-dialog,
-#export-result-dialog {
+#export-result-dialog,
+#report-export-dialog,
+#report-overwrite-dialog,
+#report-result-dialog {
     width: 70;
     max-width: 92%;
     height: auto;
@@ -382,7 +573,9 @@ ExportResultScreen {
 }
 
 #export-overwrite-dialog,
-#export-result-dialog {
+#export-result-dialog,
+#report-overwrite-dialog,
+#report-result-dialog {
     width: 76;
 }
 
@@ -426,6 +619,78 @@ ExportResultScreen {
 #export-theme-select {
     width: 100%;
     height: 3;
+}
+
+#report-export-dialog {
+    height: 17;
+}
+
+#report-overwrite-dialog {
+    height: auto;
+}
+
+#report-result-dialog {
+    height: 30;
+}
+
+#report-export-heading,
+#report-overwrite-heading,
+#report-result-heading {
+    color: #9da4ff;
+    text-style: bold;
+    height: 1;
+    margin-bottom: 1;
+}
+
+#report-export-hint,
+#report-overwrite-message,
+#report-result-body,
+#report-result-artifacts {
+    color: #dbe7f2;
+    height: auto;
+}
+
+#report-export-fields,
+#report-result-scroll {
+    height: 1fr;
+    overflow-y: auto;
+}
+
+#report-destination-input {
+    width: 100%;
+    height: 3;
+}
+
+#report-destination-validation {
+    color: #f0bd60;
+    height: auto;
+    min-height: 1;
+}
+
+#report-restore-default {
+    width: 18;
+    height: 3;
+}
+
+#report-export-actions,
+#report-overwrite-actions,
+#report-result-actions {
+    height: 3;
+    align: right middle;
+    margin-top: 1;
+}
+
+#report-export-actions Button,
+#report-overwrite-actions Button,
+#report-result-actions Button {
+    min-width: 14;
+    height: 3;
+}
+
+#report-export-confirm,
+#report-overwrite-confirm,
+#report-result-retry {
+    margin-right: 1;
 }
 
 #export-advanced {

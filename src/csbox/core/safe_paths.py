@@ -174,7 +174,9 @@ def _destination_is_symlink(destination_name: str, parent_fd: int) -> bool:
     return stat.S_ISLNK(metadata.st_mode)
 
 
-def _atomic_write_text_with_directory_fd(destination: Path, text: str) -> None:
+def _atomic_write_text_with_directory_fd(
+    destination: Path, text: str, *, replace_existing: bool
+) -> None:
     if destination.is_symlink():
         raise ValueError("refusing to write through a symlink destination")
 
@@ -183,6 +185,7 @@ def _atomic_write_text_with_directory_fd(destination: Path, text: str) -> None:
     temporary_name = _temporary_name()
     temporary_fd: int | None = None
     temporary_created = False
+    published = False
     try:
         temporary_fd = os.open(
             temporary_name,
@@ -197,18 +200,36 @@ def _atomic_write_text_with_directory_fd(destination: Path, text: str) -> None:
             temporary_file.write(text)
             temporary_file.flush()
             os.fsync(temporary_file.fileno())
-        if _destination_is_symlink(destination.name, parent_fd):
-            raise ValueError("refusing to write through a symlink destination")
-        os.replace(
-            temporary_name,
-            destination.name,
-            src_dir_fd=parent_fd,
-            dst_dir_fd=parent_fd,
-        )
+        if replace_existing:
+            if _destination_is_symlink(destination.name, parent_fd):
+                raise ValueError("refusing to write through a symlink destination")
+            os.replace(
+                temporary_name,
+                destination.name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+            )
+        else:
+            _check_publish_destination(
+                destination.name,
+                parent_fd,
+                replace_existing=False,
+            )
+            if not _HAS_POSIX_NO_REPLACE_LINK:
+                raise ValueError("safe no-replace publish is unavailable")
+            os.link(
+                temporary_name,
+                destination.name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+            )
+            published = True
+            with suppress(OSError):
+                os.unlink(temporary_name, dir_fd=parent_fd)
     except BaseException:
         if temporary_fd is not None:
             os.close(temporary_fd)
-        if temporary_created:
+        if temporary_created and not published:
             with suppress(FileNotFoundError):
                 os.unlink(temporary_name, dir_fd=parent_fd)
         raise
@@ -216,7 +237,9 @@ def _atomic_write_text_with_directory_fd(destination: Path, text: str) -> None:
         os.close(parent_fd)
 
 
-def _atomic_write_text_with_path_fallback(destination: Path, text: str) -> None:
+def _atomic_write_text_with_path_fallback(
+    destination: Path, text: str, *, replace_existing: bool
+) -> None:
     """Compatibility fallback when openat-style APIs are unavailable.
 
     Windows and other Python platforms without usable directory FDs cannot pin the
@@ -229,6 +252,7 @@ def _atomic_write_text_with_path_fallback(destination: Path, text: str) -> None:
     canonical_parent = _prepare_path_parent(destination.parent)
     canonical_destination = canonical_parent / destination.name
     temporary_path: Path | None = None
+    published = False
     try:
         with tempfile.NamedTemporaryFile(
             mode="w",
@@ -242,22 +266,47 @@ def _atomic_write_text_with_path_fallback(destination: Path, text: str) -> None:
             temporary_file.write(text)
             temporary_file.flush()
             os.fsync(temporary_file.fileno())
-        if canonical_destination.is_symlink():
-            raise ValueError("refusing to write through a symlink destination")
-        os.replace(temporary_path, canonical_destination)
+        if replace_existing:
+            if canonical_destination.is_symlink():
+                raise ValueError("refusing to write through a symlink destination")
+            os.replace(temporary_path, canonical_destination)
+        else:
+            _check_publish_destination_path(canonical_destination, replace_existing=False)
+            if os.name == "nt":
+                # Windows os.rename refuses an existing destination, unlike POSIX.
+                os.rename(temporary_path, canonical_destination)
+            else:
+                os.link(temporary_path, canonical_destination)
+                published = True
+                with suppress(OSError):
+                    temporary_path.unlink()
     except BaseException:
-        if temporary_path is not None:
+        if temporary_path is not None and not published:
             temporary_path.unlink(missing_ok=True)
         raise
 
 
-def atomic_write_text(destination: Path, text: str) -> None:
+def atomic_write_text(destination: Path, text: str, *, replace_existing: bool = True) -> None:
     """Atomically write UTF-8 text without following destination symlinks."""
     destination = Path(destination)
     if _HAS_POSIX_DIRECTORY_FDS:
-        _atomic_write_text_with_directory_fd(destination, text)
+        _atomic_write_text_with_directory_fd(
+            destination,
+            text,
+            replace_existing=replace_existing,
+        )
     else:
-        _atomic_write_text_with_path_fallback(destination, text)
+        _atomic_write_text_with_path_fallback(
+            destination,
+            text,
+            replace_existing=replace_existing,
+        )
+
+
+def atomic_create_text(destination: Path, text: str) -> None:
+    """Atomically create UTF-8 text without replacing an existing destination."""
+
+    atomic_write_text(destination, text, replace_existing=False)
 
 
 def _atomic_write_bytes_with_directory_fd(destination: Path, data: bytes) -> None:

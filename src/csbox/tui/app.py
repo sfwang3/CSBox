@@ -11,6 +11,7 @@ from csbox.api.repository import ApiRunRepository
 from csbox.api.scenario import ScenarioLoader
 from csbox.check.models import CheckReport
 from csbox.core.models import EnvironmentSnapshot
+from csbox.evidence.repository import EvidenceSetRepository
 from csbox.lab.home_data import RealHomeDataSource
 from csbox.lab.models import SessionMetadata, SessionPaths
 from csbox.lab.ports import HomeDataSource
@@ -31,6 +32,7 @@ from csbox.tui.lab_workflow import (
     metadata_retry_notice,
 )
 from csbox.tui.screens.api import ApiScreen
+from csbox.tui.screens.evidence import EvidenceSetsScreen, ReportExportAction
 from csbox.tui.screens.home import HomeScreen
 from csbox.tui.screens.pack import PackConfirmationScreen
 from csbox.tui.screens.project_check import ProjectCheckScreen
@@ -63,7 +65,9 @@ class CSBoxApp(App[LabStartRequest | None]):
         metadata_loader: Callable[[SessionPaths], SessionMetadata] = load_session_metadata,
         monitor_interval: float = 0.8,
         session_repository: SessionRepository | None = None,
+        evidence_repository: EvidenceSetRepository | None = None,
         export_action: ExportAction | None = None,
+        report_export_action: ReportExportAction | None = None,
     ) -> None:
         super().__init__()
         self.data_source = data_source
@@ -81,11 +85,15 @@ class CSBoxApp(App[LabStartRequest | None]):
         self.metadata_loader = metadata_loader
         self.monitor_interval = monitor_interval
         self.export_action = export_action
+        self.report_export_action = report_export_action
         source_repository = getattr(data_source, "repository", None)
         self.session_repository = session_repository or (
             source_repository
             if isinstance(source_repository, SessionRepository)
             else SessionRepository.from_cwd(project_dir)
+        )
+        self.evidence_repository = evidence_repository or EvidenceSetRepository.from_cwd(
+            project_dir
         )
         self._active_timer: Timer | None = None
         self.api_repository = api_repository or ApiRunRepository.from_cwd(project_dir)
@@ -112,6 +120,7 @@ class CSBoxApp(App[LabStartRequest | None]):
             shell_error=self.shell_error,
             notice=self.home_notice,
             records_screen_factory=self._records_screen,
+            evidence_screen_factory=self._evidence_screen,
             check_service=self.pack_service.check_service,
         )
         self.push_screen(self.home_screen)
@@ -137,6 +146,15 @@ class CSBoxApp(App[LabStartRequest | None]):
             shell_options=self.shell_options,
             shell_error=self.shell_error,
             export_action=self.export_action,
+        )
+
+    def _evidence_screen(self) -> EvidenceSetsScreen:
+        return EvidenceSetsScreen(
+            repository=self.evidence_repository,
+            session_repository=self.session_repository,
+            locale=self.locale,
+            project_dir=self.project_dir,
+            report_export_action=self.report_export_action,
         )
 
     def _critical_workflow_active(self) -> bool:

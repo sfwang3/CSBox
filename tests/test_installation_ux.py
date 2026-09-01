@@ -9,7 +9,7 @@ def test_readme_leads_with_beginner_first_story() -> None:
     readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
     quick_start = readme[readme.index("## 快速开始") : readme.index("## 平台范围")]
 
-    assert "当前 0.4.0.dev0 开发版尚未发布到 PyPI" in readme
+    assert "当前 0.5.0.dev0 开发版尚未发布到 PyPI" in readme
     assert "git clone" in readme
     assert (
         "安装 → csbox → 开始实验 → F12 保存关键画面 → 输入 exit → 实验记录 → 导出材料"

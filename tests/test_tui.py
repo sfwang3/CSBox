@@ -59,6 +59,7 @@ async def test_home_is_task_first_and_has_the_required_button_order() -> None:
         assert [button.id for button in app.screen.query(Button)] == [
             "entry-start",
             "entry-records",
+            "entry-evidence",
             "entry-check",
             "entry-pack",
             "entry-api",

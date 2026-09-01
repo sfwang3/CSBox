@@ -193,7 +193,13 @@ async def test_home_geometry_and_tab_navigation_are_usable(
         assert app.screen.focused.id == "entry-start"
         assert_visible_geometry(app.screen)
         assert_static_lines_fit(app.screen)
-        for expected_id in ("entry-records", "entry-check", "entry-pack", "entry-api"):
+        for expected_id in (
+            "entry-records",
+            "entry-evidence",
+            "entry-check",
+            "entry-pack",
+            "entry-api",
+        ):
             await pilot.press("tab")
             await pilot.pause()
             assert app.screen.focused is not None

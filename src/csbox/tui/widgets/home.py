@@ -14,6 +14,7 @@ from csbox.tui.lab_workflow import HomeNotice
 ACTION_DEFINITIONS = (
     ("start", "home.entry.start"),
     ("records", "home.entry.records"),
+    ("evidence", "home.entry.evidence"),
     ("check", "home.entry.check"),
     ("pack", "home.entry.pack"),
     ("api", "home.entry.api"),

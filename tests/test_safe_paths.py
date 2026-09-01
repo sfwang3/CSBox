@@ -7,6 +7,7 @@ import pytest
 
 from csbox.core.safe_paths import (
     atomic_copy_file,
+    atomic_create_text,
     atomic_write_text,
     mkdir_exclusive,
     safe_relative_path,
@@ -146,6 +147,79 @@ def test_atomic_write_text_path_fallback_preserves_normal_nested_writes(
     atomic_write_text(destination, "计算机网络实验")
 
     assert destination.read_text(encoding="utf-8") == "计算机网络实验"
+
+
+def test_atomic_create_text_path_fallback_does_not_replace_existing_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import csbox.core.safe_paths as safe_paths
+
+    monkeypatch.setattr(safe_paths, "_HAS_POSIX_DIRECTORY_FDS", False)
+    destination = tmp_path / "nested" / "output.txt"
+
+    atomic_create_text(destination, "首次创建")
+    with pytest.raises(FileExistsError):
+        atomic_create_text(destination, "不得覆盖")
+
+    assert destination.read_text(encoding="utf-8") == "首次创建"
+
+
+@requires_posix_directory_fds
+def test_atomic_create_text_treats_published_destination_as_success_if_cleanup_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import csbox.core.safe_paths as safe_paths
+
+    destination = tmp_path / "output.txt"
+    real_unlink = safe_paths.os.unlink
+    failed = False
+
+    def fail_temporary_cleanup(path: object, *args: object, **kwargs: object) -> object:
+        nonlocal failed
+        if not failed and isinstance(path, str) and path.startswith(".csbox-atomic-"):
+            failed = True
+            raise OSError("simulated cleanup failure")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(safe_paths.os, "unlink", fail_temporary_cleanup)
+
+    atomic_create_text(destination, "已发布")
+
+    assert failed is True
+    assert destination.read_text(encoding="utf-8") == "已发布"
+
+
+def test_atomic_create_text_path_fallback_treats_published_destination_as_success_if_cleanup_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import csbox.core.safe_paths as safe_paths
+
+    monkeypatch.setattr(safe_paths, "_HAS_POSIX_DIRECTORY_FDS", False)
+    destination = tmp_path / "output.txt"
+
+    if os.name == "nt":
+        atomic_create_text(destination, "已发布")
+        with pytest.raises(FileExistsError):
+            atomic_create_text(destination, "不得覆盖")
+        assert destination.read_text(encoding="utf-8") == "已发布"
+        return
+
+    real_unlink = safe_paths.Path.unlink
+    failed = False
+
+    def fail_temporary_cleanup(path: Path, *, missing_ok: bool = False) -> None:
+        nonlocal failed
+        if not failed and path.name.startswith(".csbox-atomic-"):
+            failed = True
+            raise OSError("simulated cleanup failure")
+        real_unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(safe_paths.Path, "unlink", fail_temporary_cleanup)
+
+    atomic_create_text(destination, "已发布")
+
+    assert failed is True
+    assert destination.read_text(encoding="utf-8") == "已发布"
 
 
 def test_bounded_regular_reader_accepts_a_relative_parent_input_path(

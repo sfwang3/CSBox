@@ -47,6 +47,7 @@ class HomeScreen(Screen[None]):
         shell_error: str | None = None,
         notice: HomeNotice | None = None,
         records_screen_factory: Callable[[], Screen[None]] | None = None,
+        evidence_screen_factory: Callable[[], Screen[None]] | None = None,
         check_service: object | None = None,
     ) -> None:
         super().__init__(name="home")
@@ -59,6 +60,7 @@ class HomeScreen(Screen[None]):
         self.shell_error = shell_error
         self.notice = notice
         self.records_screen_factory = records_screen_factory
+        self.evidence_screen_factory = evidence_screen_factory
         self.check_service = check_service
         self.is_wide = False
         self._busy_workflow: str | None = None
@@ -122,6 +124,9 @@ class HomeScreen(Screen[None]):
         if action_id == "records":
             self._open_records()
             return
+        if action_id == "evidence":
+            self._open_evidence()
+            return
         if action_id == "start":
             self.app.push_screen(
                 LabStartDialog(
@@ -174,6 +179,23 @@ class HomeScreen(Screen[None]):
             self._show_action_error(
                 self.locale("home.entry.records"),
                 "实验记录暂时无法打开，请稍后重试。",
+            )
+            return
+        self.app.push_screen(screen)
+
+    def _open_evidence(self) -> None:
+        if self.evidence_screen_factory is None:
+            self._show_action_error(
+                self.locale("home.entry.evidence"),
+                self.locale("evidence.list.load_error"),
+            )
+            return
+        try:
+            screen = self.evidence_screen_factory()
+        except Exception:
+            self._show_action_error(
+                self.locale("home.entry.evidence"),
+                self.locale("evidence.list.load_error"),
             )
             return
         self.app.push_screen(screen)
