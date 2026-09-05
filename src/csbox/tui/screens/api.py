@@ -53,6 +53,7 @@ from csbox.tui.dialogs.api import (
     ApiQuickCreateRequest,
     ApiScenarioOverwriteDialog,
 )
+from csbox.tui.help import HelpDialog
 from csbox.tui.screens.api_export_result import ApiExportResultScreen
 from csbox.tui.widgets.api import ApiDetail, ApiFooter, ApiRunList, ApiScenarioList
 
@@ -111,6 +112,10 @@ class ApiScreen(Screen[None]):
         self.active_pane = "scenarios"
         self.is_wide = False
         self._busy = False
+
+    @property
+    def is_working(self) -> bool:
+        return self._busy
 
     def compose(self) -> ComposeResult:
         yield Vertical(
@@ -439,7 +444,7 @@ class ApiScreen(Screen[None]):
             self.select_run(int(identifier.removeprefix("run-")))
 
     def _open_quick_create(self, initial: ApiQuickCreateRequest | None = None) -> None:
-        self.app.push_screen(
+        self._push_screen_after_help(
             ApiQuickCreateDialog(locale=self.locale, initial=initial),
             self._handle_quick_create,
         )
@@ -449,7 +454,7 @@ class ApiScreen(Screen[None]):
         initial_path: Path | None = None,
         initial_error: str = "",
     ) -> None:
-        self.app.push_screen(
+        self._push_screen_after_help(
             ApiOpenApiImportDialog(
                 locale=self.locale,
                 initial_path=initial_path,
@@ -461,6 +466,7 @@ class ApiScreen(Screen[None]):
     def _handle_openapi_import(self, source: Path | None) -> None:
         if source is None:
             return
+        self._busy = True
         self.run_worker(
             self._import_openapi(source),
             name="api-openapi-import",
@@ -471,6 +477,7 @@ class ApiScreen(Screen[None]):
 
     def _handle_openapi_overwrite(self, source: Path, confirmed: bool) -> None:
         if confirmed:
+            self._busy = True
             self.run_worker(
                 self._import_openapi(source, force=True),
                 name="api-openapi-import",
@@ -526,7 +533,7 @@ class ApiScreen(Screen[None]):
             if force:
                 self._open_openapi_import(source, self.locale("api.error.openapi_conflict"))
             else:
-                self.app.push_screen(
+                self._push_screen_after_help(
                     ApiOpenApiOverwriteDialog(
                         locale=self.locale,
                         destination=self.scenario_dir,
@@ -568,6 +575,7 @@ class ApiScreen(Screen[None]):
     def _handle_quick_create(self, request: ApiQuickCreateRequest | None) -> None:
         if request is None:
             return
+        self._busy = True
         self.run_worker(self._persist_quick_create(request), exclusive=True)
 
     def _handle_quick_create_overwrite(
@@ -576,6 +584,7 @@ class ApiScreen(Screen[None]):
         confirmed: bool,
     ) -> None:
         if confirmed:
+            self._busy = True
             self.run_worker(self._persist_quick_create(request, force=True), exclusive=True)
         else:
             self._open_quick_create(request)
@@ -623,7 +632,7 @@ class ApiScreen(Screen[None]):
             if force:
                 self._show_inline_error(self.locale("api.error.quick_create"))
             else:
-                self.app.push_screen(
+                self._push_screen_after_help(
                     ApiScenarioOverwriteDialog(
                         locale=self.locale,
                         filename=scenario_filename(request.name),
@@ -646,6 +655,7 @@ class ApiScreen(Screen[None]):
         self._focus_active_pane()
         self._refresh_detail()
         if execute and self.scenarios[index].scenario is not None and not self._busy:
+            self._busy = True
             self.run_worker(self._run_scenario(index), exclusive=True)
 
     def select_run(self, index: int) -> None:
@@ -748,6 +758,7 @@ class ApiScreen(Screen[None]):
         if self.selected_scenario_index is not None and not self._busy:
             item = self.scenarios[self.selected_scenario_index]
             if item.scenario is not None:
+                self._busy = True
                 self.run_worker(self._run_scenario(self.selected_scenario_index), exclusive=True)
 
     def action_export_selected(self) -> None:
@@ -761,7 +772,7 @@ class ApiScreen(Screen[None]):
     ) -> None:
         if self.selected_run is None:
             return
-        self.app.push_screen(
+        self._push_screen_after_help(
             ApiExportDialog(
                 locale=self.locale,
                 run=self.selected_run,
@@ -775,6 +786,7 @@ class ApiScreen(Screen[None]):
     def _handle_export_request(self, request: ApiExportRequest | None) -> None:
         if request is None or self.selected_run is None or self._busy:
             return
+        self._busy = True
         self.run_worker(
             self._export_run(request),
             name="api-export",
@@ -785,6 +797,7 @@ class ApiScreen(Screen[None]):
 
     def _handle_export_overwrite(self, request: ApiExportRequest, confirmed: bool) -> None:
         if confirmed:
+            self._busy = True
             self.run_worker(
                 self._export_run(request, force=True),
                 name="api-export",
@@ -796,6 +809,8 @@ class ApiScreen(Screen[None]):
             self._open_export_dialog(request)
 
     def action_go_back(self) -> None:
+        if self._busy:
+            return
         if getattr(self.app, "owns_api_screen", False):
             self.app.exit()
         else:
@@ -894,12 +909,12 @@ class ApiScreen(Screen[None]):
             if not isinstance(result, ApiExportResult):
                 raise TypeError("exporter returned an invalid result")
             self._refresh_status(self.locale("api.status.exported"))
-            self.app.push_screen(
+            self._push_export_result_after_help(
                 ApiExportResultScreen(locale=self.locale, result=result, run=self.selected_run)
             )
         except ApiPersistenceError as error:
             if not force and "导出目录已存在" in error.user_message:
-                self.app.push_screen(
+                self._push_screen_after_help(
                     ApiExportOverwriteDialog(
                         locale=self.locale,
                         destination=request.destination,
@@ -920,6 +935,25 @@ class ApiScreen(Screen[None]):
             self._open_export_dialog(request, self.locale("api.error.export_retry"))
         finally:
             self._busy = False
+
+    def _push_export_result_after_help(self, result: ApiExportResultScreen) -> None:
+        self._push_screen_after_help(result)
+
+    def _push_screen_after_help(
+        self,
+        screen: Screen[Any],
+        callback: Callable[[Any], None] | None = None,
+    ) -> None:
+        if isinstance(self.app.screen, HelpDialog):
+            self.app.set_timer(
+                0.05,
+                lambda: self._push_screen_after_help(screen, callback),
+            )
+            return
+        if callback is None:
+            self.app.push_screen(screen)
+        else:
+            self.app.push_screen(screen, callback)
 
     def _show_inline_error(self, message: str) -> None:
         safe = message if "发生了什么" in message else self.locale("api.error.generic")

@@ -155,21 +155,16 @@ def _iter_directory_entries(directory: Path) -> Iterator[os.DirEntry[str]]:
             file_descriptor = os.open(directory, flags)
             with os.scandir(file_descriptor) as iterator:
                 yield from sorted(iterator, key=lambda item: (item.name.casefold(), item.name))
-        except OSError:
-            return
         finally:
             if file_descriptor is not None:
                 with suppress(OSError):
                     os.close(file_descriptor)
         return
 
-    try:
-        if is_reparse_metadata(directory.lstat()):
-            return
-        with os.scandir(directory) as iterator:
-            yield from sorted(iterator, key=lambda item: (item.name.casefold(), item.name))
-    except OSError:
+    if is_reparse_metadata(directory.lstat()):
         return
+    with os.scandir(directory) as iterator:
+        yield from sorted(iterator, key=lambda item: (item.name.casefold(), item.name))
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,7 +291,7 @@ class FileInventory:
                         )
                     )
                 except (OSError, ValueError):
-                    continue
+                    raise
 
         files.sort(key=lambda item: (item.relative.as_posix().casefold(), item.relative.as_posix()))
         directories.sort(key=lambda item: (item.as_posix().casefold(), item.as_posix()))

@@ -6,10 +6,11 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
 from csbox.locales import Translator
+from csbox.tui.help import HELP_BINDINGS
 
 
 class UnavailableDialog(ModalScreen[None]):
-    BINDINGS = [("escape", "close_dialog", "")]
+    BINDINGS = [*HELP_BINDINGS, ("escape", "close_dialog", "")]
 
     def __init__(
         self,

@@ -7,12 +7,13 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static, TextArea
 
 from csbox.locales import Translator
+from csbox.tui.help import HELP_BINDINGS
 
 
 class EvidenceSetTitleDialog(ModalScreen[str | None]):
     """Collect the required Evidence Set title without writing from Input events."""
 
-    BINDINGS = [Binding("escape", "cancel", "取消")]
+    BINDINGS = [*HELP_BINDINGS, Binding("escape", "cancel", "取消")]
 
     def __init__(
         self,
@@ -84,6 +85,7 @@ class EvidenceItemDialog(ModalScreen[tuple[str, str, str] | None]):
     """Collect Evidence Item presentation metadata with one explicit save."""
 
     BINDINGS = [
+        *HELP_BINDINGS,
         Binding("escape", "cancel", "取消"),
         Binding("ctrl+s", "save", "保存", show=False, priority=True),
     ]

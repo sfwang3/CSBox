@@ -604,7 +604,7 @@ async def test_all_sources_unavailable_still_allows_edit_and_remove(tmp_path: Pa
         await pilot.press("tab", "enter")
         await pilot.pause()
         assert app.screen.working_set.items == ()
-        assert "尚未添加证据" in screen_text(app.screen)
+        assert "尚未添加关键画面" in screen_text(app.screen)
 
 
 @pytest.mark.asyncio
@@ -673,7 +673,7 @@ async def test_running_session_is_visible_but_not_addable(tmp_path: Path) -> Non
         await pilot.press("enter")
         await pilot.pause()
         assert isinstance(app.screen, EvidenceCaptureBrowserScreen)
-        assert "不能添加 Capture" in screen_text(app.screen)
+        assert "不能添加关键画面" in screen_text(app.screen)
 
 
 @pytest.mark.asyncio
@@ -690,7 +690,7 @@ async def test_completed_session_without_captures_explains_next_step(
         await pilot.press("enter")
         await pilot.pause()
         assert isinstance(app.screen, EvidenceCaptureBrowserScreen)
-        assert "没有可用 Capture" in screen_text(app.screen)
+        assert "没有可用关键画面" in screen_text(app.screen)
         assert "按 Esc 返回" in screen_text(app.screen)
 
 
@@ -725,7 +725,7 @@ async def test_blank_capture_title_requires_user_title(tmp_path: Path) -> None:
         assert isinstance(app.screen, EvidenceItemDialog)
         await pilot.press("ctrl+s")
         await pilot.pause()
-        assert "请输入 Evidence Item 标题" in screen_text(app.screen)
+        assert "请输入关键画面标题" in screen_text(app.screen)
         app.screen.query_one("#evidence-item-title-input", Input).value = "用户填写标题"
         await pilot.press("ctrl+s")
         await pilot.pause()
@@ -872,8 +872,8 @@ async def test_report_export_keyboard_flow_shows_exact_result_paths(tmp_path: Pa
         assert "导出完成" in text
         assert f"Markdown：{destination / 'report.md'}" in path_text
         assert f"DOCX：{destination / 'report.docx'}" in path_text
-        assert "Images：1" in text
-        assert "Evidence items：1" in text
+        assert "图片：1" in text
+        assert "关键画面：1" in text
         assert calls == [(destination, False)]
         assert_visible_geometry(app.screen)
         assert_static_lines_fit(app.screen)

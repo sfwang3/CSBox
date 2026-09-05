@@ -256,4 +256,4 @@ async def test_home_invalid_config_is_a_recoverable_check_error(
         await pilot.pause()
 
         assert isinstance(app.screen, UnavailableDialog)
-        assert "项目检查暂时无法打开" in str(app.screen.query_one("#dialog-message").renderable)
+        assert "检查项目暂时无法打开" in str(app.screen.query_one("#dialog-message").renderable)

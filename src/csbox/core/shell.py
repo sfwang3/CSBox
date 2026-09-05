@@ -145,15 +145,13 @@ def detect_shell(
     is_wsl: bool = False,
 ) -> ShellProfile:
     del is_wsl
-    env = dict(environ or {})
+    env = dict(os.environ if environ is None else environ)
     source = env.get("CSBOX_SHELL") or env.get("SHELL") or env.get("ComSpec") or ""
     explicit = env.get("CSBOX_SHELL", "")
     kind = _kind_for(explicit) or _kind_for(source)
 
     if kind is None and system == "Windows" and env.get("PSVersion", "").startswith("7"):
         kind = ShellKind.POWERSHELL_7
-    if kind is None and system == "Windows" and env.get("PSModulePath"):
-        kind = ShellKind.POWERSHELL_51
 
     if kind is None:
         return UNKNOWN_SHELL

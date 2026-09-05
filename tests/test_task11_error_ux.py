@@ -49,6 +49,52 @@ def test_pack_error_is_actionable_without_raw_exception(monkeypatch, tmp_path: P
     assert SECRET not in result.stderr
 
 
+def test_verbose_pack_error_does_not_expose_exception_values(monkeypatch, tmp_path: Path) -> None:
+    cli_module = importlib.import_module("csbox.cli.main")
+
+    class FailingPack:
+        def pack(self, *_args: object, **_kwargs: object) -> None:
+            raise RuntimeError(SECRET)
+
+    monkeypatch.setattr(cli_module, "create_pack_service", lambda _root: FailingPack())
+
+    result = CliRunner().invoke(app, ["pack", str(tmp_path), "--verbose"])
+
+    assert result.exit_code == 1
+    assert "RuntimeError" in result.stderr
+    assert SECRET not in result.stdout
+    assert SECRET not in result.stderr
+
+
+def test_verbose_pack_error_redacts_prefixed_secret_assignments(
+    monkeypatch, tmp_path: Path
+) -> None:
+    secrets = (
+        "CSBOX_SECRET_SENTINEL_openai_key",
+        "CSBOX_SECRET_SENTINEL_aws_access_key",
+    )
+    cli_module = importlib.import_module("csbox.cli.main")
+
+    class FailingPack:
+        def pack(self, *_args: object, **_kwargs: object) -> None:
+            cause = OSError(
+                5,
+                f"OPENAI_API_KEY={secrets[0]} AWS_SECRET_ACCESS_KEY={secrets[1]}",
+            )
+            raise RuntimeError("pack startup failed") from cause
+
+    monkeypatch.setattr(cli_module, "create_pack_service", lambda _root: FailingPack())
+
+    result = CliRunner().invoke(app, ["pack", str(tmp_path), "--verbose"])
+
+    assert result.exit_code == 1
+    assert "OPENAI_API_KEY=<redacted>" in result.stderr
+    assert "AWS_SECRET_ACCESS_KEY=<redacted>" in result.stderr
+    for secret in secrets:
+        assert secret not in result.stdout
+        assert secret not in result.stderr
+
+
 def test_lab_start_error_is_actionable_without_raw_exception(monkeypatch) -> None:
     cli_module = importlib.import_module("csbox.cli.main")
 

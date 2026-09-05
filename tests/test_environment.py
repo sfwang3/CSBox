@@ -82,3 +82,27 @@ def test_collects_environment_with_injected_platform_inputs() -> None:
     assert snapshot.powershell_7_available is False
     assert snapshot.is_wsl is False
     assert (snapshot.terminal_columns, snapshot.terminal_rows) == (100, 26)
+
+
+def test_windows_environment_separates_unknown_host_from_available_experiment_shells() -> None:
+    available = {
+        "powershell.exe": r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+        "pwsh.exe": r"C:\Program Files\PowerShell\7\pwsh.exe",
+    }
+
+    snapshot = detect_environment(
+        environ={
+            "ComSpec": r"C:\Windows\System32\cmd.exe",
+            "PSModulePath": r"C:\Program Files\PowerShell\Modules",
+        },
+        system="Windows",
+        release="10.0",
+        python_version="3.12.3",
+        which=available.get,
+        size_provider=lambda: os.terminal_size((120, 30)),
+    )
+
+    assert snapshot.shell == ""
+    assert snapshot.shell_executable is None
+    assert snapshot.powershell_51_available is True
+    assert snapshot.powershell_7_available is True

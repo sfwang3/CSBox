@@ -24,6 +24,7 @@ from csbox.lab.service import create_lab_service
 from csbox.locales import Translator
 from csbox.tui.dialogs.export import ExportDialog, ExportRequest
 from csbox.tui.dialogs.lab_start import LabStartDialog
+from csbox.tui.help import HelpDialog
 from csbox.tui.lab_workflow import LabStartRequest, ShellOption
 from csbox.tui.screens.export import ExportResultScreen
 from csbox.tui.screens.review import ReviewController, ReviewScreen
@@ -128,9 +129,13 @@ class RecordsScreen(Screen[None]):
             None,
         )
 
+    @property
+    def is_working(self) -> bool:
+        return self._exporting
+
     def compose(self) -> ComposeResult:
         yield Vertical(
-            Static("实验记录", id="records-title", markup=False),
+            Static(self.locale("records.title"), id="records-title", markup=False),
             Horizontal(
                 Static(id="records-list", markup=False),
                 Static(id="records-detail", markup=False),
@@ -144,11 +149,7 @@ class RecordsScreen(Screen[None]):
                 Button("开始实验", id="records-start", variant="primary"),
                 id="records-actions",
             ),
-            Static(
-                "↑↓ 选择   Enter 查看回放   E 导出材料   Tab 切换焦点   Esc/Q 返回",
-                id="records-footer",
-                markup=False,
-            ),
+            Static(id="records-footer", markup=False),
             id="records-layout",
         )
 
@@ -202,11 +203,7 @@ class RecordsScreen(Screen[None]):
         footer = self.query_one("#records-footer", Static)
 
         if not self.summaries:
-            empty = (
-                "实验记录暂时无法读取\n仍可开始一次新的实验"
-                if self._load_failed
-                else "暂无实验记录\n完成一次实验后会显示在这里"
-            )
+            empty = self.locale("records.empty.load" if self._load_failed else "records.empty.none")
             list_panel.update(self._fit_lines(empty, self._content_width(list_panel, 44)))
             detail_panel.update("")
             narrow_panel.update(self._fit_lines(empty, self._content_width(narrow_panel, 72)))
@@ -214,7 +211,7 @@ class RecordsScreen(Screen[None]):
             review_button.display = False
             export_button.display = False
             start_button.display = True
-            footer.update(self._fit_footer("Enter 开始实验   Esc/Q 返回"))
+            footer.update(self._fit_footer(self.locale("records.footer.empty")))
             return
 
         list_panel.update(self._render_wide_list(self._content_width(list_panel, 42)))
@@ -230,9 +227,7 @@ class RecordsScreen(Screen[None]):
         message.update(
             "正在导出…" if self._exporting else ("实验结束后可回看和导出" if is_active else "")
         )
-        footer.update(
-            self._fit_footer("↑↓ 选择   Enter 查看回放   E 导出材料   Tab 切换焦点   Esc/Q 返回")
-        )
+        footer.update(self._fit_footer(self.locale("records.footer")))
         self.call_after_refresh(self._keep_selection_visible)
 
     def _render_wide_list(self, width: int) -> str:
@@ -247,7 +242,7 @@ class RecordsScreen(Screen[None]):
             lines.append(f"{marker} {name}")
             context = (
                 f"  {status_display_name(summary.metadata.status)} · "
-                f"{shell_display_name(summary.metadata.shell)} · Capture {summary.capture_count}"
+                f"{shell_display_name(summary.metadata.shell)} · 关键画面 {summary.capture_count}"
             )
             lines.append(truncate_cells(context, width, ellipsis="…"))
         return "\n".join(lines)
@@ -262,7 +257,7 @@ class RecordsScreen(Screen[None]):
             "实验详情",
             status_display_name(metadata.status),
             shell_display_name(metadata.shell),
-            f"Capture {summary.capture_count}",
+            f"关键画面 {summary.capture_count}",
             f"开始 {format_local_time(metadata.started_at)}",
             f"结束 {ended}",
         ]
@@ -292,7 +287,7 @@ class RecordsScreen(Screen[None]):
             )
             lines.append(
                 truncate_cells(
-                    f"  Capture {summary.capture_count} · "
+                    f"  关键画面 {summary.capture_count} · "
                     f"{format_local_time(summary.metadata.started_at)}",
                     width,
                     ellipsis="…",
@@ -419,7 +414,7 @@ class RecordsScreen(Screen[None]):
             self._exporting = False
             self._refresh()
             self._focus_export_on_resume = True
-            self.app.push_screen(
+            self._push_result_after_help(
                 ExportResultScreen(
                     failure_message=_safe_export_failure_message(error),
                     on_retry=self.action_export_selected,
@@ -429,7 +424,13 @@ class RecordsScreen(Screen[None]):
         self._exporting = False
         self._refresh()
         self._focus_export_on_resume = True
-        self.app.push_screen(ExportResultScreen(result=result))
+        self._push_result_after_help(ExportResultScreen(result=result))
+
+    def _push_result_after_help(self, result: ExportResultScreen) -> None:
+        if isinstance(self.app.screen, HelpDialog):
+            self.app.set_timer(0.05, lambda: self._push_result_after_help(result))
+            return
+        self.app.push_screen(result)
 
     def _focus_export_action(self) -> None:
         button = self.query_one("#records-export", Button)

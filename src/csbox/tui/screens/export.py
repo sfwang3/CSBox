@@ -116,7 +116,7 @@ class ExportResultScreen(Screen[None]):
             )
             body.update(
                 self._fit(
-                    f"{warning_line}\nCapture：{len(result.evidence)}\n"
+                    f"{warning_line}\n关键画面：{len(result.evidence)}\n"
                     f"位置：{_truncate_path_for_label(str(result.destination), width)}",
                     width,
                 )

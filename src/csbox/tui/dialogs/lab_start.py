@@ -13,6 +13,7 @@ from textual.widgets import Button, Input, Select, Static
 from csbox.api.redaction import Redactor
 from csbox.core.display_width import truncate_cells
 from csbox.locales import Translator
+from csbox.tui.help import HELP_BINDINGS
 from csbox.tui.lab_workflow import (
     ExperimentNameError,
     LabStartRequest,
@@ -40,6 +41,7 @@ class LabStartDialog(ModalScreen[LabStartRequest | None]):
     """Collect the small, current-project-only Lab start request."""
 
     BINDINGS = [
+        *HELP_BINDINGS,
         Binding(
             "up",
             "focus_previous_control",

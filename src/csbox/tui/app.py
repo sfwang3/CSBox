@@ -22,7 +22,7 @@ from csbox.lab.repository import (
 )
 from csbox.locales import Translator
 from csbox.pack.service import PackService, create_pack_service
-from csbox.tui.dialogs.unavailable import UnavailableDialog
+from csbox.tui.help import HELP_BINDINGS, open_help
 from csbox.tui.lab_workflow import (
     ActiveLabSession,
     HomeNotice,
@@ -32,7 +32,11 @@ from csbox.tui.lab_workflow import (
     metadata_retry_notice,
 )
 from csbox.tui.screens.api import ApiScreen
-from csbox.tui.screens.evidence import EvidenceSetsScreen, ReportExportAction
+from csbox.tui.screens.evidence import (
+    EvidenceSetEditorScreen,
+    EvidenceSetsScreen,
+    ReportExportAction,
+)
 from csbox.tui.screens.home import HomeScreen
 from csbox.tui.screens.pack import PackConfirmationScreen
 from csbox.tui.screens.project_check import ProjectCheckScreen
@@ -44,7 +48,7 @@ class CSBoxApp(App[LabStartRequest | None]):
     TITLE = "CSBox"
     CSS_PATH = Path(__file__).parent / "themes" / "csbox.tcss"
     BINDINGS = [
-        ("f1", "show_help", ""),
+        *HELP_BINDINGS,
         ("q", "quit_app", ""),
     ]
 
@@ -159,21 +163,22 @@ class CSBoxApp(App[LabStartRequest | None]):
 
     def _critical_workflow_active(self) -> bool:
         screen = self.screen
-        return (isinstance(screen, HomeScreen) and screen.is_working) or (
-            isinstance(screen, PackConfirmationScreen) and screen.is_working
-        )
+        if isinstance(screen, HomeScreen):
+            return screen.is_working
+        if isinstance(screen, PackConfirmationScreen):
+            return screen.is_working
+        if isinstance(screen, RecordsScreen):
+            return screen.is_working
+        if isinstance(screen, EvidenceSetEditorScreen):
+            return screen.is_working
+        if isinstance(screen, ApiScreen):
+            return screen.is_working
+        return False
 
     def action_show_help(self) -> None:
         if self._critical_workflow_active():
             return
-        self.push_screen(
-            UnavailableDialog(
-                title=self.locale("home.help.title"),
-                locale=self.locale,
-                message_key="home.help.body",
-                close_key="home.help.close",
-            )
-        )
+        open_help(self, self.locale)
 
     def refresh_home(self) -> None:
         self.snapshot = self.data_source.get_home_snapshot(self.environment)
@@ -222,6 +227,7 @@ class ReviewApp(App[None]):
 
     TITLE = "CSBox Review"
     CSS_PATH = Path(__file__).parent / "themes" / "csbox.tcss"
+    BINDINGS = [*HELP_BINDINGS]
 
     def __init__(self, *, controller: ReviewController, locale: Translator) -> None:
         super().__init__()
@@ -232,6 +238,9 @@ class ReviewApp(App[None]):
     def on_mount(self) -> None:
         self.push_screen(ReviewScreen(controller=self.controller, locale=self.locale))
 
+    def action_show_help(self) -> None:
+        open_help(self, self.locale)
+
     def action_quit(self) -> None:
         self.exit()
 
@@ -241,6 +250,7 @@ class ApiApp(App[None]):
 
     TITLE = "CSBox API"
     CSS_PATH = Path(__file__).parent / "themes" / "csbox.tcss"
+    BINDINGS = [*HELP_BINDINGS]
 
     def __init__(
         self,
@@ -270,7 +280,16 @@ class ApiApp(App[None]):
             )
         )
 
+    def action_show_help(self) -> None:
+        screen = self.screen
+        if isinstance(screen, ApiScreen) and screen.is_working:
+            return
+        open_help(self, self.locale)
+
     def action_quit(self) -> None:
+        screen = self.screen
+        if isinstance(screen, ApiScreen) and screen.is_working:
+            return
         self.exit()
 
 
@@ -279,6 +298,7 @@ class CheckApp(App[None]):
 
     TITLE = "CSBox Check"
     CSS_PATH = Path(__file__).parent / "themes" / "csbox.tcss"
+    BINDINGS = [*HELP_BINDINGS]
 
     def __init__(self, *, report: CheckReport, locale: Translator) -> None:
         super().__init__()
@@ -288,6 +308,9 @@ class CheckApp(App[None]):
 
     def on_mount(self) -> None:
         self.push_screen(ProjectCheckScreen(report=self.report, locale=self.locale))
+
+    def action_show_help(self) -> None:
+        open_help(self, self.locale)
 
     def action_quit(self) -> None:
         self.exit()

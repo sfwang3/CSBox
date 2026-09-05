@@ -22,6 +22,7 @@ from textual.widgets import Button, Input, Static
 from csbox.core.display_width import truncate_cells
 from csbox.core.text_layout import wrap_cells
 from csbox.locales import Translator
+from csbox.tui.help import HELP_BINDINGS
 
 PackPlanFactory = Callable[..., object]
 _WorkflowState = Literal["idle", "awaiting_overwrite", "planning", "publishing"]
@@ -31,7 +32,7 @@ _REJECTION_LABELS = {
     "private-key": "私钥",
     "hard-coded-secret": "硬编码 secret",
     "deep-secret-scan": "深度 secret 扫描",
-    "check-failed": "项目检查",
+    "check-failed": "检查项目",
     "path-unsafe": "不安全路径",
     "path-conflict": "路径冲突",
 }
@@ -212,7 +213,9 @@ class PackConfirmationScreen(Screen[None]):
             self.confirmed = False
             self._set_working(False)
             if _is_conflict_error(error) or (
-                _is_plan_changed_error(error) and _is_regular_target(_plan_destination(plan))
+                _is_plan_changed_error(error)
+                and not bool(getattr(error, "details", ()))
+                and _is_regular_target(_plan_destination(plan))
             ):
                 self._workflow_state = "idle"
                 self._start_overwrite_confirmation(plan)
@@ -413,6 +416,22 @@ class PackConfirmationScreen(Screen[None]):
         status.update(self._fit(self._status_message, self._content_width("#pack-status")))
 
     def _failure_message(self, error: Exception) -> str:
+        kind = getattr(error, "kind", None)
+        if kind == "verify_failed":
+            return self.locale("pack.error.verify")
+        if kind == "destination_unsafe":
+            return self.locale("pack.destination.unsafe")
+        if kind in {
+            "destination_exists",
+            "destination_permission",
+            "destination_unavailable",
+            "publish_failed",
+        }:
+            return self.locale("pack.error.destination")
+        if kind in {"plan_changed", "source_changed"}:
+            return self.locale("pack.error.plan")
+        if kind == "content_rejected":
+            return self.locale("pack.error.rejected")
         detail = _safe_error_text(error)
         if "ZIP 校验" in detail or "ZIP 条目" in detail or "manifest" in detail:
             return self.locale("pack.error.verify")
@@ -427,6 +446,13 @@ class PackConfirmationScreen(Screen[None]):
         return self.locale("pack.error")
 
     def _plan_failure_message(self, error: Exception) -> str:
+        kind = getattr(error, "kind", None)
+        if kind == "destination_unsafe":
+            return self.locale("pack.destination.unsafe")
+        if kind == "destination_unavailable":
+            return self.locale("pack.destination.unavailable")
+        if kind == "content_rejected":
+            return self.locale("pack.error.rejected")
         detail = _safe_error_text(error)
         if "输出路径不可安全使用" in detail:
             return self.locale("pack.destination.unsafe")
@@ -441,6 +467,7 @@ class PackConfirmationScreen(Screen[None]):
         included = _as_items(getattr(self.plan, "included", getattr(self.plan, "entries", ())))
         excluded = _as_items(getattr(self.plan, "excluded", ()))
         rejected = _as_items(getattr(self.plan, "rejected", ()))
+        warnings = _as_items(getattr(self.plan, "warnings", ()))
         source_bytes = getattr(self.plan, "source_bytes", 0)
         source_root = _display_path(getattr(self.plan, "source_root", Path.cwd()))
         destination = _display_path(self.destination)
@@ -452,6 +479,8 @@ class PackConfirmationScreen(Screen[None]):
             rejected=len(rejected),
             source_bytes=source_bytes,
         )
+        if warnings:
+            line += f"\n警告：{len(warnings)} 项（不阻塞打包）"
         return self._fit(
             f"项目：{source_root}\n{line}\n输出：{destination}",
             self._content_width("#pack-summary"),
@@ -462,6 +491,7 @@ class PackConfirmationScreen(Screen[None]):
         included = _display_items(getattr(self.plan, "included", getattr(self.plan, "entries", ())))
         excluded = _display_items(getattr(self.plan, "excluded", ()))
         rejected = _rejected(self.plan)
+        warnings = _display_items(getattr(self.plan, "warnings", ()))
         lines = ["included:"]
         for item in included[:8]:
             lines.extend(_wrapped_item_lines("+", item, width))
@@ -488,6 +518,11 @@ class PackConfirmationScreen(Screen[None]):
             lines.extend(self._fit_lines(self.locale("pack.rejected.next"), width))
         else:
             lines.append(self.locale("pack.rejected.none"))
+        lines.append("warnings:")
+        for item in warnings[:8]:
+            lines.extend(_wrapped_item_lines("?", item, width))
+        if len(warnings) > 8:
+            lines.append(f"  ? … ({len(warnings) - 8})")
         return "\n".join(lines)
 
     def _fit_lines(self, value: str, width: int) -> list[str]:
@@ -525,6 +560,7 @@ class PackOverwriteDialog(ModalScreen[bool]):
     """Require an explicit confirmation before replacing one exact ZIP file."""
 
     BINDINGS = (
+        *HELP_BINDINGS,
         Binding("escape", "cancel", "取消"),
         Binding("q", "cancel", "取消", show=False),
     )
@@ -862,10 +898,16 @@ def _safe_error_text(error: Exception) -> str:
 
 
 def _is_conflict_error(error: Exception) -> bool:
+    kind = getattr(error, "kind", None)
+    if kind is not None:
+        return kind == "destination_exists"
     return isinstance(error, FileExistsError) or "目标文件已存在" in _safe_error_text(error)
 
 
 def _is_plan_changed_error(error: Exception) -> bool:
+    kind = getattr(error, "kind", None)
+    if kind is not None:
+        return kind == "plan_changed"
     return "打包计划已变化" in _safe_error_text(error)
 
 

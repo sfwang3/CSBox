@@ -15,6 +15,7 @@ from csbox.api.redaction import Redactor
 from csbox.core.display_width import truncate_cells
 from csbox.lab.repository import SessionSummary
 from csbox.locales import Translator
+from csbox.tui.help import HELP_BINDINGS
 
 _EXPORT_REDACTOR = Redactor.with_configured_values(())
 
@@ -31,6 +32,7 @@ class ExportOverwriteDialog(ModalScreen[bool]):
     """Confirm the existing exporter force contract without exposing path details."""
 
     BINDINGS = [
+        *HELP_BINDINGS,
         Binding("escape", "cancel", "取消"),
         Binding("q", "cancel", "取消", show=False),
     ]
@@ -80,6 +82,7 @@ class ExportDialog(ModalScreen[ExportRequest | None]):
     """Collect only the stable Lab export options needed by the beginner workflow."""
 
     BINDINGS = [
+        *HELP_BINDINGS,
         Binding("up", "focus_previous_control", "上一个控件", show=False, priority=True),
         Binding("down", "focus_next_control", "下一个控件", show=False, priority=True),
         Binding("escape", "cancel", "取消"),
@@ -111,7 +114,7 @@ class ExportDialog(ModalScreen[ExportRequest | None]):
                         markup=False,
                     ),
                     Static(
-                        f"Capture\n{self.summary.capture_count}",
+                        f"关键画面\n{self.summary.capture_count}",
                         id="export-captures",
                         markup=False,
                     ),

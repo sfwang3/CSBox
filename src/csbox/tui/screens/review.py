@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from rich.text import Text
+from textual import events
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.events import Resize
@@ -288,6 +289,7 @@ class ReviewScreen(Screen[None]):
         self.locale = locale
         self.is_wide = False
         self.active_pane = "terminal"
+        self._playing_before_suspend: bool | None = None
 
     def compose(self) -> ComposeResult:
         yield Vertical(
@@ -313,6 +315,19 @@ class ReviewScreen(Screen[None]):
 
     def on_resize(self, event: Resize) -> None:
         self._set_layout(event.size.width >= 120)
+        self._refresh()
+
+    def on_screen_suspend(self, event: events.ScreenSuspend) -> None:
+        del event
+        self._playing_before_suspend = self.controller.playing
+        self.controller.pause()
+
+    def on_screen_resume(self, event: events.ScreenResume) -> None:
+        del event
+        was_playing = self._playing_before_suspend
+        self._playing_before_suspend = None
+        if was_playing:
+            self.controller.play()
         self._refresh()
 
     def _set_layout(self, wide: bool) -> None:
@@ -347,16 +362,16 @@ class ReviewScreen(Screen[None]):
         title = truncate_cells(
             _safe_review_text(self.controller.session_name), max(1, available_width)
         )
-        return f"REVIEW  //  {title}"
+        return self.locale("review.title", name=title)
 
     def _timeline(self, view: ReviewView) -> str:
         playback = "播放中" if view.playing else "已暂停"
         lines = [
-            "TIMELINE",
+            self.locale("review.timeline"),
             format_progress(view.current_time, view.duration, width=28),
             f"{view.current_time:05.1f}s / {view.duration:05.1f}s  {playback}",
             f"状态：{view.state} / {view.lifecycle_status}",
-            f"事件：{view.event_count}  Capture：{view.capture_count}",
+            f"事件：{view.event_count}  关键画面：{view.capture_count}",
         ]
         if view.lifecycle_reason:
             lines.append(f"原因：{_safe_review_text(view.lifecycle_reason)}")
@@ -382,9 +397,9 @@ class ReviewScreen(Screen[None]):
             return fallback
 
     def _captures(self, view: ReviewView, width: int) -> str:
-        lines = ["CAPTURES"]
+        lines = [self.locale("review.captures")]
         if not view.captures:
-            lines.append("暂无 Capture；按 C 创建。")
+            lines.append(self.locale("review.empty"))
         for index, capture in enumerate(view.captures):
             marker = ">" if index == view.selected_capture else " "
             title = _safe_capture_title(capture.title) or f"实验记录 {index + 1}"
@@ -396,13 +411,17 @@ class ReviewScreen(Screen[None]):
         return max(2, widget.content_region.width or self.size.width - 6)
 
     def _footer(self, view: ReviewView) -> str:
-        footer = (
-            f"{format_progress(view.current_time, view.duration, width=24)}  "
-            "Space 播放/暂停  ←→ seek  ↑↓ Capture  C 创建  E 标题  Delete 删除  Tab 切换  Q 返回"
-        )
+        del view
+        primary = self.locale("review.footer.primary")
+        secondary = self.locale("review.footer.secondary")
+        footer = f"{primary}   {secondary}"
         footer_widget = self.query_one("#review-footer", ReviewFooter)
         width = footer_widget.content_region.width or max(1, self.size.width - 6)
-        return truncate_cells(footer, width, ellipsis="…")
+        return (
+            footer
+            if display_width(footer) <= width
+            else truncate_cells(primary, width, ellipsis="…")
+        )
 
     def action_cycle_pane(self) -> None:
         panes = ("terminal", "timeline", "captures")
@@ -439,7 +458,7 @@ class ReviewScreen(Screen[None]):
 
     def action_create_capture(self) -> None:
         self.app.push_screen(
-            CaptureTitleDialog(locale=self.locale, heading="创建 Capture"),
+            CaptureTitleDialog(locale=self.locale, heading=self.locale("review.capture.create")),
             self._create_capture_from_dialog,
         )
 
@@ -462,7 +481,7 @@ class ReviewScreen(Screen[None]):
                 CaptureTitleDialog(
                     locale=self.locale,
                     title=displayed_title,
-                    heading="编辑 Capture 标题",
+                    heading=self.locale("review.capture.edit"),
                 ),
                 lambda title: self._edit_capture_from_dialog(
                     capture.capture_id,
@@ -497,7 +516,7 @@ class ReviewScreen(Screen[None]):
             self.app.push_screen(
                 ConfirmDialog(
                     locale=self.locale,
-                    title="删除 Capture",
+                    title=self.locale("review.capture.delete"),
                     message=f"确定删除“{displayed_title}”吗？此操作不可撤销。",
                 ),
                 lambda confirmed: self._delete_capture_from_dialog(capture.capture_id, confirmed),

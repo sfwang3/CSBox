@@ -121,6 +121,26 @@ Screen {
     text-style: bold;
 }
 
+.entry-card {
+    width: 100%;
+    height: 3;
+    margin-bottom: 1;
+}
+
+.entry-card .entry-button {
+    width: 18;
+    height: 3;
+    margin-bottom: 0;
+}
+
+.entry-description {
+    width: 1fr;
+    height: 3;
+    padding: 0 1;
+    content-align: left middle;
+    color: #bcd0e0;
+}
+
 #shortcut-bar {
     height: 1;
     color: #a5bacd;
@@ -163,6 +183,62 @@ UnavailableDialog {
 
 #dialog-close:focus {
     border: tall #f0bd60;
+}
+
+HelpDialog {
+    align: center middle;
+    background: rgba(0, 0, 0, 0.72);
+}
+
+#help-dialog {
+    width: 76;
+    max-width: 92%;
+    height: 90%;
+    max-height: 90%;
+    border: round #6d79e8;
+    background: #101c29;
+    padding: 1 2;
+}
+
+#help-card {
+    height: 100%;
+}
+
+#help-title {
+    color: #9da4ff;
+    text-style: bold;
+    height: 1;
+    margin-bottom: 1;
+}
+
+#help-scroll {
+    height: 1fr;
+    min-height: 1;
+    scrollbar-size: 1 1;
+    overflow-y: auto;
+}
+
+#help-body {
+    color: #dbe7f2;
+    height: auto;
+}
+
+#help-close {
+    width: 100%;
+    height: 3;
+    margin-top: 1;
+    border: round #326fa2;
+    background: #162d43;
+}
+
+#help-close:focus {
+    border: tall #f0bd60;
+}
+
+#help-footer {
+    height: 1;
+    color: #a5bacd;
+    margin-top: 1;
 }
 
 .wide #content-grid {

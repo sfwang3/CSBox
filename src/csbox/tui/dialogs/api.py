@@ -17,6 +17,7 @@ from textual.widgets import Button, Input, Select, Static
 
 from csbox.api.models import ApiMethod, ApiRun
 from csbox.locales import Translator
+from csbox.tui.help import HELP_BINDINGS
 
 
 class ApiQuickCreateInput(Input):
@@ -49,6 +50,7 @@ class ApiOpenApiImportDialog(ModalScreen[Path | None]):
     """Collect one OpenAPI source path without introducing a native picker."""
 
     BINDINGS = [
+        *HELP_BINDINGS,
         Binding(
             "up",
             "focus_previous_control",
@@ -175,6 +177,7 @@ class ApiScenarioOverwriteDialog(ModalScreen[bool]):
     """Confirm replacing an existing scenario source before force-writing it."""
 
     BINDINGS = [
+        *HELP_BINDINGS,
         Binding("escape", "cancel", "取消"),
         Binding("q", "cancel", "取消", show=False),
     ]
@@ -230,6 +233,7 @@ class ApiOpenApiOverwriteDialog(ModalScreen[bool]):
     """Confirm replacing matching generated scenarios from one import."""
 
     BINDINGS = [
+        *HELP_BINDINGS,
         Binding("escape", "cancel", "取消"),
         Binding("q", "cancel", "取消", show=False),
     ]
@@ -303,6 +307,7 @@ class ApiExportOverwriteDialog(ModalScreen[bool]):
     """Confirm the API exporter's existing-directory force contract."""
 
     BINDINGS = [
+        *HELP_BINDINGS,
         Binding("escape", "cancel", "取消"),
         Binding("q", "cancel", "取消", show=False),
     ]
@@ -363,6 +368,7 @@ class ApiExportDialog(ModalScreen[ApiExportRequest | None]):
     """Collect only API export destination and existing backend theme options."""
 
     BINDINGS = [
+        *HELP_BINDINGS,
         Binding(
             "up",
             "focus_previous_control",
@@ -525,6 +531,7 @@ class ApiQuickCreateDialog(ModalScreen[ApiQuickCreateRequest | None]):
     """Collect the minimum real request needed for a runnable TOML scenario."""
 
     BINDINGS = [
+        *HELP_BINDINGS,
         Binding(
             "up",
             "focus_previous_control",

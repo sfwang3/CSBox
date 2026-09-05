@@ -6,12 +6,13 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
 from csbox.locales import Translator
+from csbox.tui.help import HELP_BINDINGS
 
 
 class ConfirmDialog(ModalScreen[bool]):
     """Confirm an irreversible local UI action."""
 
-    BINDINGS = [("escape", "cancel", "取消")]
+    BINDINGS = [*HELP_BINDINGS, ("escape", "cancel", "取消")]
 
     def __init__(self, *, locale: Translator, title: str, message: str) -> None:
         super().__init__()

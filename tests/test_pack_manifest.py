@@ -13,7 +13,9 @@ from typer.testing import CliRunner
 
 import csbox.core.safe_paths as safe_paths_module
 import csbox.pack.service as pack_service_module
+from csbox.check.models import CheckFinding, CheckStatus
 from csbox.cli.main import app
+from csbox.pack.models import PackPlan
 from csbox.pack.service import PackService, PackServiceError
 
 runner = CliRunner()
@@ -59,6 +61,26 @@ def test_plan_is_a_stable_dry_run_boundary_and_never_publishes(tmp_path: Path) -
     assert not destination.exists()
 
 
+def test_pack_plan_private_fingerprints_survive_copy_without_public_schema(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "project"
+    source.mkdir()
+    _project(source)
+    plan = PackService().plan(source, destination=tmp_path / "archive.zip")
+
+    schema = PackPlan.model_json_schema(mode="serialization")
+    assert "source_fingerprint" not in schema.get("properties", {})
+    assert "_source_file_fingerprints" not in schema.get("properties", {})
+
+    copied = plan.model_copy(update={"force": True})
+    assert copied._source_fingerprint == plan._source_fingerprint
+    assert copied._source_file_fingerprints == plan._source_file_fingerprints
+    payload = plan.model_dump(mode="json")
+    assert "source_fingerprint" not in payload
+    assert "_source_file_fingerprints" not in payload
+
+
 def test_dry_run_plain_and_json_are_stable_and_do_not_leave_staging(tmp_path: Path) -> None:
     source = tmp_path / "project"
     source.mkdir()
@@ -88,6 +110,188 @@ def test_dry_run_plain_and_json_are_stable_and_do_not_leave_staging(tmp_path: Pa
     assert str(tmp_path) not in json_result.stdout
     assert not destination.exists()
     assert not any(path.name.startswith("csbox-pack-") for path in tmp_path.iterdir())
+
+
+def test_warn_only_project_dry_run_answers_that_it_can_be_packed_now(tmp_path: Path) -> None:
+    source = tmp_path / "中文项目"
+    source.mkdir()
+    (source / "main.py").write_text("print('safe')\n", encoding="utf-8")
+    (source / "build").mkdir()
+    (source / ".cache").mkdir()
+    (source / ".csbox").mkdir()
+    destination = tmp_path / "交付.zip"
+
+    result = runner.invoke(
+        app,
+        ["pack", str(source), "--output", str(destination), "--dry-run", "--plain"],
+    )
+
+    assert result.exit_code == 0
+    assert "状态：可以直接打包" in result.stdout
+    assert "缺少 README" in result.stdout
+    assert "建议在项目根目录添加 README.md" in result.stdout
+    assert "打包时会自动排除" in result.stdout
+    assert "rejected：0" in result.stdout
+    assert "build:directory" in result.stdout
+    assert ".cache:directory" in result.stdout
+    assert ".csbox:directory" in result.stdout
+
+
+def test_warn_only_project_real_pack_with_manifest_and_verify_succeeds(tmp_path: Path) -> None:
+    source = tmp_path / "中文项目"
+    source.mkdir()
+    (source / "main.py").write_text("print('safe')\n", encoding="utf-8")
+    (source / "build").mkdir()
+    (source / ".cache").mkdir()
+    (source / ".csbox").mkdir()
+    destination = tmp_path / "交付.zip"
+
+    result = runner.invoke(
+        app,
+        [
+            "pack",
+            str(source),
+            "--output",
+            str(destination),
+            "--manifest",
+            "--verify",
+            "--plain",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "打包完成" in result.stdout
+    assert destination.exists()
+    with zipfile.ZipFile(destination) as archive:
+        assert set(archive.namelist()) == {"main.py", "manifest.json"}
+
+
+def test_dry_run_explains_existing_target_as_a_separate_blocker(tmp_path: Path) -> None:
+    source = tmp_path / "项目"
+    source.mkdir()
+    _project(source)
+    destination = tmp_path / "交付.zip"
+    destination.write_bytes(b"keep")
+
+    result = runner.invoke(
+        app,
+        ["pack", str(source), "--output", str(destination), "--dry-run", "--plain"],
+    )
+
+    assert result.exit_code == 1
+    assert "状态：暂时不能打包" in result.stdout
+    assert "阻塞项：目标文件已存在" in result.stdout
+    assert "交付.zip" in result.stdout
+    assert "rejected：0" in result.stdout
+    assert "先处理项目检查失败项" not in result.stdout
+
+
+def test_real_pack_existing_target_has_controlled_actionable_error(tmp_path: Path) -> None:
+    source = tmp_path / "中文项目"
+    source.mkdir()
+    _project(source)
+    destination = tmp_path / "交付文件.zip"
+    destination.write_bytes(b"keep")
+
+    result = runner.invoke(
+        app,
+        [
+            "pack",
+            str(source),
+            "--output",
+            str(destination),
+            "--manifest",
+            "--verify",
+            "--plain",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "发生了什么：目标文件已存在" in result.stdout
+    assert "具体原因" in result.stdout
+    assert "影响位置" in result.stdout
+    assert "下一步" in result.stdout
+    assert "交付文件.zip" in result.stdout
+    assert "先处理项目检查失败项" not in result.stdout
+    assert destination.read_bytes() == b"keep"
+
+
+def test_real_pack_verification_failure_has_controlled_actionable_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "中文项目"
+    source.mkdir()
+    _project(source)
+
+    def fail_verification(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise PackServiceError("ZIP 校验失败。")
+
+    monkeypatch.setattr(PackService, "_verify", staticmethod(fail_verification))
+    result = runner.invoke(
+        app,
+        [
+            "pack",
+            str(source),
+            "--output",
+            str(tmp_path / "交付.zip"),
+            "--verify",
+            "--plain",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "发生了什么：ZIP 已生成但验证未通过" in result.stdout
+    assert "具体原因：ZIP 内容与打包计划不一致" in result.stdout
+    assert "下一步" in result.stdout
+    assert "先处理项目检查失败项" not in result.stdout
+
+
+def test_warn_status_and_nonzero_legacy_exit_code_do_not_create_pack_blocker(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "project"
+    source.mkdir()
+    _project(source)
+    finding = CheckFinding(
+        rule_id="readme",
+        status=CheckStatus.WARN,
+        message="warning only",
+        category="README",
+    )
+    report = type(
+        "LegacyWarnReport",
+        (),
+        {
+            "status": CheckStatus.WARN,
+            "exit_code": 1,
+            "findings": (finding,),
+            "projects": (),
+        },
+    )()
+    checker = type("Checker", (), {"run": lambda self, root, *, build=False: report})()
+
+    plan = PackService(check_service=checker).plan(
+        source,
+        destination=tmp_path / "archive.zip",
+    )
+
+    assert plan.rejected == ()
+    assert plan.can_publish is True
+
+
+def test_pack_plan_keeps_warn_details_safe_and_non_blocking(tmp_path: Path) -> None:
+    source = tmp_path / "project"
+    source.mkdir()
+    (source / "main.py").write_text("print('safe')\n", encoding="utf-8")
+
+    plan = PackService().plan(source, destination=tmp_path / "archive.zip")
+
+    assert plan.rejected == ()
+    assert plan.can_publish is True
+    assert any("缺少 README" in warning for warning in plan.warnings)
+    assert all("为什么：" not in warning for warning in plan.warnings)
 
 
 def test_pack_cli_config_failure_uses_safe_error_boundary(
@@ -141,6 +345,7 @@ def test_sensitive_rejection_is_safe_and_env_example_remains_allowed(tmp_path: P
     assert machine.exit_code == 1
     assert secret not in plain.stdout
     assert secret not in machine.stdout
+    assert "真实 .env" in plain.stdout
     assert any(item.endswith(":env") for item in json.loads(machine.stdout)["rejected"])
 
 
@@ -470,6 +675,54 @@ def test_pack_plan_rejects_same_size_source_change_after_confirmation_preview(
     assert not destination.exists()
 
 
+def test_pack_plan_change_has_structured_safe_context(tmp_path: Path) -> None:
+    source = tmp_path / "中文项目"
+    source.mkdir()
+    _project(source)
+    mutable = source / "mutable.txt"
+    mutable.write_text("AAAA", encoding="utf-8")
+    service = PackService()
+    plan = service.plan(source, destination=tmp_path / "交付.zip")
+    mutable.write_text("BBBB", encoding="utf-8")
+
+    with pytest.raises(PackServiceError) as caught:
+        service.pack_plan(plan)
+
+    assert caught.value.kind == "plan_changed"
+    assert caught.value.path == mutable.resolve()
+    assert caught.value.details == ("mutable.txt",)
+    message = cli_module._pack_failure_message(caught.value, source)
+    assert "mutable.txt" in message
+    assert str(source) not in message
+
+
+def test_pack_source_change_error_shows_only_safe_affected_path(tmp_path: Path) -> None:
+    source = tmp_path / "中文项目"
+    source.mkdir()
+    affected = source / "src" / "主程序.py"
+
+    error = PackServiceError(
+        "opaque",
+        kind="source_changed",
+        path=affected,
+    )
+    message = cli_module._pack_failure_message(error, source)
+
+    assert "src/主程序.py" in message
+    assert "opaque" not in message
+
+
+def test_zip_verification_failure_has_structured_kind(tmp_path: Path) -> None:
+    archive_path = tmp_path / "输入.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("unexpected.txt", "content")
+
+    with pytest.raises(PackServiceError) as caught:
+        PackService._verify(archive_path, ("expected.txt",))
+
+    assert caught.value.kind == "verify_failed"
+
+
 def test_force_refuses_symlink_or_directory_destination(tmp_path: Path) -> None:
     source = tmp_path / "project"
     source.mkdir()
@@ -492,6 +745,31 @@ def test_force_refuses_symlink_or_directory_destination(tmp_path: Path) -> None:
     with pytest.raises(PackServiceError):
         PackService().pack(source, destination=directory_destination, force=True)
     assert directory_destination.is_dir()
+
+
+def test_reparse_like_destination_parent_is_rejected_during_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "project"
+    source.mkdir()
+    _project(source)
+    junction_like = tmp_path / "junction-like"
+    junction_like.mkdir()
+    marker = junction_like.lstat()
+
+    def fake_is_reparse(metadata: object) -> bool:
+        return (
+            getattr(metadata, "st_dev", None) == marker.st_dev
+            and getattr(metadata, "st_ino", None) == marker.st_ino
+        )
+
+    monkeypatch.setattr(pack_service_module, "is_reparse_metadata", fake_is_reparse, raising=False)
+
+    with pytest.raises(PackServiceError) as caught:
+        PackService().plan(source, destination=junction_like)
+
+    assert caught.value.kind == "destination_unsafe"
 
 
 def test_failed_publish_keeps_existing_archive_and_cleans_temporary_output(

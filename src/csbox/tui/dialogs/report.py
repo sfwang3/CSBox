@@ -15,12 +15,14 @@ from csbox.core.text_layout import wrap_cells
 from csbox.evidence.exporter import ReportExportRequest
 from csbox.locales import Translator
 from csbox.report.models import MAX_REPORT_SECTIONS, ReportProfile, ReportSection
+from csbox.tui.help import HELP_BINDINGS
 
 
 class ReportExportOverwriteDialog(ModalScreen[bool]):
     """Require an explicit confirmation before refreshing an existing directory."""
 
     BINDINGS = [
+        *HELP_BINDINGS,
         Binding("escape", "cancel", "取消"),
         Binding("q", "cancel", "取消", show=False),
     ]
@@ -105,6 +107,7 @@ class ReportExportDialog(ModalScreen[ReportExportRequest | None]):
     """Collect a report destination and explicit overwrite choice."""
 
     BINDINGS = [
+        *HELP_BINDINGS,
         Binding("up", "focus_previous_control", "上一个控件", show=False, priority=True),
         Binding("down", "focus_next_control", "下一个控件", show=False, priority=True),
         Binding("escape", "cancel", "取消"),
@@ -262,6 +265,7 @@ class ReportProfileDialog(ModalScreen[ReportProfile | None]):
     """Edit a bounded report profile with one explicit save action."""
 
     BINDINGS = [
+        *HELP_BINDINGS,
         Binding("escape", "cancel", "取消"),
         Binding("ctrl+s", "save", "保存", show=False, priority=True),
     ]

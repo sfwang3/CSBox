@@ -18,13 +18,27 @@ from csbox import __version__
 from csbox.check.detectors import FileInventory
 from csbox.check.service import CheckService
 from csbox.config.loader import load_config
-from csbox.core.safe_paths import atomic_copy_file, safe_relative_path
+from csbox.core.safe_paths import atomic_copy_file, is_reparse_metadata, safe_relative_path
 from csbox.pack.filters import PackCandidate, PackFilter, PackSafetyError, PackSelection
 from csbox.pack.models import PackPlan, PackReport
 
 
 class PackServiceError(RuntimeError):
     """A safe package could not be produced."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: str = "pack_failed",
+        path: Path | str | None = None,
+        details: tuple[str, ...] = (),
+    ) -> None:
+        super().__init__(message)
+        self.user_message = message
+        self.kind = kind
+        self.path = None if path is None else Path(path)
+        self.details = tuple(details)
 
 
 _SAFE_REJECTION_CATEGORIES = frozenset({"env", "private-key", "hard-coded-secret"})
@@ -117,7 +131,16 @@ class PackService:
             exclude=plan.exclude,
         )
         if not _same_plan(current.plan, plan):
-            raise PackServiceError("打包计划已变化，请重新预览。")
+            changed_paths = _changed_source_paths(plan, current.plan)
+            affected_path = (
+                plan.source_root / changed_paths[0] if len(changed_paths) == 1 else plan.source_root
+            )
+            raise PackServiceError(
+                "打包计划已变化，请重新预览。",
+                kind="plan_changed",
+                path=affected_path,
+                details=changed_paths,
+            )
         return self._publish(current)
 
     def _build_plan(
@@ -151,7 +174,11 @@ class PackService:
         except PackServiceError:
             raise
         except (OSError, RuntimeError, ValueError, PackSafetyError):
-            raise PackServiceError("无法安全建立打包计划。") from None
+            raise PackServiceError(
+                "无法安全建立打包计划。",
+                kind="plan_failed",
+                path=Path(root),
+            ) from None
 
         candidates, extra_excluded, path_rejected = self._prepare_candidates(
             selection,
@@ -164,14 +191,19 @@ class PackService:
         rejected = list(selection.rejected)
         rejected.extend(path_rejected)
         rejected.extend(self._check_rejections(check_report, source_root))
-        if getattr(check_report, "exit_code", 1) != 0 and not rejected:
+        if self._check_report_is_unrepresented_failure(check_report) and not rejected:
             rejected.append("project:check-failed")
+        warnings = self._check_warnings(check_report, source_root)
 
         project_type, package_manager = self._project_metadata(check_report, source_root)
         included = [candidate.relative.as_posix() for candidate in candidates]
         if include_manifest:
             included.append("manifest.json")
         normalized_included = tuple(included)
+        source_fingerprint, source_file_fingerprints = _source_fingerprint_details(
+            inventory,
+            candidates,
+        )
         plan = PackPlan(
             source_root=source_root,
             destination=destination_path,
@@ -181,6 +213,7 @@ class PackService:
             included=normalized_included,
             excluded=tuple(sorted(set(excluded), key=_stable_text_key)),
             rejected=tuple(sorted(set(rejected), key=_stable_text_key)),
+            warnings=warnings,
             source_bytes=sum(candidate.size for candidate in candidates),
             include_manifest=include_manifest,
             verification_requested=verify,
@@ -188,8 +221,9 @@ class PackService:
             output_exists=_path_exists(destination_path),
             include=tuple(include),
             exclude=tuple(exclude),
-            source_fingerprint=_source_fingerprint(inventory, candidates),
         )
+        plan._source_fingerprint = source_fingerprint
+        plan._source_file_fingerprints = source_file_fingerprints
         return _PlanContext(plan=plan, inventory=inventory, candidates=tuple(candidates))
 
     @staticmethod
@@ -294,7 +328,12 @@ class PackService:
     @staticmethod
     def _check_rejections(report: object, root: Path) -> list[str]:
         rejected: list[str] = []
-        for finding in getattr(report, "findings", ()):
+        findings = list(getattr(report, "findings", ()))
+        deep_scan = getattr(report, "deep_scan", None)
+        if deep_scan is not None:
+            findings.append(deep_scan)
+        findings.extend(getattr(report, "builds", ()))
+        for finding in findings:
             raw_status = getattr(finding, "status", None)
             status = getattr(raw_status, "value", raw_status)
             if status != "FAIL":
@@ -309,6 +348,46 @@ class PackService:
             else:
                 rejected.append(f"{relative}:{category}")
         return rejected
+
+    @staticmethod
+    def _check_warnings(report: object, root: Path) -> tuple[str, ...]:
+        warnings: set[str] = set()
+        findings = list(getattr(report, "findings", ()))
+        deep_scan = getattr(report, "deep_scan", None)
+        if deep_scan is not None:
+            findings.append(deep_scan)
+        findings.extend(getattr(report, "builds", ()))
+        for finding in findings:
+            raw_status = getattr(finding, "status", None)
+            status = getattr(raw_status, "value", raw_status)
+            if status != "WARN":
+                continue
+            rule_id = str(getattr(finding, "rule_id", ""))
+            category = str(getattr(finding, "category", ""))
+            relative = _safe_finding_path(root, getattr(finding, "path", None))
+            location = relative or "项目范围"
+            if rule_id == "readme":
+                message = "缺少 README；建议在项目根目录添加 README.md。"
+            elif rule_id == "artifacts":
+                message = f"发现构建、缓存或日志产物（{location}），打包时会自动排除。"
+            elif rule_id == "large-file":
+                message = f"文件超过大小阈值（{location}）；请确认课程提交要求。"
+            elif category in {"windows-absolute-path", "unix-absolute-path"}:
+                message = f"发现本机绝对路径引用（{location}）；建议改用项目相对路径或环境变量。"
+            elif category in {"dirty", "untracked"} or rule_id == "git-status":
+                message = "Git 工作区存在未确认的变更；请检查提交内容。"
+            else:
+                message = f"检查项目发现一项提醒（{location}）；请运行 csbox check 查看原因和建议。"
+            warnings.add(message)
+        return tuple(sorted(warnings, key=_stable_text_key))
+
+    @staticmethod
+    def _check_report_is_unrepresented_failure(report: object) -> bool:
+        if getattr(report, "exit_code", 1) == 0:
+            return False
+        raw_status = getattr(report, "status", None)
+        status = getattr(raw_status, "value", raw_status)
+        return status not in {"PASS", "WARN", "SKIP"}
 
     @staticmethod
     def _project_metadata(report: object, root: Path) -> tuple[str, str | None]:
@@ -328,21 +407,57 @@ class PackService:
         except FileNotFoundError:
             return candidate
         except OSError:
-            raise PackServiceError("输出路径不可用。") from None
+            raise PackServiceError(
+                "输出路径不可用。",
+                kind="destination_unavailable",
+                path=candidate,
+            ) from None
+        if is_reparse_metadata(metadata):
+            raise PackServiceError(
+                "输出路径不可安全使用。",
+                kind="destination_unsafe",
+                path=candidate,
+            )
         if stat.S_ISLNK(metadata.st_mode):
-            raise PackServiceError("输出路径不可安全使用。")
+            raise PackServiceError(
+                "输出路径不可安全使用。",
+                kind="destination_unsafe",
+                path=candidate,
+            )
         if stat.S_ISDIR(metadata.st_mode):
             return candidate / self._filename()
         if not stat.S_ISREG(metadata.st_mode):
-            raise PackServiceError("输出路径不可安全使用。")
+            raise PackServiceError(
+                "输出路径不可安全使用。",
+                kind="destination_unsafe",
+                path=candidate,
+            )
         return candidate
 
     @staticmethod
     def _inspect_destination(destination: Path) -> None:
         current = destination.absolute()
+        destination_absolute = current
         while current != current.parent:
-            if current.is_symlink():
-                raise PackServiceError("输出路径不可安全使用。")
+            try:
+                metadata = current.lstat()
+            except FileNotFoundError:
+                current = current.parent
+                continue
+            except OSError:
+                raise PackServiceError(
+                    "输出路径不可用。",
+                    kind="destination_unavailable",
+                    path=destination,
+                ) from None
+            if is_reparse_metadata(metadata) or (
+                current != destination_absolute and not stat.S_ISDIR(metadata.st_mode)
+            ):
+                raise PackServiceError(
+                    "输出路径不可安全使用。",
+                    kind="destination_unsafe",
+                    path=destination,
+                )
             current = current.parent
         _path_exists(destination)
         try:
@@ -350,14 +465,26 @@ class PackService:
         except FileNotFoundError:
             return
         if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-            raise PackServiceError("输出路径不可安全使用。")
+            raise PackServiceError(
+                "输出路径不可安全使用。",
+                kind="destination_unsafe",
+                path=destination,
+            )
 
     def _publish(self, context: _PlanContext) -> PackReport:
         plan = context.plan
         if plan.rejected:
-            raise PackServiceError("项目包含敏感或不安全文件，已拒绝打包。")
+            raise PackServiceError(
+                "项目包含敏感或不安全文件，已拒绝打包。",
+                kind="content_rejected",
+                details=plan.rejected,
+            )
         if plan.output_exists and not plan.force:
-            raise PackServiceError("目标文件已存在，使用 --force 覆盖。")
+            raise PackServiceError(
+                "目标文件已存在，使用 --force 覆盖。",
+                kind="destination_exists",
+                path=plan.destination,
+            )
 
         temporary_archive: Path | None = None
         try:
@@ -415,14 +542,32 @@ class PackService:
         except PackServiceError:
             raise
         except FileExistsError:
-            raise PackServiceError("目标文件已存在，使用 --force 覆盖。") from None
+            raise PackServiceError(
+                "目标文件已存在，使用 --force 覆盖。",
+                kind="destination_exists",
+                path=plan.destination,
+            ) from None
+        except PermissionError:
+            raise PackServiceError(
+                "输出文件无法写入。",
+                kind="destination_permission",
+                path=plan.destination,
+            ) from None
         except (OSError, RuntimeError, ValueError, zipfile.BadZipFile, zipfile.LargeZipFile):
-            raise PackServiceError("打包失败，未发布输出文件。") from None
+            raise PackServiceError(
+                "打包失败，未发布输出文件。",
+                kind="publish_failed",
+                path=plan.destination,
+            ) from None
 
         try:
             archive_bytes = plan.destination.stat().st_size
         except OSError:
-            raise PackServiceError("打包失败，未找到已发布输出文件。") from None
+            raise PackServiceError(
+                "打包失败，未找到已发布输出文件。",
+                kind="publish_failed",
+                path=plan.destination,
+            ) from None
         return PackReport(
             source_root=plan.source_root,
             destination=plan.destination,
@@ -446,7 +591,11 @@ class PackService:
     ) -> tuple[str, int]:
         entry = candidate.entry or inventory.entry(candidate.relative)
         if entry is None:
-            raise PackServiceError("打包失败，源文件清单已变化。")
+            raise PackServiceError(
+                "打包失败，源文件清单已变化。",
+                kind="source_changed",
+                path=inventory.root / candidate.relative,
+            )
         digest = hashlib.sha256()
         size = 0
         try:
@@ -456,9 +605,17 @@ class PackService:
                     digest.update(chunk)
                     size += len(chunk)
         except (OSError, ValueError):
-            raise PackServiceError("打包失败，源文件在复制时发生变化。") from None
+            raise PackServiceError(
+                "打包失败，源文件在复制时发生变化。",
+                kind="source_changed",
+                path=inventory.root / candidate.relative,
+            ) from None
         if size != candidate.size:
-            raise PackServiceError("打包失败，源文件在复制时发生变化。")
+            raise PackServiceError(
+                "打包失败，源文件在复制时发生变化。",
+                kind="source_changed",
+                path=inventory.root / candidate.relative,
+            )
         return digest.hexdigest(), size
 
     @staticmethod
@@ -466,13 +623,21 @@ class PackService:
         try:
             safe_relative_path(name)
         except ValueError:
-            raise PackServiceError("ZIP 条目路径不安全。") from None
+            raise PackServiceError(
+                "ZIP 条目路径不安全。",
+                kind="content_rejected",
+                details=(f"{name}:path-unsafe",),
+            ) from None
         info = _zip_info(name)
         try:
             with source.open("rb") as input_file, archive.open(info, mode="w") as output:
                 shutil.copyfileobj(input_file, output, length=1024 * 1024)
         except (OSError, RuntimeError, ValueError):
-            raise PackServiceError("打包失败，无法写入 ZIP。") from None
+            raise PackServiceError(
+                "打包失败，无法写入 ZIP。",
+                kind="publish_failed",
+                path=Path(name),
+            ) from None
 
     def _filename(self) -> str:
         values = {
@@ -483,9 +648,13 @@ class PackService:
         try:
             rendered = self.filename_template.format(**values)
         except (KeyError, ValueError):
-            raise PackServiceError("pack 文件名模板无效。") from None
+            raise PackServiceError("pack 文件名模板无效。", kind="config_invalid") from None
         safe = _sanitize_filename(rendered)
         return safe if safe.casefold().endswith(".zip") else f"{safe}.zip"
+
+    @staticmethod
+    def _verification_error(message: str) -> PackServiceError:
+        return PackServiceError(message, kind="verify_failed")
 
     @staticmethod
     def _verify(
@@ -498,7 +667,7 @@ class PackService:
                 names = tuple(archive.namelist())
                 _validate_zip_names(names)
                 if names != expected:
-                    raise PackServiceError("ZIP 条目与打包计划不一致。")
+                    raise PackService._verification_error("ZIP 条目与打包计划不一致。")
                 records: dict[str, tuple[int, str]] = {}
                 raw_manifest = bytearray()
                 for name in names:
@@ -510,7 +679,9 @@ class PackService:
                             digest.update(chunk)
                             if name == "manifest.json":
                                 if len(raw_manifest) + len(chunk) > _MAX_MANIFEST_BYTES:
-                                    raise PackServiceError("manifest 超过校验大小上限。")
+                                    raise PackService._verification_error(
+                                        "manifest 超过校验大小上限。"
+                                    )
                                 raw_manifest.extend(chunk)
                     records[name] = (size, digest.hexdigest())
                 if manifest_payload is None:
@@ -520,30 +691,30 @@ class PackService:
                     parse_constant=_reject_json_constant,
                 )
                 if actual_manifest != manifest_payload:
-                    raise PackServiceError("manifest 校验失败。")
+                    raise PackService._verification_error("manifest 校验失败。")
                 files = actual_manifest.get("files") if isinstance(actual_manifest, dict) else None
                 if not isinstance(files, list):
-                    raise PackServiceError("manifest 文件清单无效。")
+                    raise PackService._verification_error("manifest 文件清单无效。")
                 expected_files = expected[:-1]
                 if [item.get("path") for item in files if isinstance(item, dict)] != list(
                     expected_files
                 ):
-                    raise PackServiceError("manifest 与 ZIP 条目不一致。")
+                    raise PackService._verification_error("manifest 与 ZIP 条目不一致。")
                 for item in files:
                     if not isinstance(item, dict):
-                        raise PackServiceError("manifest 文件清单无效。")
+                        raise PackService._verification_error("manifest 文件清单无效。")
                     name = item.get("path")
                     if not isinstance(name, str):
-                        raise PackServiceError("manifest 文件路径无效。")
+                        raise PackService._verification_error("manifest 文件路径无效。")
                     record = records.get(name)
                     if (
                         record is None
                         or item.get("size") != record[0]
                         or item.get("sha256") != record[1]
                     ):
-                        raise PackServiceError("manifest 文件摘要不一致。")
+                        raise PackService._verification_error("manifest 文件摘要不一致。")
         except (OSError, UnicodeError, json.JSONDecodeError, zipfile.BadZipFile):
-            raise PackServiceError("ZIP 校验失败。") from None
+            raise PackService._verification_error("ZIP 校验失败。") from None
 
 
 def _manifest_payload(plan: PackPlan, files: list[dict[str, object]]) -> dict[str, object]:
@@ -592,19 +763,19 @@ def _validate_zip_names(names: tuple[str, ...]) -> None:
     identities: list[str] = []
     for name in names:
         if not name or name.endswith("/"):
-            raise PackServiceError("ZIP 条目路径不安全。")
+            raise PackService._verification_error("ZIP 条目路径不安全。")
         try:
             normalized = safe_relative_path(name)
         except ValueError:
-            raise PackServiceError("ZIP 条目路径不安全。") from None
+            raise PackService._verification_error("ZIP 条目路径不安全。") from None
         identity = _path_identity_key(name)
         if normalized.as_posix() != name or not _is_portable_zip_path(name):
-            raise PackServiceError("ZIP 条目存在路径冲突。")
+            raise PackService._verification_error("ZIP 条目存在路径冲突。")
         identities.append(identity)
     identities.sort(key=lambda identity: tuple(identity.split("/")))
     for previous, current in zip(identities, identities[1:], strict=False):
         if current == previous or current.startswith(f"{previous}/"):
-            raise PackServiceError("ZIP 条目存在路径冲突。")
+            raise PackService._verification_error("ZIP 条目存在路径冲突。")
 
 
 _WINDOWS_RESERVED_BASENAMES = frozenset(
@@ -643,13 +814,14 @@ def _same_plan(left: PackPlan, right: PackPlan) -> bool:
         "excluded",
         "rejected",
         "source_bytes",
-        "source_fingerprint",
         "include_manifest",
         "output_exists",
         "include",
         "exclude",
     )
-    return all(getattr(left, field) == getattr(right, field) for field in fields)
+    return all(getattr(left, field) == getattr(right, field) for field in fields) and (
+        left._source_fingerprint == right._source_fingerprint
+    )
 
 
 def _safe_finding_path(root: Path, value: object) -> str | None:
@@ -673,7 +845,11 @@ def _path_exists(path: Path) -> bool:
     except FileNotFoundError:
         return False
     except OSError:
-        raise PackServiceError("输出路径不可用。") from None
+        raise PackServiceError(
+            "输出路径不可用。",
+            kind="destination_unavailable",
+            path=path,
+        ) from None
     return True
 
 
@@ -721,15 +897,20 @@ def _stable_text_key(value: str) -> tuple[str, str]:
     return value.casefold(), value
 
 
-def _source_fingerprint(
+def _source_fingerprint_details(
     inventory: FileInventory,
     candidates: list[PackCandidate],
-) -> str:
+) -> tuple[str, tuple[tuple[str, str], ...]]:
     digest = hashlib.sha256()
+    file_fingerprints: list[tuple[str, str]] = []
     for candidate in candidates:
         entry = candidate.entry or inventory.entry(candidate.relative)
         if entry is None:
-            raise PackServiceError("打包失败，源文件清单已变化。")
+            raise PackServiceError(
+                "打包失败，源文件清单已变化。",
+                kind="source_changed",
+                path=inventory.root / candidate.relative,
+            )
         fields = (
             candidate.relative.as_posix(),
             str(entry.size),
@@ -738,9 +919,30 @@ def _source_fingerprint(
             str(entry.mtime_ns),
             str(entry.ctime_ns),
         )
-        digest.update("\x00".join(fields).encode("utf-8"))
+        encoded = "\x00".join(fields).encode("utf-8")
+        digest.update(encoded)
         digest.update(b"\x00")
-    return digest.hexdigest()
+        file_fingerprints.append(
+            (candidate.relative.as_posix(), hashlib.sha256(encoded).hexdigest())
+        )
+    return digest.hexdigest(), tuple(file_fingerprints)
+
+
+def _changed_source_paths(left: PackPlan, right: PackPlan) -> tuple[str, ...]:
+    previous = dict(left._source_file_fingerprints)
+    current = dict(right._source_file_fingerprints)
+    if not previous and not current:
+        return ()
+    return tuple(
+        sorted(
+            {
+                path
+                for path in previous.keys() | current.keys()
+                if previous.get(path) != current.get(path)
+            },
+            key=_stable_text_key,
+        )
+    )
 
 
 def _reject_json_constant(value: str) -> None:

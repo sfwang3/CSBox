@@ -57,12 +57,12 @@ class ProjectCheckScreen(Screen[None]):
         findings_panel = self.query_one("#check-findings", CheckFindings)
         narrow_panel = self.query_one("#check-narrow", CheckFindings)
         findings_panel.update(self._findings(report_findings, self._content_width(findings_panel)))
-        projects = [f"PROJECTS ({len(self.report.projects)})"]
+        projects = [f"项目（{len(self.report.projects)}）"]
         projects.extend(
             _project_label(self.report.root, project) for project in self.report.projects
         )
         if self.report.builds:
-            projects.append("BUILDS")
+            projects.append("构建结果")
             projects.extend(
                 f"{build.adapter_id}: {build.status.value}  {build.message}"
                 for build in self.report.builds
@@ -77,7 +77,7 @@ class ProjectCheckScreen(Screen[None]):
         narrow_panel.update(self._findings(report_findings, self._content_width(narrow_panel)))
         self.query_one("#check-footer", CheckFooter).update(
             truncate_cells(
-                "Q/Esc 返回",
+                "Q/Esc 返回  ? 帮助",
                 self._content_width(self.query_one("#check-footer", CheckFooter)),
                 ellipsis="…",
             )
@@ -93,14 +93,14 @@ class ProjectCheckScreen(Screen[None]):
             ellipsis="…",
         )
         return (
-            f"CHECK  //  {root}\n"
-            f"STATUS: {self.report.status.value}    "
-            f"FINDINGS: {len(self.report.findings) + len(self._deep_findings())}    "
-            f"PROJECTS: {len(self.report.projects)}"
+            f"检查项目  //  {root}\n"
+            f"状态：{self.report.status.value}    "
+            f"提示：{len(self.report.findings) + len(self._deep_findings())}    "
+            f"项目：{len(self.report.projects)}"
         )
 
     def _findings(self, findings: tuple[CheckFinding, ...], width: int) -> str:
-        lines = ["FINDINGS"]
+        lines = ["检查结果"]
         if not any(finding.status in {CheckStatus.WARN, CheckStatus.FAIL} for finding in findings):
             lines.append("检查完成：未发现需要处理的问题。")
             if any(finding.status is CheckStatus.SKIP for finding in findings):

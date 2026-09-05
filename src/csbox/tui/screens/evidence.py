@@ -35,6 +35,7 @@ from csbox.tui.dialogs.confirm import ConfirmDialog
 from csbox.tui.dialogs.evidence import EvidenceItemDialog, EvidenceSetTitleDialog
 from csbox.tui.dialogs.report import ReportExportDialog, ReportProfileDialog
 from csbox.tui.dialogs.unavailable import UnavailableDialog
+from csbox.tui.help import HelpDialog
 from csbox.tui.screens.evidence_sources import EvidenceCaptureBrowserScreen
 from csbox.tui.screens.report import ReportExportResultScreen
 
@@ -326,6 +327,10 @@ class EvidenceSetEditorScreen(Screen[None]):
         self._report_export_set: EvidenceSet | None = None
         self._report_profile: ReportProfile | None = None
         self._focus_export_on_resume = False
+
+    @property
+    def is_working(self) -> bool:
+        return self._report_exporting
 
     def compose(self) -> ComposeResult:
         yield Vertical(
@@ -672,7 +677,7 @@ class EvidenceSetEditorScreen(Screen[None]):
                 self._report_exporting = False
                 self.status = self.locale("evidence.export.status.failed")
                 self._refresh()
-                self.app.push_screen(
+                self._push_report_result_after_help(
                     ReportExportResultScreen(
                         locale=self.locale,
                         error=ReportExportError(
@@ -737,7 +742,7 @@ class EvidenceSetEditorScreen(Screen[None]):
             self._report_exporting = False
             self.status = self.locale("evidence.export.status.failed")
             self._refresh()
-            self.app.push_screen(
+            self._push_report_result_after_help(
                 ReportExportResultScreen(
                     locale=self.locale,
                     error=error,
@@ -754,7 +759,7 @@ class EvidenceSetEditorScreen(Screen[None]):
                 "报告材料导出失败，未生成成功结果；请检查目标目录后重试。",
                 destination=request.destination,
             )
-            self.app.push_screen(
+            self._push_report_result_after_help(
                 ReportExportResultScreen(
                     locale=self.locale,
                     error=error,
@@ -766,12 +771,18 @@ class EvidenceSetEditorScreen(Screen[None]):
         self._report_exporting = False
         self.status = self.locale("evidence.export.status.complete")
         self._refresh()
-        self.app.push_screen(
+        self._push_report_result_after_help(
             ReportExportResultScreen(
                 locale=self.locale,
                 result=result,
             )
         )
+
+    def _push_report_result_after_help(self, result: ReportExportResultScreen) -> None:
+        if isinstance(self.app.screen, HelpDialog):
+            self.app.set_timer(0.05, lambda: self._push_report_result_after_help(result))
+            return
+        self.app.push_screen(result)
 
     def _report_phase_from_worker(self, phase: ReportExportPhase) -> None:
         self.app.call_from_thread(self._handle_report_phase, phase)
@@ -873,7 +884,7 @@ def _format_local_time(value: datetime | None) -> str:
 
 
 def _source_text(source: object) -> str:
-    return f"{source.source_type} / {source.session_id} / {source.capture_id}"
+    return f"实验记录 {source.session_id} / 关键画面 {source.capture_id}"
 
 
 def default_report_destination(project_dir: Path | str, evidence_set_id: str) -> Path:

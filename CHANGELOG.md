@@ -1,12 +1,12 @@
 # Changelog
 
-## 0.5.0.dev0
+## 0.5.0rc1
 
 - 完成 Lab Evidence、API Evidence、Project Check 和 Safe Pack 四条基础交付工作流。
 - 增加 Evidence Collection、Report Handoff 和 Course Report Formatting，支持按用户保存的结构导出 Markdown、DOCX 和图片材料。
 - 保持本地优先和学术诚信边界：CSBox 整理、格式化和导出用户撰写的材料，不生成实验分析、结论或课程答案。
 
-当前开发版本尚未发布到 PyPI。
+当前 Release Candidate 尚未发布到 PyPI。
 
 ## 0.3.0
 

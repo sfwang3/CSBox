@@ -18,7 +18,13 @@ from csbox.locales import load_locale
 from csbox.pack.models import PackReport
 from csbox.pack.service import PackService, PackServiceError
 from csbox.tui.app import CSBoxApp
-from csbox.tui.screens.pack import PackConfirmationScreen, PackOverwriteDialog, PackResultScreen
+from csbox.tui.screens.pack import (
+    PackConfirmationScreen,
+    PackOverwriteDialog,
+    PackResultScreen,
+    _is_conflict_error,
+    _is_plan_changed_error,
+)
 
 
 def _screen_text(screen: Any) -> str:
@@ -85,6 +91,7 @@ class PackPlan:
     included: tuple[str, ...] = ("README.md", "src/main.py")
     excluded: tuple[str, ...] = (".git:directory", ".env:pattern")
     rejected: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
     source_bytes: int = 128
     project_type: str = "python"
     destination: Path | None = None
@@ -174,6 +181,32 @@ async def test_pack_rejected_plan_has_actionable_error_and_never_leaks_values(
         assert "关键类型" in text
         assert "Enter" in text
         assert secret not in text
+
+
+@pytest.mark.asyncio
+async def test_pack_warning_is_visible_but_does_not_disable_publishing(tmp_path: Path) -> None:
+    plan = PackPlan(
+        tmp_path,
+        warnings=("缺少 README；建议在项目根目录添加 README.md。",),
+    )
+    app = CSBoxApp(
+        data_source=FakeHomeDataSource(),
+        environment=_environment(),
+        locale=load_locale(),
+        pack_plan_factory=lambda: plan,
+        pack_action=lambda _plan: None,
+    )
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.screen.query_one("#entry-pack").focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        text = _screen_text(app.screen)
+        assert "警告" in text
+        assert "缺少 README" in text
+        assert "不阻塞打包" in text
+        assert app.screen.query_one("#pack-confirm", Button).disabled is False
 
 
 @pytest.mark.asyncio
@@ -460,6 +493,47 @@ async def test_pack_race_conflict_opens_same_overwrite_recovery_dialog(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_source_plan_change_does_not_open_overwrite_recovery_loop(tmp_path: Path) -> None:
+    source = tmp_path / "project"
+    source.mkdir()
+    destination = tmp_path / "提交.zip"
+    destination.write_bytes(b"existing")
+    plan = PackPlan(source, destination=destination)
+    calls: list[object] = []
+
+    def fail_with_source_change(value: object) -> None:
+        calls.append(value)
+        raise PackServiceError(
+            "opaque",
+            kind="plan_changed",
+            path=source / "main.py",
+            details=("main.py",),
+        )
+
+    app = CSBoxApp(
+        data_source=FakeHomeDataSource(),
+        environment=_environment(),
+        locale=load_locale(),
+        pack_plan_factory=lambda destination=None: _destination_plan(plan, destination),
+        pack_action=fail_with_source_change,
+    )
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.screen.query_one("#entry-pack").focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.click("#pack-confirm")
+        await _wait_until(pilot, lambda: _pack_overwrite_dialog_ready(app))
+        await pilot.click("#pack-overwrite-confirm")
+        await _wait_until(pilot, lambda: bool(calls))
+        await _wait_until(pilot, lambda: isinstance(app.screen, PackConfirmationScreen))
+
+        assert "打包计划已变化" in _screen_text(app.screen)
+        assert not isinstance(app.screen, PackOverwriteDialog)
+
+
+@pytest.mark.asyncio
 async def test_real_pack_race_target_is_recoverable_with_exact_force_publish(
     tmp_path: Path,
 ) -> None:
@@ -726,6 +800,22 @@ async def test_pack_verification_failure_is_distinguished_from_publish_failure(
         assert "验证未通过" in text
         assert "未发布" in text
         assert not destination.exists()
+
+
+def test_pack_tui_prefers_structured_failure_kind_over_error_text(tmp_path: Path) -> None:
+    screen = PackConfirmationScreen(
+        PackPlan(tmp_path),
+        load_locale(),
+    )
+
+    message = screen._failure_message(PackServiceError("opaque", kind="verify_failed"))
+
+    assert "验证未通过" in message
+
+
+def test_pack_tui_uses_structured_kind_for_recovery_routing() -> None:
+    assert not _is_conflict_error(PackServiceError("目标文件已存在", kind="publish_failed"))
+    assert not _is_plan_changed_error(PackServiceError("打包计划已变化", kind="source_changed"))
 
 
 @pytest.mark.asyncio

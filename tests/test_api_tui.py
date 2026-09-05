@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -227,6 +228,30 @@ class _FailingExporter:
 class _MissingFontExporter:
     def export(self, *_args: object, **_kwargs: object) -> None:
         raise FontResolutionError("找不到支持中文的字体")
+
+
+class _BlockingExporter:
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def export(
+        self,
+        _run: ApiRun,
+        destination: Path,
+        *,
+        theme: str,
+        force: bool,
+    ) -> ApiExportResult:
+        del theme, force
+        self.started.set()
+        assert self.release.wait(timeout=5)
+        return ApiExportResult(
+            destination=destination,
+            evidence=(),
+            markdown=destination / "api-evidence.md",
+            results=destination / "results.json",
+        )
 
 
 @dataclass
@@ -858,6 +883,63 @@ async def test_api_export_dialog_supports_keyboard_submit_and_return(tmp_path: P
         await pilot.press("escape")
         await _wait_until(pilot, lambda: app.screen.name == "api")
         assert calls == [(tmp_path / "evidence", "dark", False)]
+
+
+@pytest.mark.asyncio
+async def test_api_export_keeps_api_screen_visible_while_worker_is_busy(tmp_path: Path) -> None:
+    repository = ApiRunRepository.from_cwd(tmp_path)
+    run = _run("20260811T080016-busybusybusy")
+    repository.save(run)
+    exporter = _BlockingExporter()
+    app = ApiApp(
+        repository,
+        ScenarioLoader(),
+        lambda: FakeRunner(run),
+        load_locale(),
+        exporter_factory=lambda: exporter,
+    )
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.screen.select_run(0)
+        await pilot.press("e")
+        await _wait_until(pilot, lambda: _api_export_dialog_ready(app))
+        await pilot.click("#api-export-submit")
+        await _wait_until(pilot, exporter.started.is_set)
+
+        await pilot.press("escape", "q")
+        await pilot.pause()
+        assert app.is_running
+        assert app.screen.name == "api"
+        assert app.screen.is_working
+        assert "正在导出 API 证据" in _screen_text(app.screen)
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert app.is_running
+        assert app.screen.name == "api"
+
+        exporter.release.set()
+        await _wait_until(pilot, lambda: _api_export_result_rendered(app), timeout=5.0)
+
+
+@pytest.mark.asyncio
+async def test_api_busy_return_preserves_non_export_operation_status(tmp_path: Path) -> None:
+    repository = ApiRunRepository.from_cwd(tmp_path)
+    app = ApiApp(repository, ScenarioLoader(), lambda: FakeRunner(_run("unused")), load_locale())
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        screen._busy = True
+        screen._refresh_status("正在导入 OpenAPI……")
+
+        await pilot.press("escape", "q")
+        await pilot.pause()
+
+        assert app.is_running
+        assert app.screen is screen
+        assert "正在导入 OpenAPI" in _screen_text(screen)
+        screen._busy = False
 
 
 @pytest.mark.asyncio

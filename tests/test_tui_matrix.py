@@ -25,7 +25,7 @@ from csbox.tui.app import ApiApp, CheckApp, CSBoxApp, ReviewApp
 from csbox.tui.dialogs.capture_title import CaptureTitleDialog
 from csbox.tui.dialogs.confirm import ConfirmDialog
 from csbox.tui.dialogs.lab_start import LabStartDialog
-from csbox.tui.dialogs.unavailable import UnavailableDialog
+from csbox.tui.help import HelpDialog
 from csbox.tui.lab_workflow import ShellOption
 from csbox.tui.screens.api import ApiScreen
 from csbox.tui.screens.home import HomeScreen
@@ -254,10 +254,11 @@ async def test_home_help_dialog_focuses_close_and_escape_returns_home(
         await pilot.pause()
         await pilot.press("f1")
         await pilot.pause()
-        assert isinstance(app.screen, UnavailableDialog)
+        assert isinstance(app.screen, HelpDialog)
+        assert app.screen.query_one("#help-close", Button).visible
         assert_visible_geometry(app.screen)
         assert app.screen.focused is not None
-        assert app.screen.focused.id == "dialog-close"
+        assert app.screen.focused.id == "help-close"
         assert SECRET not in screen_text(app.screen)
         await pilot.press("escape")
         await pilot.pause()

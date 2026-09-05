@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -8,6 +9,7 @@ from typing import Annotated
 
 import typer
 from rich.console import Console
+from typer.core import TyperCommand, TyperGroup
 
 from csbox import __version__
 from csbox.api.cli import api_app
@@ -26,16 +28,43 @@ from csbox.report.repository import ReportProfileRepository
 from csbox.report.service import default_report_profile
 
 _locale = load_locale()
+
+
+class _LocalizedHelpMixin:
+    def get_help_option(self, ctx: object):
+        option = super().get_help_option(ctx)  # type: ignore[misc]
+        if option is not None:
+            option.help = _locale("cli.help.option")
+        return option
+
+
+class _LocalizedHelpCommand(_LocalizedHelpMixin, TyperCommand):
+    pass
+
+
+class _LocalizedHelpGroup(_LocalizedHelpMixin, TyperGroup):
+    pass
+
+
 app = typer.Typer(
     add_completion=False,
     add_help_option=False,
+    cls=_LocalizedHelpGroup,
     help=_locale("cli.help"),
     invoke_without_command=True,
     name="csbox",
     no_args_is_help=False,
 )
-lab_app = typer.Typer(help="实验记录、回看和导出。", no_args_is_help=True)
-report_app = typer.Typer(help="课程报告格式化和导出。", no_args_is_help=True)
+lab_app = typer.Typer(
+    cls=_LocalizedHelpGroup,
+    help="实验记录、回看和导出实验材料。",
+    no_args_is_help=True,
+)
+report_app = typer.Typer(
+    cls=_LocalizedHelpGroup,
+    help="配置并导出用户提供的报告材料。",
+    no_args_is_help=True,
+)
 app.add_typer(lab_app, name="lab")
 app.add_typer(api_app, name="api")
 app.add_typer(report_app, name="report")
@@ -58,7 +87,11 @@ def _format_exception_chain(error: BaseException) -> str:
     seen: set[int] = set()
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        detail = str(current).strip()
+        keep_detail = isinstance(current, OSError) or any(
+            hasattr(current, attribute) for attribute in ("cause", "debug_context")
+        )
+        detail = str(current).strip() if keep_detail else ""
+        detail = _redact_debug_detail(detail)
         native_code = getattr(current, "winerror", None)
         if native_code is None:
             native_code = getattr(current, "errno", None)
@@ -68,7 +101,8 @@ def _format_exception_chain(error: BaseException) -> str:
             )
         debug_context = getattr(current, "debug_context", ())
         if debug_context:
-            detail = f"{detail} [{'; '.join(debug_context)}]"
+            safe_context = "; ".join(_redact_debug_detail(str(item)) for item in debug_context)
+            detail = f"{detail} [{safe_context}]"
         parts.append(f"{type(current).__name__}: {detail}" if detail else type(current).__name__)
 
         linked = getattr(current, "cause", None)
@@ -76,6 +110,19 @@ def _format_exception_chain(error: BaseException) -> str:
             linked = current.__cause__ or current.__context__
         current = linked
     return " -> ".join(parts)
+
+
+_DEBUG_INPUT_VALUE = re.compile(r"input_value=[^\r\n]*")
+_DEBUG_SECRET_ASSIGNMENT = re.compile(
+    r"(?i)(?<![a-z0-9_-])"
+    r"(?P<key>[a-z][a-z0-9_-]*(?:api[_-]?key|access[_-]?key|token|secret|password|passwd))"
+    r"\s*[:=]\s*(?:\"[^\r\n\"]*\"|'[^\r\n']*'|[^\s,;]+)"
+)
+
+
+def _redact_debug_detail(value: str) -> str:
+    value = _DEBUG_INPUT_VALUE.sub("input_value=<redacted>", value)
+    return _DEBUG_SECRET_ASSIGNMENT.sub(r"\g<key>=<redacted>", value)
 
 
 def _version_callback(value: bool) -> bool:
@@ -206,7 +253,7 @@ def _run_tui_workflow(
             )
 
 
-@app.command(help=_locale("cli.doctor.help"))
+@app.command(cls=_LocalizedHelpCommand, help=_locale("cli.doctor.help"))
 def doctor() -> None:
     translator = _locale
     environment = detect_environment()
@@ -214,8 +261,8 @@ def doctor() -> None:
     console.print(translator("doctor.title"))
     console.print(f"{translator('doctor.os')}: {environment.os_name} {environment.os_version}")
     console.print(f"{translator('doctor.python')}: {environment.python_version}")
-    shell_name = environment.shell or translator("doctor.unknown")
-    console.print(f"{translator('doctor.shell')}: {shell_name}")
+    shell_name = environment.shell or translator("doctor.host_unknown")
+    console.print(f"{translator('doctor.host_shell')}: {shell_name}")
     console.print(
         f"{translator('doctor.powershell51')}: "
         f"{_yes_no(translator, environment.powershell_51_available)}"
@@ -229,11 +276,20 @@ def doctor() -> None:
         f"{translator('doctor.terminal')}: "
         f"{environment.terminal_columns}×{environment.terminal_rows}"
     )
-    if (
-        environment.shell_executable
-        or environment.powershell_51_available
-        or environment.powershell_7_available
-    ):
+    available_shells, default_shell, can_start_lab, lab_detection_failed = (
+        _doctor_lab_shell_status()
+    )
+    console.print(
+        f"{translator('doctor.available_shells')}: "
+        f"{'、'.join(available_shells) if available_shells else translator('doctor.none')}"
+    )
+    console.print(
+        f"{translator('doctor.default_shell')}: {default_shell or translator('doctor.none')}"
+    )
+    console.print(f"{translator('doctor.lab')}: {_yes_no(translator, can_start_lab)}")
+    if lab_detection_failed:
+        console.print(translator("doctor.next.config"))
+    elif can_start_lab:
         console.print(translator("doctor.next.start"))
     elif environment.os_name == "Windows":
         console.print(translator("doctor.next.windows"))
@@ -241,7 +297,26 @@ def doctor() -> None:
         console.print(translator("doctor.next.unix"))
 
 
-@app.command("check", help="检查项目结构、敏感文件、Git 状态和可选构建。")
+def _doctor_lab_shell_status() -> tuple[tuple[str, ...], str | None, bool, bool]:
+    """Use Lab's launchability boundary for Doctor's shell claims."""
+
+    try:
+        profiles = tuple(create_lab_service().available_shells())
+    except Exception:
+        return (), None, False, True
+    available = tuple(
+        display_name
+        for profile in profiles
+        if (display_name := str(getattr(profile, "display_name", "")))
+    )
+    return available, (available[0] if available else None), bool(available), False
+
+
+@app.command(
+    "check",
+    cls=_LocalizedHelpCommand,
+    help="交作业前检查项目结构、敏感文件、状态和可选构建。",
+)
 def check_project(
     root: Path | None = typer.Argument(None, help="待检查的项目目录。"),  # noqa: B008
     plain: bool = typer.Option(False, "--plain", help="输出纯文本结果。"),
@@ -260,7 +335,7 @@ def check_project(
         report = create_check_service(project_root).run(project_root, **run_options)
     except Exception as error:
         _print_safe_failure(
-            "发生了什么：项目检查失败。在哪里：项目目录或检查规则。"
+            "发生了什么：检查项目失败。在哪里：项目目录或检查规则。"
             "怎么处理：检查路径、权限和配置后重试。",
             error,
             verbose=verbose,
@@ -444,7 +519,11 @@ def _check_json_payload(report) -> dict[str, object]:
     return payload
 
 
-@lab_app.command("list")
+@lab_app.command(
+    "list",
+    cls=_LocalizedHelpCommand,
+    help="列出本项目保存过的实验记录。",
+)
 def lab_list(
     json_output: bool = typer.Option(False, "--json", help="输出稳定 JSON。"),
 ) -> None:
@@ -492,7 +571,7 @@ def lab_list(
 
 def _format_lab_list_line(item: dict[str, object], width: int) -> str:
     prefix = f"{truncate_cells(str(item['id']), 12, ellipsis='…')}  "
-    summary = f"{item['status']}  Capture: {item['captures']}  {item['shell']}"
+    summary = f"{item['status']}  关键画面：{item['captures']}  {item['shell']}"
     fixed_width = display_width(prefix) + 2 + display_width(summary) + 2
     available = max(0, width - fixed_width)
     name_width = available // 2
@@ -502,7 +581,11 @@ def _format_lab_list_line(item: dict[str, object], width: int) -> str:
     return f"{prefix}{name}  {summary}  {cwd}"
 
 
-@lab_app.command("start")
+@lab_app.command(
+    "start",
+    cls=_LocalizedHelpCommand,
+    help="开始一次终端实验并记录过程。",
+)
 def lab_start(
     name: str | None = typer.Argument(None, help="实验名称。"),
     shell: str | None = typer.Option(None, "--shell", help="powershell、pwsh、bash 或 zsh。"),
@@ -573,7 +656,7 @@ def _lab_start_failure_message(error: BaseException) -> str:
     )
 
 
-@lab_app.command("_host", hidden=True)
+@lab_app.command("_host", cls=_LocalizedHelpCommand, hidden=True)
 def lab_host(
     intent: Annotated[Path, typer.Option("--intent", help="内部 dedicated-host intent。")],
     token: Annotated[str, typer.Option("--token", help="内部 dedicated-host token。")],
@@ -589,7 +672,11 @@ def lab_host(
     raise typer.Exit(code=return_code)
 
 
-@lab_app.command("export")
+@lab_app.command(
+    "export",
+    cls=_LocalizedHelpCommand,
+    help="导出实验记录中的关键画面和实验材料。",
+)
 def lab_export(
     session: str = typer.Argument(..., help="会话 ID 或唯一前缀。"),
     output: Annotated[Path | None, typer.Option("--output", help="导出目录。")] = None,
@@ -614,9 +701,13 @@ def lab_export(
     console.print(f"实验证据已导出：{result.destination}")
 
 
-@report_app.command("export")
+@report_app.command(
+    "export",
+    cls=_LocalizedHelpCommand,
+    help="导出证据集和用户提供的报告材料。",
+)
 def report_export(
-    evidence_set_id: str = typer.Argument(..., help="Evidence Set ID。"),
+    evidence_set_id: str = typer.Argument(..., help="证据集 ID。"),
     output: Annotated[Path | None, typer.Option("--output", help="报告输出目录。")] = None,
     force: Annotated[bool, typer.Option("--force", help="允许刷新已存在报告目录。")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", help="显示受控调试类型。")] = False,
@@ -643,7 +734,7 @@ def report_export(
     except Exception as error:
         _print_safe_failure(
             "发生了什么：课程报告导出失败。在哪里：报告结构、证据来源或输出目录。"
-            "怎么处理：检查 Evidence Set、报告配置和输出目录后重试。",
+            "怎么处理：检查证据集、报告配置和输出目录后重试。",
             error,
             verbose=verbose,
         )
@@ -652,10 +743,14 @@ def report_export(
     console.print(f"课程报告已导出：{result.destination}")
     console.print(f"Markdown：{result.markdown}")
     console.print(f"DOCX：{result.docx}")
-    console.print(f"Images：{len(result.images)}")
+    console.print(f"图片：{len(result.images)}")
 
 
-@lab_app.command("review")
+@lab_app.command(
+    "review",
+    cls=_LocalizedHelpCommand,
+    help="回看之前的终端实验并补充关键画面。",
+)
 def lab_review(
     session: str | None = typer.Argument(None, help="会话 ID 或唯一前缀；省略则打开最近会话。"),
 ) -> None:
@@ -682,7 +777,11 @@ def lab_review(
         raise typer.Exit(code=1) from error
 
 
-@app.command("pack", help="安全检查并打包项目文件。")
+@app.command(
+    "pack",
+    cls=_LocalizedHelpCommand,
+    help="检查项目并安全打包提交文件。",
+)
 def pack_project(
     root: Path | None = typer.Argument(None, help="待打包的项目目录。"),  # noqa: B008
     output: Annotated[
@@ -723,8 +822,7 @@ def pack_project(
             )
     except Exception as error:
         _print_safe_failure(
-            "发生了什么：项目打包失败。在哪里：打包计划或输出文件。"
-            "怎么处理：先处理项目检查失败项，再检查输出路径和权限后重试。",
+            _pack_failure_message(error, project_root),
             error,
             verbose=verbose,
         )
@@ -736,7 +834,7 @@ def pack_project(
             )
         else:
             _print_pack_plan(plan, project_root)
-        if plan.rejected or (plan.output_exists and not plan.force):
+        if not _pack_plan_can_publish(plan):
             raise typer.Exit(code=1)
         return
     if json_output:
@@ -758,6 +856,8 @@ def _pack_plan_payload(plan: object, root: Path) -> dict[str, object]:
     payload["mode"] = "dry-run"
     payload["source_root"] = "."
     payload["destination"] = _safe_pack_location(root, Path(payload["destination"]))
+    payload["can_publish"] = _pack_plan_can_publish(plan)
+    payload["blockers"] = _pack_plan_blockers(plan, root)
     return payload
 
 
@@ -783,13 +883,26 @@ def _safe_pack_location(root: Path, destination: Path) -> str:
 
 def _print_pack_plan(plan: object, root: Path) -> None:
     console = Console(markup=False)
+    warnings = tuple(getattr(plan, "warnings", ()))
     console.print("打包预览")
     console.print(f"项目：.  类型：{plan.project_type}")
     console.print(f"输出：{_safe_pack_location(root, plan.destination)}")
     console.print(
         f"included：{len(plan.included)}  excluded：{len(plan.excluded)}  "
-        f"rejected：{len(plan.rejected)}  源文件大小：{plan.source_bytes}"
+        f"rejected：{len(plan.rejected)}  warnings：{len(warnings)}  "
+        f"源文件大小：{plan.source_bytes}"
     )
+    if _pack_plan_can_publish(plan):
+        status = "状态：可以直接打包"
+        if warnings:
+            status += f"（有 {len(warnings)} 项警告；不阻塞打包）"
+        if bool(getattr(plan, "output_exists", False)):
+            status += "（将覆盖已有 ZIP）"
+        console.print(status)
+    else:
+        console.print("状态：暂时不能打包")
+        for blocker in _pack_plan_blockers(plan, root):
+            console.print(f"阻塞项：{blocker}")
     console.print("included:")
     for item in plan.included:
         console.print(f"  + {item}")
@@ -799,6 +912,215 @@ def _print_pack_plan(plan: object, root: Path) -> None:
     console.print("rejected:")
     for item in plan.rejected:
         console.print(f"  ! {item}")
+    console.print("warnings:")
+    for item in warnings:
+        console.print(f"  ? {item}")
+
+
+def _pack_plan_can_publish(plan: object) -> bool:
+    can_publish = getattr(plan, "can_publish", None)
+    if isinstance(can_publish, bool):
+        return can_publish
+    rejected = tuple(getattr(plan, "rejected", ()))
+    return not rejected and not (
+        bool(getattr(plan, "output_exists", False)) and not bool(getattr(plan, "force", False))
+    )
+
+
+def _pack_plan_blockers(plan: object, root: Path) -> list[str]:
+    blockers = [_safe_pack_blocker(root, item) for item in getattr(plan, "rejected", ())]
+    if bool(getattr(plan, "output_exists", False)) and not bool(getattr(plan, "force", False)):
+        blockers.append(f"目标文件已存在：{_safe_pack_location(root, Path(plan.destination))}")
+    return blockers
+
+
+_SAFE_PACK_RULES = frozenset(
+    {
+        "env",
+        "private-key",
+        "hard-coded-secret",
+        "unsafe-path",
+        "path-unsafe",
+        "path-conflict",
+        "check-failed",
+    }
+)
+_SAFE_PACK_RULE_LABELS = {
+    "env": "真实 .env",
+    "private-key": "私钥",
+    "hard-coded-secret": "硬编码 secret",
+    "unsafe-path": "不安全路径",
+    "path-unsafe": "不安全路径",
+    "path-conflict": "路径冲突",
+    "check-failed": "检查项目",
+}
+
+
+def _pack_failure_message(error: Exception, root: Path) -> str:
+    kind = getattr(error, "kind", None)
+    if kind in {None, "pack_failed"}:
+        if isinstance(error, FileExistsError):
+            kind = "destination_exists"
+        elif isinstance(error, PermissionError):
+            kind = "destination_permission"
+        detail = str(error)
+        if kind == "pack_failed" and "目标文件已存在" in detail:
+            kind = "destination_exists"
+        elif kind == "pack_failed" and (
+            "敏感或不安全" in detail
+            or "ZIP 条目路径不安全" in detail
+            or "ZIP 条目存在路径冲突" in detail
+        ):
+            kind = "content_rejected"
+        elif kind == "pack_failed" and (
+            "ZIP 校验" in detail or "ZIP 条目" in detail or "manifest" in detail
+        ):
+            kind = "verify_failed"
+        elif kind == "pack_failed" and "输出路径不可安全使用" in detail:
+            kind = "destination_unsafe"
+        elif kind == "pack_failed" and "输出路径不可用" in detail:
+            kind = "destination_unavailable"
+        elif kind == "pack_failed" and "输出文件无法写入" in detail:
+            kind = "destination_permission"
+        elif kind == "pack_failed" and "打包计划已变化" in detail:
+            kind = "plan_changed"
+        elif kind == "pack_failed" and ("源文件清单" in detail or "源文件在复制" in detail):
+            kind = "source_changed"
+        elif kind == "pack_failed" and "无法安全建立打包计划" in detail:
+            kind = "plan_failed"
+        elif kind == "pack_failed" and "pack 文件名模板无效" in detail:
+            kind = "config_invalid"
+        elif kind == "pack_failed" and (
+            "打包失败，无法写入 ZIP" in detail or "未发布输出文件" in detail
+        ):
+            kind = "publish_failed"
+
+    if kind == "destination_exists":
+        path = _pack_error_location(root, getattr(error, "path", None))
+        return (
+            "发生了什么：目标文件已存在。\n"
+            "具体原因：默认不会覆盖已有 ZIP。\n"
+            f"影响位置：{path}\n"
+            "下一步：使用 --force 覆盖，或修改 --output 后重试。"
+        )
+    if kind == "content_rejected":
+        details = tuple(getattr(error, "details", ()))
+        lines = [
+            f"发生了什么：无法打包：发现 {len(details) or 1} 个阻塞项。",
+            "具体原因：安全检查拒绝了敏感或不安全内容。",
+            "影响位置：",
+        ]
+        if details:
+            lines.extend(f"- {_safe_pack_blocker(root, item)}" for item in details[:8])
+        else:
+            lines.append("- 项目内安全检查")
+        lines.append("下一步：先处理这些检查项，再重新预览并打包。")
+        return "\n".join(lines)
+    if kind == "verify_failed":
+        return (
+            "发生了什么：ZIP 已生成但验证未通过。\n"
+            "具体原因：ZIP 内容与打包计划不一致。\n"
+            "影响位置：临时交付文件未发布。\n"
+            "下一步：检查项目内容后重新预览并打包。"
+        )
+    if kind == "destination_unavailable":
+        path = _pack_error_location(root, getattr(error, "path", None))
+        return (
+            "发生了什么：输出路径不可用。\n"
+            "具体原因：无法访问输出目录或检查目标文件。\n"
+            f"影响位置：{path}\n"
+            "下一步：检查目录是否存在、权限是否足够，或换一个输出路径后重试。"
+        )
+    if kind == "destination_unsafe":
+        path = _pack_error_location(root, getattr(error, "path", None))
+        return (
+            "发生了什么：输出目标不能安全使用。\n"
+            "具体原因：目标是符号链接、特殊文件或经过了不安全的路径。\n"
+            f"影响位置：{path}\n"
+            "下一步：换一个普通 ZIP 文件路径后重试。"
+        )
+    if kind == "destination_permission":
+        path = _pack_error_location(root, getattr(error, "path", None))
+        return (
+            "发生了什么：无法写入 ZIP。\n"
+            "具体原因：输出目录或目标文件权限不足。\n"
+            f"影响位置：{path}\n"
+            "下一步：检查输出目录权限，或换一个可写路径后重试。"
+        )
+    if kind == "plan_changed":
+        details = tuple(getattr(error, "details", ()))
+        changed = tuple(
+            location
+            for item in details
+            if (location := _safe_relative_location(root, str(item))) is not None
+        )
+        if changed:
+            affected = ", ".join(changed[:8])
+            if len(changed) > 8:
+                affected += f" 等 {len(changed)} 项"
+        else:
+            affected = _pack_error_location(root, getattr(error, "path", None))
+        return (
+            "发生了什么：打包计划已变化。\n"
+            "具体原因：预览后项目文件或输出设置发生了变化。\n"
+            f"影响位置：{affected}\n"
+            "下一步：重新运行打包预览，确认计划后再发布。"
+        )
+    if kind == "source_changed":
+        path = _pack_error_location(root, getattr(error, "path", None))
+        return (
+            "发生了什么：源文件在打包时发生变化。\n"
+            "具体原因：文件清单或文件内容与预览时不一致。\n"
+            f"影响位置：{path}\n"
+            "下一步：停止正在修改项目的程序，重新预览并打包。"
+        )
+    if kind == "plan_failed":
+        path = _pack_error_location(root, getattr(error, "path", root))
+        return (
+            "发生了什么：无法建立安全的打包计划。\n"
+            "具体原因：项目目录或打包规则检查未完成。\n"
+            f"影响位置：{path}\n"
+            "下一步：检查项目路径、权限和配置后重新运行 --dry-run。"
+        )
+    if kind == "config_invalid":
+        return (
+            "发生了什么：输出文件名配置无效。\n"
+            "具体原因：文件名模板无法生成安全的 ZIP 文件名。\n"
+            "影响位置：打包配置。\n"
+            "下一步：修正配置中的 pack 文件名模板后重试。"
+        )
+    if kind == "publish_failed":
+        path = _pack_error_location(root, getattr(error, "path", None))
+        return (
+            "发生了什么：打包内容已准备，但 ZIP 未能发布。\n"
+            "具体原因：写入或替换输出文件时发生系统错误。\n"
+            f"影响位置：{path}\n"
+            "下一步：检查输出目录权限和磁盘空间，或换一个输出路径后重试。"
+        )
+    return (
+        "发生了什么：项目打包失败，未完成。\n"
+        "具体原因：未能生成并发布 ZIP。\n"
+        "影响位置（在哪里）：输出文件未发布。\n"
+        "下一步（怎么处理）：检查项目内容、输出目录权限和磁盘空间后重试。"
+    )
+
+
+def _pack_error_location(root: Path, value: object) -> str:
+    if value is None:
+        return "输出文件"
+    return _safe_pack_location(root, Path(str(value)))
+
+
+def _safe_pack_blocker(root: Path, value: object) -> str:
+    text = str(value)
+    path_text, separator, rule = text.rpartition(":")
+    if not separator or rule not in _SAFE_PACK_RULES:
+        return "项目内安全检查阻塞项"
+    if path_text == "project":
+        location = "项目范围"
+    else:
+        location = _safe_relative_location(root, Path(path_text)) or "项目内路径"
+    return f"{location}（{_SAFE_PACK_RULE_LABELS.get(rule, f'规则：{rule}')}）"
 
 
 def main() -> None:

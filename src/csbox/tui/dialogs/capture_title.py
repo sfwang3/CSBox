@@ -6,19 +6,20 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static
 
 from csbox.locales import Translator
+from csbox.tui.help import HELP_BINDINGS
 
 
 class CaptureTitleDialog(ModalScreen[str | None]):
     """Ask for a Capture title without putting input parsing in the TUI screen."""
 
-    BINDINGS = [("escape", "cancel", "取消")]
+    BINDINGS = [*HELP_BINDINGS, ("escape", "cancel", "取消")]
 
     def __init__(
         self,
         *,
         locale: Translator,
         title: str = "",
-        heading: str = "Capture 标题",
+        heading: str = "关键画面标题",
     ) -> None:
         super().__init__()
         self.locale = locale

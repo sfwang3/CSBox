@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from textual.app import ComposeResult
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.events import Resize
 from textual.widgets import Button, Static
 
 from csbox.api.redaction import Redactor
 from csbox.core.display_width import truncate_cells
 from csbox.core.models import HomeSnapshot
+from csbox.core.text_layout import wrap_cells
 from csbox.locales import Translator
 from csbox.tui.lab_workflow import HomeNotice
 
@@ -19,6 +20,9 @@ ACTION_DEFINITIONS = (
     ("pack", "home.entry.pack"),
     ("api", "home.entry.api"),
 )
+ACTION_DESCRIPTION_KEYS = {
+    action_id: f"{label_key}.description" for action_id, label_key in ACTION_DEFINITIONS
+}
 _HOME_REDACTOR = Redactor.with_configured_values(())
 
 
@@ -43,12 +47,38 @@ class ActionPanel(Vertical):
     def compose(self) -> ComposeResult:
         yield Static(self.locale("home.entries.title"), classes="panel-title", markup=False)
         for action_id, label_key in ACTION_DEFINITIONS:
-            yield Button(
-                self.locale(label_key),
-                id=f"entry-{action_id}",
-                classes="entry-button",
-                variant="primary" if action_id == "start" else "default",
+            yield Horizontal(
+                Button(
+                    self.locale(label_key),
+                    id=f"entry-{action_id}",
+                    classes="entry-button",
+                    variant="primary" if action_id == "start" else "default",
+                ),
+                ActionDescription(
+                    self.locale(ACTION_DESCRIPTION_KEYS[action_id]),
+                    classes="entry-description",
+                ),
+                classes="entry-card",
             )
+
+
+class ActionDescription(Static):
+    """Keep each short Home purpose line within its display-cell width."""
+
+    def __init__(self, value: str, **kwargs: object) -> None:
+        super().__init__(value, markup=False, **kwargs)
+        self._value = value
+
+    def on_mount(self) -> None:
+        self._refresh_text()
+
+    def on_resize(self, event: Resize) -> None:
+        del event
+        self._refresh_text()
+
+    def _refresh_text(self) -> None:
+        width = max(2, self.content_region.width or 32)
+        self.update("\n".join(wrap_cells(self._value, width)))
 
 
 class ProjectPanel(Vertical):

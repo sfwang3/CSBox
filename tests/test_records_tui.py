@@ -374,9 +374,9 @@ async def test_records_render_all_lifecycle_shell_and_capture_summaries(tmp_path
                 "Windows PowerShell 5.1",
                 "Bash",
                 "Zsh",
-                "Capture 6",
-                "Capture 3",
-                "Capture 1",
+                "关键画面 6",
+                "关键画面 3",
+                "关键画面 1",
             ):
                 assert expected in text
     finally:

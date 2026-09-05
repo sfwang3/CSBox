@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import typer
+from typer.core import TyperCommand, TyperGroup
 
 from csbox.api.errors import ApiConfigError, ApiDomainError, ApiPersistenceError, ApiTransportError
 from csbox.api.evidence import ApiEvidenceBuilder
@@ -30,8 +31,28 @@ from csbox.core.display_width import truncate_cells
 from csbox.core.schema import with_schema_version
 from csbox.locales import load_locale
 
+_locale = load_locale()
+
+
+class _LocalizedHelpMixin:
+    def get_help_option(self, ctx: object):
+        option = super().get_help_option(ctx)  # type: ignore[misc]
+        if option is not None:
+            option.help = _locale("cli.help.option")
+        return option
+
+
+class _LocalizedHelpCommand(_LocalizedHelpMixin, TyperCommand):
+    pass
+
+
+class _LocalizedHelpGroup(_LocalizedHelpMixin, TyperGroup):
+    pass
+
+
 api_app = typer.Typer(
-    help="接口测试场景、运行记录和证据导出。",
+    cls=_LocalizedHelpGroup,
+    help="API 实验：场景、运行记录和证据导出。",
     invoke_without_command=True,
     no_args_is_help=False,
 )
@@ -64,7 +85,11 @@ def _api_default(ctx: typer.Context) -> None:
     ).run()
 
 
-@api_app.command("list", help="列出当前项目已保存的接口测试运行记录。")
+@api_app.command(
+    "list",
+    cls=_LocalizedHelpCommand,
+    help="列出当前项目已保存的 API 实验运行记录。",
+)
 def list_runs(
     plain: Annotated[bool, typer.Option("--plain", help="输出中文纯文本结果。")] = False,
     json_output: Annotated[bool, typer.Option("--json", help="输出稳定 JSON 结果。")] = False,
@@ -143,7 +168,11 @@ def api_list_json_payload(summaries: Iterable[ApiRunSummary]) -> dict[str, objec
     )
 
 
-@api_app.command("import", help="从 OpenAPI 3.0/3.1 生成静态 TOML 场景模板。")
+@api_app.command(
+    "import",
+    cls=_LocalizedHelpCommand,
+    help="从 OpenAPI 3.0/3.1 生成 API 实验场景模板。",
+)
 def import_openapi(
     openapi_path: Annotated[Path, typer.Argument(help="OpenAPI JSON 或 YAML 文件。")],
     output: Annotated[Path, typer.Option("--output", help="生成场景模板的目录。")] = Path(
@@ -236,7 +265,11 @@ def api_import_json_payload(files: Iterable[Path]) -> dict[str, object]:
     return with_schema_version({"files": [path.as_posix() for path in files]})
 
 
-@api_app.command("export", help="导出已保存 API 运行的 PNG、Markdown 和 JSON 证据。")
+@api_app.command(
+    "export",
+    cls=_LocalizedHelpCommand,
+    help="导出已保存 API 运行的 PNG、Markdown 和 JSON 证据。",
+)
 def export_evidence(
     run: Annotated[str, typer.Argument(help="运行 ID 或唯一前缀。")],
     output: Annotated[Path, typer.Option("--output", help="证据输出目录。")] = Path("evidence"),
@@ -273,7 +306,7 @@ def export_evidence(
         raise typer.Exit(code=3) from None
     except Exception:
         error = ApiPersistenceError(
-            "发生了什么：API Evidence 导出失败。"
+            "发生了什么：API 证据导出失败。"
             "在哪里：PNG、Markdown 或 JSON 输出。"
             "怎么处理：检查输出目录、字体和写入权限后重试；"
             "并发冲突文件会保留为同目录 .csbox-recovery-*.bak。"
@@ -294,7 +327,11 @@ def export_evidence(
         typer.echo(render_export_plain(exported))
 
 
-@api_app.command("run", help="运行一个 TOML 接口测试场景。")
+@api_app.command(
+    "run",
+    cls=_LocalizedHelpCommand,
+    help="运行一个 TOML API 实验场景。",
+)
 def run_scenario(
     scenario_path: Annotated[Path, typer.Argument(help="待运行的场景 TOML 文件。")],
     variables: Annotated[

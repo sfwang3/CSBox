@@ -9,7 +9,7 @@ from typer.testing import CliRunner
 
 from csbox.cli.main import app
 from csbox.core.models import EnvironmentSnapshot
-from csbox.core.shell import BashProfile
+from csbox.core.shell import BashProfile, PowerShell7Profile, PowerShell51Profile
 from csbox.core.terminal import TerminalBackendError
 from csbox.lab.models import SessionPaths
 from csbox.lab.proxy import TerminalCleanupError
@@ -279,9 +279,12 @@ def test_doctor_prints_the_requested_chinese_environment_checks() -> None:
     for label in (
         "操作系统",
         "Python 版本",
-        "当前 Shell",
+        "宿主 Shell",
         "Windows PowerShell 5.1",
         "PowerShell 7",
+        "可用实验 Shell",
+        "默认实验 Shell",
+        "可以开始实验",
         "处于 WSL",
         "终端尺寸",
     ):
@@ -303,6 +306,104 @@ def test_doctor_has_friendly_shell_labels_and_next_step(
     assert "直接运行 csbox" in result.stdout
 
 
+def test_doctor_unknown_host_shell_is_truthful_and_actionable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = EnvironmentSnapshot(
+        os_name="Windows",
+        os_version="10.0",
+        python_version="3.12.3",
+        shell="",
+        shell_executable=None,
+        powershell_51_available=True,
+        powershell_7_available=True,
+        is_wsl=False,
+        terminal_columns=120,
+        terminal_rows=30,
+    )
+    monkeypatch.setattr(cli_module, "detect_environment", lambda: environment)
+
+    class FakeLabService:
+        def available_shells(self) -> tuple[object, ...]:
+            return (PowerShell7Profile, PowerShell51Profile)
+
+    monkeypatch.setattr(cli_module, "create_lab_service", lambda: FakeLabService())
+
+    result = runner.invoke(app, ["doctor"])
+
+    assert result.exit_code == 0
+    assert "宿主 Shell: 未能可靠识别" in result.stdout
+    assert "不影响 CSBox 使用" in result.stdout
+    assert "当前 Shell: · 未知" not in result.stdout
+    assert "可用实验 Shell: PowerShell 7、Windows PowerShell 5.1" in result.stdout
+    assert "默认实验 Shell: PowerShell 7" in result.stdout
+    assert "可以开始实验: ● 是" in result.stdout
+    assert "可以开始实验" in result.stdout
+
+
+def test_doctor_uses_lab_shell_order_for_default_experiment_shell(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = EnvironmentSnapshot(
+        os_name="Windows",
+        os_version="10.0",
+        python_version="3.12.3",
+        shell="",
+        shell_executable=None,
+        powershell_51_available=True,
+        powershell_7_available=True,
+        is_wsl=False,
+        terminal_columns=120,
+        terminal_rows=30,
+    )
+    monkeypatch.setattr(cli_module, "detect_environment", lambda: environment)
+
+    class FakeLabService:
+        def available_shells(self) -> tuple[object, ...]:
+            return (PowerShell51Profile, PowerShell7Profile)
+
+    monkeypatch.setattr(cli_module, "create_lab_service", lambda: FakeLabService())
+
+    result = runner.invoke(app, ["doctor"])
+
+    assert result.exit_code == 0
+    assert "可用实验 Shell: Windows PowerShell 5.1、PowerShell 7" in result.stdout
+    assert "默认实验 Shell: Windows PowerShell 5.1" in result.stdout
+    assert "可以开始实验: ● 是" in result.stdout
+
+
+def test_doctor_does_not_report_lab_ready_for_unlaunchable_shells(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = EnvironmentSnapshot(
+        os_name="Windows",
+        os_version="10.0",
+        python_version="3.12.3",
+        shell="",
+        shell_executable=None,
+        powershell_51_available=False,
+        powershell_7_available=True,
+        is_wsl=False,
+        terminal_columns=120,
+        terminal_rows=30,
+    )
+    monkeypatch.setattr(cli_module, "detect_environment", lambda: environment)
+
+    class FakeLabService:
+        def available_shells(self) -> tuple[object, ...]:
+            return ()
+
+    monkeypatch.setattr(cli_module, "create_lab_service", lambda: FakeLabService())
+
+    result = runner.invoke(app, ["doctor"])
+
+    assert result.exit_code == 0
+    assert "可用实验 Shell: 无" in result.stdout
+    assert "默认实验 Shell: 无" in result.stdout
+    assert "可以开始实验: ○ 否" in result.stdout
+    assert "未找到可用的 PowerShell" in result.stdout
+
+
 def test_doctor_no_shell_prints_installation_guidance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -319,6 +420,12 @@ def test_doctor_no_shell_prints_installation_guidance(
         terminal_rows=24,
     )
     monkeypatch.setattr(cli_module, "detect_environment", lambda: environment)
+
+    class FakeLabService:
+        def available_shells(self) -> tuple[object, ...]:
+            return ()
+
+    monkeypatch.setattr(cli_module, "create_lab_service", lambda: FakeLabService())
 
     result = runner.invoke(app, ["doctor"])
 
@@ -397,6 +504,26 @@ def test_root_help_names_evidence_and_report_handoff_surface() -> None:
 
     assert result.exit_code == 0
     assert "整理证据" in result.stdout
-    assert "Evidence Collection" in result.stdout
+    assert "报告材料" in result.stdout
     assert "csbox report" in result.stdout
-    assert "课程报告格式化和导出" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    (
+        (("--help",), "整理证据"),
+        (("lab", "--help"), "实验记录"),
+        (("api", "--help"), "API 实验"),
+        (("check", "--help"), "检查项目"),
+        (("pack", "--help"), "安全打包"),
+        (("report", "--help"), "报告材料"),
+    ),
+)
+def test_cli_help_uses_beginner_terms_and_localizes_help_option(
+    args: tuple[str, ...], expected: str
+) -> None:
+    result = runner.invoke(app, list(args))
+
+    assert result.exit_code == 0
+    assert expected in result.stdout
+    assert "Show this message and exit" not in result.stdout

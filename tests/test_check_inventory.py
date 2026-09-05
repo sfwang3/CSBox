@@ -422,10 +422,11 @@ def test_inventory_does_not_follow_directory_replaced_by_a_symlink(
 
     monkeypatch.setattr(detectors.os, "open", replacing_open)
 
-    inventory = FileInventory.build(tmp_path)
+    with pytest.raises(OSError):
+        FileInventory.build(tmp_path)
 
     assert replaced is True
-    assert all("escaped.txt" not in entry.relative.as_posix() for entry in inventory.files)
+    assert (outside / "escaped.txt").is_file()
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO is not available on this platform")
