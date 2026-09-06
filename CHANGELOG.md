@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.1
+
+- **Lab & Review:** record a continuous terminal session, capture point-in-time evidence with F12, and review, edit, delete, or export completed records.
+- **Evidence & Reports:** organize canonical Capture sources into Evidence Sets and export user-provided material as Markdown, DOCX, and image assets without generating coursework.
+- **Check & Safe Pack:** inspect project structure and delivery risks, keep WARN findings visible and non-blocking, and build verified ZIPs with fail-closed inventory and ownership protections.
+- **Beginner TUI & Help:** make Home, Help, Lab, Records, Evidence, Check, Pack, Report, and API workflows discoverable with consistent terminology and keyboard guidance.
+- **Documentation & Installation:** provide aligned English and Simplified Chinese guidance, current UI screenshots, and installable wheel/sdist artifacts for Python 3.11+.
+- **Windows / Reliability:** validate the supported Windows terminal, PowerShell, ConPTY, CJK layout, and cross-platform packaging paths in automated CI.
+
+This version is not published to PyPI.
+
 ## 0.5.0rc1
 
 - 完成 Lab Evidence、API Evidence、Project Check 和 Safe Pack 四条基础交付工作流。

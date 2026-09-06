@@ -8,9 +8,9 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
-[![CI](https://img.shields.io/github/actions/workflow/status/sfwang3/CSBox/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/sfwang3/CSBox/actions/workflows/ci.yml) [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/) [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-2ea44f?style=flat-square)](LICENSE) [![0.5.0rc1](https://img.shields.io/badge/version-0.5.0rc1-informational?style=flat-square)](CHANGELOG.md)
+[![CI](https://img.shields.io/github/actions/workflow/status/sfwang3/CSBox/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/sfwang3/CSBox/actions/workflows/ci.yml) [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/) [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-2ea44f?style=flat-square)](LICENSE) [![0.5.1](https://img.shields.io/badge/version-0.5.1-informational?style=flat-square)](CHANGELOG.md)
 
-**0.5.0rc1 · Release Candidate · 尚未发布到 PyPI**
+**0.5.1 · 尚未发布到 PyPI**
 
 </div>
 
@@ -45,19 +45,19 @@ CSBox 是一套面向计算机专业学生的本地优先工具：把上机实�
 
 ### 安装：当前真正可行的路径
 
-当前 Release Candidate **尚未发布到 PyPI**，暂时没有公开索引安装命令。
+当前版本 **尚未发布到 PyPI**，暂时没有公开索引安装命令。
 
 #### 普通用户：安装本地 wheel
 
-如果课程老师或项目维护者提供了 `csbox-0.5.0rc1-py3-none-any.whl` 文件，可以用 `uv` 安装这个本地文件：
+如果课程老师或项目维护者提供了 `csbox-0.5.1-py3-none-any.whl` 文件，可以用 `uv` 安装这个本地文件：
 
 ```bash
-uv tool install /path/to/csbox-0.5.0rc1-py3-none-any.whl
+uv tool install /path/to/csbox-0.5.1-py3-none-any.whl
 cd path/to/your-course-project
 csbox
 ```
 
-候选版目前没有公开发布。如果你手上没有本地 wheel 或源码 checkout，今天还没有可以直接复制的普通用户安装路径。
+当前版本没有公开发布。如果你手上没有本地 wheel 或源码 checkout，今天还没有可以直接复制的普通用户安装路径。
 
 #### 贡献者：从源码 checkout 运行
 
@@ -83,16 +83,46 @@ Home → 开始实验 → 输入名称 → 在终端中操作 → F12 → 输入
 
 ```console
 $ csbox --version
-0.5.0rc1
+0.5.1
 ```
 
 ## 看看当前界面
 
-下面是当前 Textual 界面使用确定性合成 fixture 生成的截图，不是概念图或 mockup。
+下面三张截图按新手路径排列：先从 Home 选择要做的事，再进入真实终端记录，最后回看已保存的结果。截图来自当前 Textual 界面的确定性合成 fixture；fixture 数据是演示用的，界面不是概念图或 mockup。
 
-| Home | 全局帮助 | 回看 |
-| --- | --- | --- |
-| [![Home](docs/assets/readme/home.png)](docs/assets/readme/home.png) | [![帮助](docs/assets/readme/help.png)](docs/assets/readme/help.png) | [![回看](docs/assets/readme/review.png)](docs/assets/readme/review.png) |
+### 1. 从 Home 开始
+
+Home 是选择当前任务的入口：开始实验、查看记录、整理证据、记录 API 实验、检查项目或准备 ZIP。
+
+<p align="center">
+  <a href="docs/assets/readme/home.png">
+    <img src="docs/assets/readme/home.png" alt="CSBox Home，展示主要任务入口" width="100%">
+  </a>
+</p>
+
+### 2. 回看已保存的结果
+
+回看会重新播放已结束的终端记录，并允许你在需要的位置补充命名后的关键画面；这些结果可以继续整理到证据和报告材料中。
+
+<p align="center">
+  <a href="docs/assets/readme/review.png">
+    <img src="docs/assets/readme/review.png" alt="CSBox 回看界面，展示可回放记录和命名后的关键画面" width="100%">
+  </a>
+</p>
+
+### 需要全局帮助时
+
+在 Home 按 <kbd>?</kbd> 或 <kbd>F1</kbd> 打开可滚动的产品使用地图。它说明应该选择哪个入口以及 CSBox 能做什么；因为内容密度较高，这里把它作为下面的补充参考。
+
+<details>
+<summary>展开查看完整的全局帮助截图</summary>
+
+<p align="center">
+  <a href="docs/assets/readme/help.png">
+    <img src="docs/assets/readme/help.png" alt="CSBox 全局帮助弹窗，展示新手使用地图" width="100%">
+  </a>
+</p>
+</details>
 
 运行 `uv run --with cairosvg python docs/tests/tooling/generate_readme_screenshots.py` 可重新生成。
 

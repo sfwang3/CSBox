@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import tempfile
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,6 +27,22 @@ from csbox.tui.screens.review import ReviewController
 
 ROOT = Path(__file__).resolve().parents[3]
 OUTPUT = ROOT / "docs" / "assets" / "readme"
+HOME_SIZE = (120, 43)
+REVIEW_SIZE = (120, 35)
+
+
+@contextmanager
+def screenshot_color_environment():
+    """Keep terminal-only NO_COLOR settings out of public screenshot assets."""
+
+    previous = os.environ.pop("NO_COLOR", None)
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("NO_COLOR", None)
+        else:
+            os.environ["NO_COLOR"] = previous
 
 
 class DemoHomeDataSource(FakeHomeDataSource):
@@ -49,7 +67,7 @@ def environment() -> EnvironmentSnapshot:
         powershell_7_available=False,
         is_wsl=False,
         terminal_columns=120,
-        terminal_rows=35,
+        terminal_rows=HOME_SIZE[1],
     )
 
 
@@ -60,7 +78,17 @@ def make_review_session(root: Path) -> SessionPaths:
         "\n".join(
             [
                 json.dumps({"version": 3, "term": {"cols": 48, "rows": 8}}),
-                json.dumps([0.2, "o", "课程项目实验\r\n$ python check.py\r\nPASS: 3 checks\r\n"]),
+                json.dumps(
+                    [
+                        0.2,
+                        "o",
+                        "课程项目实验\r\n"
+                        "$ python check.py\r\n"
+                        "checking files...\r\n"
+                        "checking captures...\r\n"
+                        "PASS: 3 checks\r\n",
+                    ]
+                ),
                 json.dumps([0.8, "o", "$ echo 关键画面已保存\r\n关键画面已保存\r\n"]),
                 json.dumps([0.5, "o", "$ exit\r\n"]),
                 json.dumps([0.5, "x", "0"]),
@@ -83,7 +111,7 @@ def make_review_session(root: Path) -> SessionPaths:
                 "initialRows": 8,
                 "initialColumns": 48,
                 "cwd": "/tmp/csbox-readme-demo/课程项目",
-                "csboxVersion": "0.5.0rc1",
+                "csboxVersion": "0.5.1",
             }
         ),
         encoding="utf-8",
@@ -149,14 +177,17 @@ def write_png(app: CSBoxApp | ReviewApp, destination: Path) -> None:
 async def render() -> None:
     OUTPUT.mkdir(parents=True, exist_ok=True)
     locale = load_locale()
-    with tempfile.TemporaryDirectory(prefix="csbox-readme-demo-") as temporary:
+    with (
+        screenshot_color_environment(),
+        tempfile.TemporaryDirectory(prefix="csbox-readme-demo-") as temporary,
+    ):
         fixture_root = Path(temporary)
         home = CSBoxApp(
             data_source=DemoHomeDataSource(),
             environment=environment(),
             locale=locale,
         )
-        async with home.run_test(size=(120, 35)) as pilot:
+        async with home.run_test(size=HOME_SIZE) as pilot:
             await pilot.pause()
             write_png(home, OUTPUT / "home.png")
             await pilot.press("?")
@@ -167,7 +198,7 @@ async def render() -> None:
             controller=ReviewController.from_session(make_review_session(fixture_root)),
             locale=locale,
         )
-        async with review.run_test(size=(120, 35)) as pilot:
+        async with review.run_test(size=REVIEW_SIZE) as pilot:
             await pilot.pause()
             await pilot.press("right")
             await pilot.pause()

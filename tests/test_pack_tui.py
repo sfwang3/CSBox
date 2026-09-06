@@ -525,7 +525,9 @@ async def test_source_plan_change_does_not_open_overwrite_recovery_loop(tmp_path
         await pilot.pause()
         await pilot.click("#pack-confirm")
         await _wait_until(pilot, lambda: _pack_overwrite_dialog_ready(app))
-        await pilot.click("#pack-overwrite-confirm")
+        overwrite_button = app.screen.query_one("#pack-overwrite-confirm", Button)
+        overwrite_button.focus()
+        await pilot.press("enter")
         await _wait_until(pilot, lambda: bool(calls))
         await _wait_until(pilot, lambda: isinstance(app.screen, PackConfirmationScreen))
 

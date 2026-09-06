@@ -187,7 +187,7 @@ UnavailableDialog {
 
 HelpDialog {
     align: center middle;
-    background: rgba(0, 0, 0, 0.72);
+    background: #08111a;
 }
 
 #help-dialog {
@@ -232,7 +232,7 @@ HelpDialog {
 }
 
 #help-close:focus {
-    border: tall #f0bd60;
+    border: round #f0bd60;
 }
 
 #help-footer {

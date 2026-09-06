@@ -8,9 +8,9 @@ Record terminal work, keep evidence reviewable, and hand in a checked project bu
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
-[![CI](https://img.shields.io/github/actions/workflow/status/sfwang3/CSBox/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/sfwang3/CSBox/actions/workflows/ci.yml) [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/) [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-2ea44f?style=flat-square)](LICENSE) [![0.5.0rc1](https://img.shields.io/badge/version-0.5.0rc1-informational?style=flat-square)](CHANGELOG.md)
+[![CI](https://img.shields.io/github/actions/workflow/status/sfwang3/CSBox/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/sfwang3/CSBox/actions/workflows/ci.yml) [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/) [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-2ea44f?style=flat-square)](LICENSE) [![0.5.1](https://img.shields.io/badge/version-0.5.1-informational?style=flat-square)](CHANGELOG.md)
 
-**0.5.0rc1 · release candidate · not published to PyPI**
+**0.5.1 · not published to PyPI**
 
 </div>
 
@@ -43,19 +43,19 @@ On Home, use <kbd>↑</kbd>/<kbd>↓</kbd> or <kbd>Tab</kbd> to move, press <kbd
 
 ### Installation: what works today
 
-This release candidate is **not on PyPI**. There is no public-index install command yet.
+This release is **not on PyPI**. There is no public-index install command yet.
 
 #### Ordinary users: install a local wheel
 
-If a course staff member or project maintainer gives you a `csbox-0.5.0rc1-py3-none-any.whl` file, install that local file with `uv`:
+If a course staff member or project maintainer gives you a `csbox-0.5.1-py3-none-any.whl` file, install that local file with `uv`:
 
 ```bash
-uv tool install /path/to/csbox-0.5.0rc1-py3-none-any.whl
+uv tool install /path/to/csbox-0.5.1-py3-none-any.whl
 cd path/to/your-course-project
 csbox
 ```
 
-The candidate is not publicly published yet. If you do not have a local wheel or source checkout, there is no ordinary-user install route to copy today.
+This version is not publicly published yet. If you do not have a local wheel or source checkout, there is no ordinary-user install route to copy today.
 
 #### Contributors: run from a source checkout
 
@@ -80,16 +80,46 @@ For diagnostics, `csbox --help`, `csbox --version`, and `csbox doctor` are avail
 
 ```console
 $ csbox --version
-0.5.0rc1
+0.5.1
 ```
 
 ## See the current UI
 
-These are current Textual renders from deterministic synthetic fixtures, not concept art or mockups.
+The screenshots below follow the beginner path: start from Home, record work in a real terminal, and then review a saved result. They are current Textual renders from deterministic synthetic fixtures—not concept art or mockups.
 
-| Home | Global help | Review |
-| --- | --- | --- |
-| [![Home](docs/assets/readme/home.png)](docs/assets/readme/home.png) | [![Help](docs/assets/readme/help.png)](docs/assets/readme/help.png) | [![Review](docs/assets/readme/review.png)](docs/assets/readme/review.png) |
+### 1. Start at Home
+
+Home is where you choose what you are doing now: start a lab, revisit a record, organize evidence, run an API experiment, check a project, or prepare a ZIP.
+
+<p align="center">
+  <a href="docs/assets/readme/home.png">
+    <img src="docs/assets/readme/home.png" alt="CSBox Home showing the main task entry points" width="100%">
+  </a>
+</p>
+
+### 2. Review a saved result
+
+Review replays an ended terminal session and lets you add named Captures at the moments you need. The saved result can then continue into evidence and report materials.
+
+<p align="center">
+  <a href="docs/assets/readme/review.png">
+    <img src="docs/assets/readme/review.png" alt="CSBox Review showing a replayable session and named Captures" width="100%">
+  </a>
+</p>
+
+### Need the global help?
+
+Press <kbd>?</kbd> or <kbd>F1</kbd> from Home to open the scrollable product map. It explains which entry to choose and what CSBox does; because it is a dense reference page, it is kept as a supplementary view below.
+
+<details>
+<summary>Open the full Global Help screenshot</summary>
+
+<p align="center">
+  <a href="docs/assets/readme/help.png">
+    <img src="docs/assets/readme/help.png" alt="CSBox Global Help dialog with the beginner product map" width="100%">
+  </a>
+</p>
+</details>
 
 Regenerate them with `uv run --with cairosvg python docs/tests/tooling/generate_readme_screenshots.py`.
 

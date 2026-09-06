@@ -188,6 +188,24 @@ async def test_home_question_mark_opens_scrollable_beginner_help_and_restores_fo
 
 
 @pytest.mark.asyncio
+async def test_help_backdrop_hides_underlying_panel_borders() -> None:
+    app = _app()
+
+    async with app.run_test(size=(120, 35)) as pilot:
+        await pilot.pause()
+        await pilot.press("?")
+        await pilot.pause()
+
+        assert app.screen.styles.background.a == 1
+        layout = app.screen._compositor.render_update(
+            full=True,
+            screen_stack=app._background_screens,
+            simplify=False,
+        )
+        assert all("─" not in strip.text[98:118] for strip in layout.strips)
+
+
+@pytest.mark.asyncio
 async def test_f1_is_a_help_alias_and_contextual_help_explains_lab_records() -> None:
     app = _app()
 
