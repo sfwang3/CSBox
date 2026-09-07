@@ -304,7 +304,15 @@ async def test_pack_malformed_plan_result_restores_retry_state(tmp_path: Path) -
         await pilot.press("enter")
         await _wait_until(pilot, lambda: isinstance(app.screen, PackConfirmationScreen))
 
-        app.screen.query_one("#pack-destination-input", Input).value = str(destination)
+        destination_input = app.screen.query_one("#pack-destination-input", Input)
+        await _wait_until(
+            pilot,
+            lambda: (
+                isinstance(app.screen, PackConfirmationScreen)
+                and app.screen.focused is destination_input
+            ),
+        )
+        destination_input.value = str(destination)
         await pilot.press("enter")
         await _wait_until(
             pilot,
@@ -339,11 +347,12 @@ async def test_pack_overwrite_confirmation_is_single_use(tmp_path: Path) -> None
 
         confirmation.action_confirm()
         confirmation.action_confirm()
-        await pilot.pause()
-        overwrite_screens = [
-            screen for screen in app.screen_stack if isinstance(screen, PackOverwriteDialog)
-        ]
-        assert len(overwrite_screens) == 1
+        await _wait_until(
+            pilot,
+            lambda: (
+                sum(isinstance(screen, PackOverwriteDialog) for screen in app.screen_stack) == 1
+            ),
+        )
 
         await _wait_until(
             pilot,
@@ -356,7 +365,16 @@ async def test_pack_overwrite_confirmation_is_single_use(tmp_path: Path) -> None
                 )
             ),
         )
-        await pilot.click("#pack-overwrite-confirm")
+        overwrite_dialog = app.screen
+        confirm_button = overwrite_dialog.query_one("#pack-overwrite-confirm", Button)
+        await _wait_until(
+            pilot,
+            lambda: (
+                isinstance(app.screen, PackOverwriteDialog) and app.screen.focused is confirm_button
+            ),
+        )
+        assert await pilot.click("#pack-overwrite-confirm")
+        await _wait_until(pilot, lambda: confirmation.is_working)
         await _wait_until(pilot, lambda: pack.started.is_set())
         assert pack.calls == 1
         assert "已取消覆盖" not in str(confirmation.query_one("#pack-status", Static).renderable)

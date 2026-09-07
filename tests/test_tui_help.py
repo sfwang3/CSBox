@@ -6,6 +6,7 @@ import re
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from time import monotonic
 from types import SimpleNamespace
 
 import pytest
@@ -36,6 +37,15 @@ from csbox.tui.screens.records import ExportRequest, RecordsScreen
 from csbox.tui.screens.review import ReviewController, ReviewScreen
 
 LAYOUTS = ((80, 24), (100, 30), (120, 35), (160, 45))
+
+
+async def _wait_until(pilot: object, predicate, *, timeout: float = 5.0) -> None:
+    deadline = monotonic() + timeout
+    while monotonic() < deadline:
+        if predicate():
+            return
+        await pilot.pause()
+    assert predicate()
 
 
 def _environment() -> EnvironmentSnapshot:
@@ -349,9 +359,12 @@ async def test_f1_works_in_api_quick_create_while_question_mark_remains_text() -
         await pilot.pause()
         dialog = ApiQuickCreateDialog(locale=load_locale())
         app.push_screen(dialog)
-        await pilot.pause()
+        await _wait_until(
+            pilot,
+            lambda: bool(tuple(dialog.query("#api-quick-create-name"))),
+        )
         name_input = dialog.query_one("#api-quick-create-name", Input)
-        assert dialog.focused is name_input
+        await _wait_until(pilot, lambda: dialog.focused is name_input)
 
         await pilot.press("?")
         assert name_input.value == "?"
@@ -359,10 +372,11 @@ async def test_f1_works_in_api_quick_create_while_question_mark_remains_text() -
         await pilot.pause()
         assert isinstance(app.screen, HelpDialog)
         await pilot.press("escape")
-        await pilot.pause()
-        assert app.screen is dialog
+        await _wait_until(
+            pilot,
+            lambda: app.screen is dialog and dialog.focused is name_input,
+        )
         assert name_input.value == "?"
-        assert dialog.focused is name_input
 
 
 @pytest.mark.asyncio
