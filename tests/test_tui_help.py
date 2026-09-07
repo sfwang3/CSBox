@@ -6,7 +6,6 @@ import re
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from time import monotonic
 from types import SimpleNamespace
 
 import pytest
@@ -35,17 +34,17 @@ from csbox.tui.screens.api import ApiScreen
 from csbox.tui.screens.home import HomeScreen
 from csbox.tui.screens.records import ExportRequest, RecordsScreen
 from csbox.tui.screens.review import ReviewController, ReviewScreen
+from tui_harness import (
+    wait_for_busy,
+    wait_for_focus,
+    wait_for_rendered,
+    wait_for_screen,
+    wait_for_widget,
+    wait_for_worker_start,
+)
+from tui_harness import wait_until as _wait_until
 
 LAYOUTS = ((80, 24), (100, 30), (120, 35), (160, 45))
-
-
-async def _wait_until(pilot: object, predicate, *, timeout: float = 5.0) -> None:
-    deadline = monotonic() + timeout
-    while monotonic() < deadline:
-        if predicate():
-            return
-        await pilot.pause()
-    assert predicate()
 
 
 def _environment() -> EnvironmentSnapshot:
@@ -356,26 +355,19 @@ async def test_f1_works_in_api_quick_create_while_question_mark_remains_text() -
     app = _app()
 
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await wait_for_screen(pilot, app, "home")
         dialog = ApiQuickCreateDialog(locale=load_locale())
         app.push_screen(dialog)
-        await _wait_until(
-            pilot,
-            lambda: bool(tuple(dialog.query("#api-quick-create-name"))),
-        )
-        name_input = dialog.query_one("#api-quick-create-name", Input)
-        await _wait_until(pilot, lambda: dialog.focused is name_input)
+        name_input = await wait_for_widget(pilot, dialog, "#api-quick-create-name")
+        await wait_for_focus(pilot, app, name_input)
 
         await pilot.press("?")
         assert name_input.value == "?"
         await pilot.press("f1")
-        await pilot.pause()
-        assert isinstance(app.screen, HelpDialog)
+        await wait_for_screen(pilot, app, HelpDialog)
         await pilot.press("escape")
-        await _wait_until(
-            pilot,
-            lambda: app.screen is dialog and dialog.focused is name_input,
-        )
+        await wait_for_screen(pilot, app, "api-quick-create")
+        await wait_for_focus(pilot, app, name_input)
         assert name_input.value == "?"
 
 
@@ -729,9 +721,10 @@ async def test_api_help_is_blocked_before_export_worker_starts(tmp_path: Path) -
     api = _api_screen(tmp_path, lambda: export)
 
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await wait_for_screen(pilot, app, "home")
         app.push_screen(api)
-        await pilot.pause()
+        await wait_for_screen(pilot, app, ApiScreen)
+        await wait_for_widget(pilot, api, "#api-status")
         api.selected_run = _api_run_stub()  # type: ignore[assignment]
         api._handle_export_request(  # type: ignore[attr-defined]
             ApiExportRequest(destination=tmp_path / "api-exported")
@@ -741,13 +734,10 @@ async def test_api_help_is_blocked_before_export_worker_starts(tmp_path: Path) -
         app.action_show_help()
         assert app.screen is api
 
-        await _wait_for_event(pilot, export.started)
+        await wait_for_worker_start(pilot, export.started.is_set)
         export.release.set()
-        for _ in range(100):
-            if app.screen.name == "api-export-result":
-                break
-            await pilot.pause()
-        assert app.screen.name == "api-export-result"
+        await wait_for_screen(pilot, app, "api-export-result")
+        await wait_for_rendered(pilot, app.screen, "#api-export-result-body")
 
 
 @pytest.mark.asyncio
@@ -756,26 +746,21 @@ async def test_api_export_failure_waits_for_help_to_close(tmp_path: Path) -> Non
     api = _api_screen(tmp_path, _FailingApiExport)
 
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await wait_for_screen(pilot, app, "home")
         app.push_screen(api)
-        await pilot.pause()
+        await wait_for_screen(pilot, app, ApiScreen)
+        await wait_for_widget(pilot, api, "#api-status")
         api.selected_run = _api_run_stub()  # type: ignore[assignment]
         await pilot.press("?")
-        await pilot.pause()
-        assert isinstance(app.screen, HelpDialog)
+        await wait_for_screen(pilot, app, HelpDialog)
 
         api._handle_export_request(  # type: ignore[attr-defined]
             ApiExportRequest(destination=tmp_path / "api-exported")
         )
-        for _ in range(100):
-            if not api.is_working:
-                break
-            await pilot.pause()
+        await wait_for_busy(pilot, api, True)
+        await _wait_until(pilot, lambda: not api.is_working)
         assert isinstance(app.screen, HelpDialog)
 
         await pilot.press("escape")
-        for _ in range(100):
-            if app.screen.name == "api-export":
-                break
-            await pilot.pause()
-        assert app.screen.name == "api-export"
+        await wait_for_screen(pilot, app, "api-export")
+        await wait_for_widget(pilot, app.screen, "#api-export-destination")

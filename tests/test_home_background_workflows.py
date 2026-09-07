@@ -3,10 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
-from time import monotonic
 
 import pytest
-from textual.widgets import Button, Input, Static
+from textual.widgets import Button, Static
 
 from csbox.check.models import CheckReport
 from csbox.core.models import EnvironmentSnapshot
@@ -17,6 +16,19 @@ from csbox.tui.app import CSBoxApp
 from csbox.tui.dialogs.unavailable import UnavailableDialog
 from csbox.tui.screens.pack import PackConfirmationScreen, PackOverwriteDialog
 from csbox.tui.screens.project_check import ProjectCheckScreen
+from tui_harness import (
+    focus_and_press,
+    wait_for_busy,
+    wait_for_disabled,
+    wait_for_focus,
+    wait_for_rendered,
+    wait_for_screen,
+    wait_for_widget,
+    wait_for_worker_start,
+)
+from tui_harness import (
+    wait_until as _wait_until,
+)
 
 
 def _environment() -> EnvironmentSnapshot:
@@ -44,15 +56,6 @@ def _app(tmp_path: Path, **kwargs: object) -> CSBoxApp:
         locale=load_locale(),
         **kwargs,
     )
-
-
-async def _wait_until(pilot: object, predicate, *, timeout: float = 5.0) -> None:
-    deadline = monotonic() + timeout
-    while monotonic() < deadline:
-        if predicate():
-            return
-        await pilot.pause()
-    assert predicate()
 
 
 @dataclass
@@ -201,24 +204,22 @@ async def test_home_pack_shows_working_state_and_ignores_duplicate_submission(
     app = _app(tmp_path, pack_plan_factory=factory)
 
     async with app.run_test(size=(100, 30)) as pilot:
-        await _wait_until(pilot, lambda: app.screen.name == "home")
-        pack_button = app.screen.query_one("#entry-pack", Button)
-        pack_button.focus()
-        await pilot.press("enter")
+        await wait_for_screen(pilot, app, "home")
+        await focus_and_press(pilot, app, "#entry-pack")
+        await wait_for_worker_start(pilot, factory.started.is_set)
         await _wait_until(
             pilot,
             lambda: (
-                factory.started.is_set()
-                and "正在准备打包"
+                "正在准备打包"
                 in str(app.screen.query_one("#home-workflow-status", Static).renderable)
             ),
         )
-        assert pack_button.disabled is True
+        await wait_for_disabled(pilot, app.screen, "#entry-pack", True)
         await pilot.press("enter")
         assert factory.calls == 1
 
         factory.release.set()
-        await _wait_until(pilot, lambda: isinstance(app.screen, PackConfirmationScreen))
+        await wait_for_screen(pilot, app, PackConfirmationScreen)
 
 
 @pytest.mark.asyncio
@@ -227,14 +228,14 @@ async def test_home_pack_malformed_initial_plan_is_recoverable(tmp_path: Path) -
     app = _app(tmp_path, pack_plan_factory=factory)
 
     async with app.run_test(size=(100, 30)) as pilot:
-        await _wait_until(pilot, lambda: app.screen.name == "home")
-        pack_button = app.screen.query_one("#entry-pack", Button)
-        pack_button.focus()
-        await pilot.press("enter")
-        await _wait_until(pilot, lambda: factory.started.is_set())
+        home = await wait_for_screen(pilot, app, "home")
+        pack_button = await wait_for_widget(pilot, home, "#entry-pack")
+        await focus_and_press(pilot, app, "#entry-pack")
+        await wait_for_worker_start(pilot, factory.started.is_set)
 
         factory.release.set()
-        await _wait_until(pilot, lambda: isinstance(app.screen, UnavailableDialog))
+        await wait_for_screen(pilot, app, UnavailableDialog)
+        await wait_for_disabled(pilot, home, "#entry-pack", False)
         assert pack_button.disabled is False
 
 
@@ -255,12 +256,12 @@ async def test_pack_destination_plan_rebuild_is_background_and_duplicate_safe(
     app = _app(tmp_path, pack_plan_factory=plan_factory)
 
     async with app.run_test(size=(100, 30)) as pilot:
-        await _wait_until(pilot, lambda: app.screen.name == "home")
-        app.screen.query_one("#entry-pack", Button).focus()
-        await pilot.press("enter")
-        await _wait_until(pilot, lambda: isinstance(app.screen, PackConfirmationScreen))
+        await wait_for_screen(pilot, app, "home")
+        await focus_and_press(pilot, app, "#entry-pack")
+        await wait_for_screen(pilot, app, PackConfirmationScreen)
 
-        destination_input = app.screen.query_one("#pack-destination-input", Input)
+        destination_input = await wait_for_widget(pilot, app.screen, "#pack-destination-input")
+        await wait_for_focus(pilot, app, destination_input)
         destination_input.value = str(destination)
         await pilot.press("enter")
         await _wait_until(
@@ -271,7 +272,7 @@ async def test_pack_destination_plan_rebuild_is_background_and_duplicate_safe(
                 in str(app.screen.query_one("#pack-status", Static).renderable)
             ),
         )
-        assert app.screen.query_one("#pack-confirm", Button).disabled is True
+        await wait_for_disabled(pilot, app.screen, "#pack-confirm", True)
         await pilot.press("enter")
         assert planner.calls == 1
 
@@ -299,19 +300,12 @@ async def test_pack_malformed_plan_result_restores_retry_state(tmp_path: Path) -
     app = _app(tmp_path, pack_plan_factory=plan_factory)
 
     async with app.run_test(size=(100, 30)) as pilot:
-        await _wait_until(pilot, lambda: app.screen.name == "home")
-        app.screen.query_one("#entry-pack", Button).focus()
-        await pilot.press("enter")
-        await _wait_until(pilot, lambda: isinstance(app.screen, PackConfirmationScreen))
+        await wait_for_screen(pilot, app, "home")
+        await focus_and_press(pilot, app, "#entry-pack")
+        await wait_for_screen(pilot, app, PackConfirmationScreen)
 
-        destination_input = app.screen.query_one("#pack-destination-input", Input)
-        await _wait_until(
-            pilot,
-            lambda: (
-                isinstance(app.screen, PackConfirmationScreen)
-                and app.screen.focused is destination_input
-            ),
-        )
+        destination_input = await wait_for_widget(pilot, app.screen, "#pack-destination-input")
+        await wait_for_focus(pilot, app, destination_input)
         destination_input.value = str(destination)
         await pilot.press("enter")
         await _wait_until(
@@ -339,43 +333,19 @@ async def test_pack_overwrite_confirmation_is_single_use(tmp_path: Path) -> None
     )
 
     async with app.run_test(size=(100, 30)) as pilot:
-        await _wait_until(pilot, lambda: app.screen.name == "home")
-        app.screen.query_one("#entry-pack", Button).focus()
-        await pilot.press("enter")
-        await _wait_until(pilot, lambda: isinstance(app.screen, PackConfirmationScreen))
-        confirmation = app.screen
+        await wait_for_screen(pilot, app, "home")
+        await focus_and_press(pilot, app, "#entry-pack")
+        confirmation = await wait_for_screen(pilot, app, PackConfirmationScreen)
+        await wait_for_disabled(pilot, confirmation, "#pack-confirm", False)
 
         confirmation.action_confirm()
         confirmation.action_confirm()
-        await _wait_until(
-            pilot,
-            lambda: (
-                sum(isinstance(screen, PackOverwriteDialog) for screen in app.screen_stack) == 1
-            ),
-        )
-
-        await _wait_until(
-            pilot,
-            lambda: (
-                isinstance(app.screen, PackOverwriteDialog)
-                and bool(tuple(app.screen.query("#pack-overwrite-confirm")))
-                and bool(tuple(app.screen.query("#pack-overwrite-message")))
-                and bool(
-                    str(app.screen.query_one("#pack-overwrite-message", Static).renderable).strip()
-                )
-            ),
-        )
-        overwrite_dialog = app.screen
-        confirm_button = overwrite_dialog.query_one("#pack-overwrite-confirm", Button)
-        await _wait_until(
-            pilot,
-            lambda: (
-                isinstance(app.screen, PackOverwriteDialog) and app.screen.focused is confirm_button
-            ),
-        )
-        assert await pilot.click("#pack-overwrite-confirm")
-        await _wait_until(pilot, lambda: confirmation.is_working)
-        await _wait_until(pilot, lambda: pack.started.is_set())
+        await wait_for_screen(pilot, app, PackOverwriteDialog)
+        assert sum(isinstance(screen, PackOverwriteDialog) for screen in app.screen_stack) == 1
+        await wait_for_rendered(pilot, app.screen, "#pack-overwrite-message")
+        await focus_and_press(pilot, app, "#pack-overwrite-confirm")
+        await wait_for_busy(pilot, confirmation, True)
+        await wait_for_worker_start(pilot, pack.started.is_set)
         assert pack.calls == 1
         assert "已取消覆盖" not in str(confirmation.query_one("#pack-status", Static).renderable)
 
@@ -400,12 +370,11 @@ async def test_pack_publish_is_background_and_duplicate_safe(tmp_path: Path) -> 
     )
 
     async with app.run_test(size=(100, 30)) as pilot:
-        await _wait_until(pilot, lambda: app.screen.name == "home")
-        app.screen.query_one("#entry-pack", Button).focus()
-        await pilot.press("enter")
-        await _wait_until(pilot, lambda: isinstance(app.screen, PackConfirmationScreen))
-        app.screen.query_one("#pack-confirm", Button).focus()
-        await pilot.press("enter")
+        await wait_for_screen(pilot, app, "home")
+        await focus_and_press(pilot, app, "#entry-pack")
+        confirmation = await wait_for_screen(pilot, app, PackConfirmationScreen)
+        await wait_for_disabled(pilot, confirmation, "#pack-confirm", False)
+        await focus_and_press(pilot, app, "#pack-confirm")
         await _wait_until(
             pilot,
             lambda: (
@@ -413,7 +382,7 @@ async def test_pack_publish_is_background_and_duplicate_safe(tmp_path: Path) -> 
                 and "正在打包" in str(app.screen.query_one("#pack-status", Static).renderable)
             ),
         )
-        assert app.screen.query_one("#pack-confirm", Button).disabled is True
+        await wait_for_disabled(pilot, confirmation, "#pack-confirm", True)
         await pilot.press("enter")
         assert pack.calls == 1
 
@@ -438,13 +407,12 @@ async def test_pack_publish_gates_help_and_quit_until_completion(tmp_path: Path)
     )
 
     async with app.run_test(size=(100, 30)) as pilot:
-        await _wait_until(pilot, lambda: app.screen.name == "home")
-        app.screen.query_one("#entry-pack", Button).focus()
-        await pilot.press("enter")
-        await _wait_until(pilot, lambda: isinstance(app.screen, PackConfirmationScreen))
-        app.screen.query_one("#pack-confirm", Button).focus()
-        await pilot.press("enter")
-        await _wait_until(pilot, lambda: pack.started.is_set())
+        await wait_for_screen(pilot, app, "home")
+        await focus_and_press(pilot, app, "#entry-pack")
+        confirmation = await wait_for_screen(pilot, app, PackConfirmationScreen)
+        await wait_for_disabled(pilot, confirmation, "#pack-confirm", False)
+        await focus_and_press(pilot, app, "#pack-confirm")
+        await wait_for_worker_start(pilot, pack.started.is_set)
 
         await pilot.press("f1")
         assert isinstance(app.screen, PackConfirmationScreen)

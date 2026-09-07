@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from pathlib import Path
-from time import monotonic
+from threading import Event
 from typing import Any
 from zipfile import ZipFile
 
@@ -25,6 +25,18 @@ from csbox.tui.screens.pack import (
     _is_conflict_error,
     _is_plan_changed_error,
 )
+from tui_harness import (
+    focus_and_press,
+    wait_for_disabled,
+    wait_for_focus,
+    wait_for_rendered,
+    wait_for_screen,
+    wait_for_widget,
+    wait_for_worker_start,
+)
+from tui_harness import (
+    wait_until as _wait_until,
+)
 
 
 def _screen_text(screen: Any) -> str:
@@ -37,15 +49,6 @@ def _screen_text(screen: Any) -> str:
             *(input_widget.value for input_widget in screen.query(Input)),
         ]
     )
-
-
-async def _wait_until(pilot: Any, predicate, *, timeout: float = 5.0) -> None:
-    deadline = monotonic() + timeout
-    while monotonic() < deadline:
-        if predicate():
-            return
-        await pilot.pause()
-    assert predicate()
 
 
 def _pack_overwrite_dialog_ready(app: Any) -> bool:
@@ -61,13 +64,6 @@ def _pack_overwrite_dialog_ready(app: Any) -> bool:
         and confirm[0].size.height > 0
         and bool(str(message[0].renderable).strip())
     )
-
-
-def _pack_result_ready(app: Any) -> bool:
-    if not isinstance(app.screen, PackResultScreen):
-        return False
-    body = list(app.screen.query("#pack-result-body"))
-    return bool(body and str(body[0].renderable).strip())
 
 
 def _environment() -> EnvironmentSnapshot:
@@ -123,15 +119,14 @@ async def test_home_pack_entry_opens_confirmation_and_escape_has_no_side_effect(
     )
 
     async with app.run_test(size=(80, 24)) as pilot:
-        await pilot.pause()
-        app.screen.query_one("#entry-pack").focus()
-        await pilot.press("enter")
-        await pilot.pause()
-        assert isinstance(app.screen, PackConfirmationScreen)
-        assert "included" in _screen_text(app.screen)
-        assert "README.md" in _screen_text(app.screen)
+        await wait_for_screen(pilot, app, "home")
+        await focus_and_press(pilot, app, "#entry-pack")
+        confirmation = await wait_for_screen(pilot, app, PackConfirmationScreen)
+        await wait_for_rendered(pilot, confirmation, "#pack-summary")
+        assert "included" in _screen_text(confirmation)
+        assert "README.md" in _screen_text(confirmation)
         await pilot.press("escape")
-        await pilot.pause()
+        await wait_for_screen(pilot, app, "home")
         assert calls == []
 
 
@@ -147,12 +142,11 @@ async def test_pack_confirmation_requires_enter_before_pack_action(tmp_path: Pat
     )
 
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
-        app.screen.query_one("#entry-pack").focus()
-        await pilot.press("enter")
-        await pilot.pause()
-        app.screen.query_one("#pack-confirm").focus()
-        await pilot.press("enter")
+        await wait_for_screen(pilot, app, "home")
+        await focus_and_press(pilot, app, "#entry-pack")
+        confirmation = await wait_for_screen(pilot, app, PackConfirmationScreen)
+        await wait_for_disabled(pilot, confirmation, "#pack-confirm", False)
+        await focus_and_press(pilot, app, "#pack-confirm")
         await _wait_until(pilot, lambda: calls == ["packed"])
         await _wait_until(pilot, lambda: "打包完成" in _screen_text(app.screen))
         assert "未返回交付报告" in _screen_text(app.screen)
@@ -172,11 +166,11 @@ async def test_pack_rejected_plan_has_actionable_error_and_never_leaks_values(
     )
 
     async with app.run_test(size=(80, 24)) as pilot:
-        await pilot.pause()
-        app.screen.query_one("#entry-pack").focus()
-        await pilot.press("enter")
-        await pilot.pause()
-        text = _screen_text(app.screen)
+        await wait_for_screen(pilot, app, "home")
+        await focus_and_press(pilot, app, "#entry-pack")
+        confirmation = await wait_for_screen(pilot, app, PackConfirmationScreen)
+        await wait_for_rendered(pilot, confirmation, "#pack-items")
+        text = _screen_text(confirmation)
         assert "拒绝" in text
         assert "关键类型" in text
         assert "Enter" in text
@@ -198,11 +192,11 @@ async def test_pack_warning_is_visible_but_does_not_disable_publishing(tmp_path:
     )
 
     async with app.run_test(size=(80, 24)) as pilot:
-        await pilot.pause()
-        app.screen.query_one("#entry-pack").focus()
-        await pilot.press("enter")
-        await pilot.pause()
-        text = _screen_text(app.screen)
+        await wait_for_screen(pilot, app, "home")
+        await focus_and_press(pilot, app, "#entry-pack")
+        confirmation = await wait_for_screen(pilot, app, PackConfirmationScreen)
+        await wait_for_disabled(pilot, confirmation, "#pack-confirm", False)
+        text = _screen_text(confirmation)
         assert "警告" in text
         assert "缺少 README" in text
         assert "不阻塞打包" in text
@@ -224,11 +218,10 @@ async def test_pack_confirmation_wraps_cjk_items_at_narrow_width(tmp_path: Path)
     )
 
     async with app.run_test(size=(80, 24)) as pilot:
-        await pilot.pause()
-        app.screen.query_one("#entry-pack").focus()
-        await pilot.press("enter")
-        await pilot.pause()
-        panel = app.screen.query_one("#pack-items")
+        await wait_for_screen(pilot, app, "home")
+        await focus_and_press(pilot, app, "#entry-pack")
+        confirmation = await wait_for_screen(pilot, app, PackConfirmationScreen)
+        panel = await wait_for_rendered(pilot, confirmation, "#pack-items")
         assert all(
             display_width(line) <= panel.size.width - 2
             for line in str(panel.renderable).splitlines()
@@ -248,16 +241,16 @@ async def test_real_pack_adapter_uses_plan_and_publishes_only_after_enter(tmp_pa
     )
 
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
-        app.screen.query_one("#entry-pack").focus()
-        await pilot.press("enter")
-        await pilot.pause()
-        assert isinstance(app.screen, PackConfirmationScreen)
-        assert "README.md" in _screen_text(app.screen)
+        await wait_for_screen(pilot, app, "home")
+        await focus_and_press(pilot, app, "#entry-pack")
+        confirmation = await wait_for_screen(pilot, app, PackConfirmationScreen)
+        await wait_for_rendered(pilot, confirmation, "#pack-summary")
+        await wait_for_disabled(pilot, confirmation, "#pack-confirm", False)
+        assert "README.md" in _screen_text(confirmation)
         assert not tuple(source.glob("*.zip"))
-        app.screen.query_one("#pack-confirm").focus()
-        await pilot.press("enter")
-        await _wait_until(pilot, lambda: "打包完成" in _screen_text(app.screen))
+        await focus_and_press(pilot, app, "#pack-confirm")
+        await wait_for_screen(pilot, app, PackResultScreen)
+        await wait_for_rendered(pilot, app.screen, "#pack-result-body")
 
     archives = tuple(source.glob("*.zip"))
     assert len(archives) == 1
@@ -286,14 +279,14 @@ async def test_pack_preview_exposes_destination_and_restore_default_keeps_full_t
     )
 
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
-        app.screen.query_one("#entry-pack").focus()
-        await pilot.press("enter")
-        await pilot.pause()
+        await wait_for_screen(pilot, app, "home")
+        await focus_and_press(pilot, app, "#entry-pack")
+        confirmation = await wait_for_screen(pilot, app, PackConfirmationScreen)
+        await wait_for_widget(pilot, confirmation, "#pack-destination-input")
 
-        destination_input = app.screen.query_one("#pack-destination-input", Input)
+        destination_input = await wait_for_widget(pilot, confirmation, "#pack-destination-input")
         assert destination_input.value == str(default)
-        preview = _screen_text(app.screen)
+        preview = _screen_text(confirmation)
         assert "输出" in preview
         assert "included" in preview
         assert "excluded" in preview
@@ -301,13 +294,13 @@ async def test_pack_preview_exposes_destination_and_restore_default_keeps_full_t
         assert str(default) in preview
 
         destination_input.focus()
+        await wait_for_focus(pilot, app, destination_input)
         destination_input.value = str(custom)
         await pilot.press("enter")
         await _wait_until(pilot, lambda: requested[-1:] == [custom])
         await _wait_until(pilot, lambda: str(custom) in _screen_text(app.screen))
 
-        await pilot.click("#pack-restore-default")
-        await pilot.pause()
+        await focus_and_press(pilot, app, "#pack-restore-default")
         assert destination_input.value == str(default)
         assert str(default) in _screen_text(app.screen)
 
@@ -329,14 +322,14 @@ async def test_pack_preview_cancel_never_submits_custom_destination(tmp_path: Pa
     )
 
     async with app.run_test(size=(80, 24)) as pilot:
-        await pilot.pause()
-        app.screen.query_one("#entry-pack").focus()
-        await pilot.press("enter")
-        await pilot.pause()
-        destination_input = app.screen.query_one("#pack-destination-input", Input)
+        await wait_for_screen(pilot, app, "home")
+        await focus_and_press(pilot, app, "#entry-pack")
+        confirmation = await wait_for_screen(pilot, app, PackConfirmationScreen)
+        destination_input = await wait_for_widget(pilot, confirmation, "#pack-destination-input")
+        await wait_for_focus(pilot, app, destination_input)
         destination_input.value = str(custom)
-        await pilot.click("#pack-cancel")
-        await pilot.pause()
+        await focus_and_press(pilot, app, "#pack-cancel")
+        await wait_for_screen(pilot, app, "home")
 
         assert packed == []
 
@@ -358,19 +351,25 @@ async def test_pack_destination_can_be_updated_and_confirmed_by_keyboard(tmp_pat
     )
 
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
-        app.screen.query_one("#entry-pack").focus()
-        await pilot.press("enter")
-        await pilot.pause()
-        destination_input = app.screen.query_one("#pack-destination-input", Input)
+        await wait_for_screen(pilot, app, "home")
+        await focus_and_press(pilot, app, "#entry-pack")
+        confirmation = await wait_for_screen(pilot, app, PackConfirmationScreen)
+        destination_input = await wait_for_widget(pilot, confirmation, "#pack-destination-input")
+        await wait_for_focus(pilot, app, destination_input)
         destination_input.value = str(destination)
         await pilot.press("enter")
-        await pilot.pause()
 
-        assert app.screen.focused is app.screen.query_one("#pack-confirm")
-        assert app.screen.destination == destination.absolute()
-        await pilot.press("enter")
-        await pilot.pause()
+        await _wait_until(
+            pilot,
+            lambda: (
+                isinstance(app.screen, PackConfirmationScreen)
+                and app.screen.destination == destination.absolute()
+                and app.screen.focused is not None
+                and app.screen.focused.id == "pack-confirm"
+            ),
+        )
+        await focus_and_press(pilot, app, "#pack-confirm")
+        await wait_for_worker_start(pilot, lambda: bool(packed))
 
         assert len(packed) == 1
         assert packed[0].destination == destination.absolute()
@@ -386,12 +385,11 @@ async def test_pack_destination_controls_support_tab_navigation(tmp_path: Path) 
     )
 
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
-        app.screen.query_one("#entry-pack").focus()
-        await pilot.press("enter")
-        await pilot.pause()
-        assert app.screen.focused is not None
-        assert app.screen.focused.id == "pack-destination-input"
+        await wait_for_screen(pilot, app, "home")
+        await focus_and_press(pilot, app, "#entry-pack")
+        confirmation = await wait_for_screen(pilot, app, PackConfirmationScreen)
+        destination_input = await wait_for_widget(pilot, confirmation, "#pack-destination-input")
+        await wait_for_focus(pilot, app, destination_input)
 
         await pilot.press("tab")
         assert app.screen.focused is not None
@@ -421,12 +419,11 @@ async def test_existing_target_requires_confirmation_and_cancel_retains_destinat
     )
 
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
-        app.screen.query_one("#entry-pack").focus()
-        await pilot.press("enter")
-        await pilot.pause()
-        app.screen.query_one("#pack-confirm").focus()
-        await pilot.press("enter")
+        await wait_for_screen(pilot, app, "home")
+        await focus_and_press(pilot, app, "#entry-pack")
+        confirmation = await wait_for_screen(pilot, app, PackConfirmationScreen)
+        await wait_for_disabled(pilot, confirmation, "#pack-confirm", False)
+        await focus_and_press(pilot, app, "#pack-confirm")
         await _wait_until(
             pilot,
             lambda: (
@@ -438,17 +435,15 @@ async def test_existing_target_requires_confirmation_and_cancel_retains_destinat
         assert packed == []
 
         await pilot.press("escape")
-        await pilot.pause()
-        assert isinstance(app.screen, PackConfirmationScreen)
-        assert app.screen.query_one("#pack-destination-input", Input).value == str(destination)
+        confirmation = await wait_for_screen(pilot, app, PackConfirmationScreen)
+        destination_input = await wait_for_widget(pilot, confirmation, "#pack-destination-input")
+        assert destination_input.value == str(destination)
 
-        app.screen.query_one("#pack-confirm").focus()
-        while app.screen.query_one("#pack-confirm").has_class("-active"):
-            await pilot.pause()
-        await pilot.press("enter")
-        await pilot.pause()
-        await pilot.click("#pack-overwrite-confirm")
-        await pilot.pause()
+        await wait_for_disabled(pilot, confirmation, "#pack-confirm", False)
+        await focus_and_press(pilot, app, "#pack-confirm")
+        await _wait_until(pilot, lambda: _pack_overwrite_dialog_ready(app))
+        await focus_and_press(pilot, app, "#pack-overwrite-confirm")
+        await _wait_until(pilot, lambda: len(packed) == 1)
 
         assert len(packed) == 1
         assert packed[0].force is True
@@ -473,11 +468,11 @@ async def test_pack_race_conflict_opens_same_overwrite_recovery_dialog(tmp_path:
     )
 
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
-        app.screen.query_one("#entry-pack").focus()
-        await pilot.press("enter")
-        await pilot.pause()
-        await pilot.click("#pack-confirm")
+        await wait_for_screen(pilot, app, "home")
+        await focus_and_press(pilot, app, "#entry-pack")
+        confirmation = await wait_for_screen(pilot, app, PackConfirmationScreen)
+        await wait_for_disabled(pilot, confirmation, "#pack-confirm", False)
+        await focus_and_press(pilot, app, "#pack-confirm")
         await _wait_until(
             pilot,
             lambda: (
@@ -487,9 +482,8 @@ async def test_pack_race_conflict_opens_same_overwrite_recovery_dialog(tmp_path:
             ),
         )
         await pilot.press("escape")
-        await pilot.pause()
-        assert isinstance(app.screen, PackConfirmationScreen)
-        assert "已取消覆盖" in _screen_text(app.screen)
+        confirmation = await wait_for_screen(pilot, app, PackConfirmationScreen)
+        await _wait_until(pilot, lambda: "已取消覆盖" in _screen_text(confirmation))
 
 
 @pytest.mark.asyncio
@@ -519,17 +513,15 @@ async def test_source_plan_change_does_not_open_overwrite_recovery_loop(tmp_path
     )
 
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
-        app.screen.query_one("#entry-pack").focus()
-        await pilot.press("enter")
-        await pilot.pause()
-        await pilot.click("#pack-confirm")
+        await wait_for_screen(pilot, app, "home")
+        await focus_and_press(pilot, app, "#entry-pack")
+        confirmation = await wait_for_screen(pilot, app, PackConfirmationScreen)
+        await wait_for_disabled(pilot, confirmation, "#pack-confirm", False)
+        await focus_and_press(pilot, app, "#pack-confirm")
         await _wait_until(pilot, lambda: _pack_overwrite_dialog_ready(app))
-        overwrite_button = app.screen.query_one("#pack-overwrite-confirm", Button)
-        overwrite_button.focus()
-        await pilot.press("enter")
+        await focus_and_press(pilot, app, "#pack-overwrite-confirm")
         await _wait_until(pilot, lambda: bool(calls))
-        await _wait_until(pilot, lambda: isinstance(app.screen, PackConfirmationScreen))
+        await wait_for_screen(pilot, app, PackConfirmationScreen)
 
         assert "打包计划已变化" in _screen_text(app.screen)
         assert not isinstance(app.screen, PackOverwriteDialog)
@@ -544,9 +536,14 @@ async def test_real_pack_race_target_is_recoverable_with_exact_force_publish(
     (source / "README.md").write_text("# 项目\n", encoding="utf-8")
     destination = tmp_path / "课程 提交" / "最终.zip"
     service = PackService()
+    worker_started = Event()
 
     def plan_factory(destination_value: Path | None = None) -> object:
         return service.plan(source, destination=destination_value or destination)
+
+    def pack_action(plan: object) -> object:
+        worker_started.set()
+        return service.pack_plan(plan, verify=True)
 
     app = CSBoxApp(
         data_source=RealHomeDataSource(
@@ -556,24 +553,25 @@ async def test_real_pack_race_target_is_recoverable_with_exact_force_publish(
         environment=_environment(),
         locale=load_locale(),
         pack_plan_factory=plan_factory,
-        pack_action=lambda plan: service.pack_plan(plan, verify=True),
+        pack_action=pack_action,
     )
 
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
-        app.screen.query_one("#entry-pack").focus()
-        await pilot.press("enter")
-        await pilot.pause()
-        assert isinstance(app.screen, PackConfirmationScreen)
+        await wait_for_screen(pilot, app, "home")
+        await focus_and_press(pilot, app, "#entry-pack")
+        confirmation = await wait_for_screen(pilot, app, PackConfirmationScreen)
+        await wait_for_disabled(pilot, confirmation, "#pack-confirm", False)
         destination.parent.mkdir(parents=True)
         destination.write_bytes(b"user archive")
         sibling = destination.parent / "其他.zip"
         sibling.write_bytes(b"keep sibling")
 
-        await pilot.click("#pack-confirm")
+        await focus_and_press(pilot, app, "#pack-confirm")
         await _wait_until(pilot, lambda: _pack_overwrite_dialog_ready(app))
-        await pilot.click("#pack-overwrite-confirm")
-        await _wait_until(pilot, lambda: _pack_result_ready(app), timeout=10.0)
+        await focus_and_press(pilot, app, "#pack-overwrite-confirm")
+        await wait_for_worker_start(pilot, worker_started.is_set)
+        await wait_for_screen(pilot, app, PackResultScreen, timeout=10.0)
+        await wait_for_rendered(pilot, app.screen, "#pack-result-body", timeout=10.0)
 
         assert isinstance(app.screen, PackResultScreen)
         assert destination.read_bytes() != b"user archive"
@@ -598,22 +596,19 @@ async def test_pack_overwrite_dialog_keeps_long_path_and_actions_visible(tmp_pat
     )
 
     async with app.run_test(size=(80, 24)) as pilot:
-        await pilot.pause()
-        app.screen.query_one("#entry-pack").focus()
-        await pilot.press("enter")
-        await pilot.pause()
-        await pilot.click("#pack-confirm")
-        await pilot.pause()
-
-        assert isinstance(app.screen, PackOverwriteDialog)
-        scroll = app.screen.query_one("#pack-overwrite-scroll")
-        confirm = app.screen.query_one("#pack-overwrite-confirm", Button)
+        await wait_for_screen(pilot, app, "home")
+        await focus_and_press(pilot, app, "#entry-pack")
+        confirmation = await wait_for_screen(pilot, app, PackConfirmationScreen)
+        await wait_for_disabled(pilot, confirmation, "#pack-confirm", False)
+        await focus_and_press(pilot, app, "#pack-confirm")
+        await wait_for_screen(pilot, app, PackOverwriteDialog)
+        scroll = await wait_for_widget(pilot, app.screen, "#pack-overwrite-scroll")
+        confirm = await wait_for_widget(pilot, app.screen, "#pack-overwrite-confirm")
         assert scroll.is_scrollable
         assert confirm.visible
         assert confirm.region.bottom <= 24
         await pilot.press("escape")
-        await pilot.pause()
-        assert isinstance(app.screen, PackConfirmationScreen)
+        await wait_for_screen(pilot, app, PackConfirmationScreen)
 
 
 @pytest.mark.asyncio
@@ -637,15 +632,14 @@ async def test_invalid_directory_destination_can_be_corrected_without_leaving_pa
     )
 
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
-        app.screen.query_one("#entry-pack").focus()
-        await pilot.press("enter")
-        await pilot.pause()
-        destination_input = app.screen.query_one("#pack-destination-input", Input)
+        await wait_for_screen(pilot, app, "home")
+        await focus_and_press(pilot, app, "#entry-pack")
+        confirmation = await wait_for_screen(pilot, app, PackConfirmationScreen)
+        destination_input = await wait_for_widget(pilot, confirmation, "#pack-destination-input")
+        await wait_for_focus(pilot, app, destination_input)
         destination_input.value = str(invalid)
-        await pilot.click("#pack-update-preview")
-        await pilot.pause()
-        assert "目录" in _screen_text(app.screen)
+        await focus_and_press(pilot, app, "#pack-update-preview")
+        await _wait_until(pilot, lambda: "目录" in _screen_text(confirmation))
         assert packed == []
         await _wait_until(
             pilot,
@@ -659,6 +653,7 @@ async def test_invalid_directory_destination_can_be_corrected_without_leaving_pa
 
         destination_input.value = str(corrected)
         destination_input.focus()
+        await wait_for_focus(pilot, app, destination_input)
         await pilot.press("enter")
         await _wait_until(
             pilot,
@@ -669,8 +664,8 @@ async def test_invalid_directory_destination_can_be_corrected_without_leaving_pa
                 and app.screen.focused.id == "pack-confirm"
             ),
         )
-        await pilot.click("#pack-confirm")
-        await _wait_until(pilot, lambda: packed)
+        await focus_and_press(pilot, app, "#pack-confirm")
+        await _wait_until(pilot, lambda: bool(packed))
         assert packed[0].destination == corrected
 
 
@@ -697,13 +692,13 @@ async def test_pack_publish_failure_keeps_destination_and_allows_retry(tmp_path:
     )
 
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
-        app.screen.query_one("#entry-pack").focus()
-        await pilot.press("enter")
-        await pilot.pause()
-        destination_input = app.screen.query_one("#pack-destination-input", Input)
+        await wait_for_screen(pilot, app, "home")
+        await focus_and_press(pilot, app, "#entry-pack")
+        confirmation = await wait_for_screen(pilot, app, PackConfirmationScreen)
+        destination_input = await wait_for_widget(pilot, confirmation, "#pack-destination-input")
+        await wait_for_focus(pilot, app, destination_input)
         destination_input.value = str(destination)
-        await pilot.click("#pack-confirm")
+        await pilot.press("enter")
         await _wait_until(
             pilot,
             lambda: (
@@ -713,21 +708,16 @@ async def test_pack_publish_failure_keeps_destination_and_allows_retry(tmp_path:
                 and app.screen.focused.id == "pack-confirm"
             ),
         )
-        await _wait_until(
-            pilot,
-            lambda: not app.screen.query_one("#pack-confirm", Button).has_class("-active"),
-        )
-        await pilot.press("enter")
+        await wait_for_disabled(pilot, confirmation, "#pack-confirm", False)
+        await focus_and_press(pilot, app, "#pack-confirm")
         await _wait_until(pilot, lambda: "打包失败" in _screen_text(app.screen))
         assert "打包失败" in _screen_text(app.screen)
         assert "输出权限" in _screen_text(app.screen)
         assert "CSBOX_SECRET_SENTINEL_publish" not in _screen_text(app.screen)
         assert destination_input.value == str(destination)
 
-        app.screen.query_one("#pack-confirm").focus()
-        while app.screen.query_one("#pack-confirm").has_class("-active"):
-            await pilot.pause()
-        await pilot.press("enter")
+        await wait_for_disabled(pilot, app.screen, "#pack-confirm", False)
+        await focus_and_press(pilot, app, "#pack-confirm")
         await _wait_until(pilot, lambda: attempts == 2)
         assert attempts == 2
 
@@ -757,15 +747,19 @@ async def test_pack_symlink_destination_is_rejected_without_following_target(
     )
 
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
-        app.screen.query_one("#entry-pack").focus()
-        await pilot.press("enter")
-        await pilot.pause()
-        destination_input = app.screen.query_one("#pack-destination-input", Input)
+        await wait_for_screen(pilot, app, "home")
+        await focus_and_press(pilot, app, "#entry-pack")
+        confirmation = await wait_for_screen(pilot, app, PackConfirmationScreen)
+        destination_input = await wait_for_widget(pilot, confirmation, "#pack-destination-input")
+        await wait_for_focus(pilot, app, destination_input)
         destination_input.value = str(symlink_destination)
-        await pilot.click("#pack-update-preview")
-        await pilot.pause()
-        assert "符号链接" in _screen_text(app.screen) or "安全" in _screen_text(app.screen)
+        await focus_and_press(pilot, app, "#pack-update-preview")
+        await _wait_until(
+            pilot,
+            lambda: (
+                "符号链接" in _screen_text(confirmation) or "安全" in _screen_text(confirmation)
+            ),
+        )
         assert packed == []
         assert protected.read_bytes() == b"keep"
 
@@ -791,12 +785,11 @@ async def test_pack_verification_failure_is_distinguished_from_publish_failure(
     )
 
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
-        app.screen.query_one("#entry-pack").focus()
-        await pilot.press("enter")
-        await pilot.pause()
-        app.screen.query_one("#pack-confirm").focus()
-        await pilot.press("enter")
+        await wait_for_screen(pilot, app, "home")
+        await focus_and_press(pilot, app, "#entry-pack")
+        confirmation = await wait_for_screen(pilot, app, PackConfirmationScreen)
+        await wait_for_disabled(pilot, confirmation, "#pack-confirm", False)
+        await focus_and_press(pilot, app, "#pack-confirm")
         await _wait_until(pilot, lambda: "验证未通过" in _screen_text(app.screen))
         text = _screen_text(app.screen)
         assert "验证未通过" in text
@@ -841,15 +834,14 @@ async def test_pack_destination_typing_does_not_rebuild_preview_per_keystroke(
     )
 
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
-        app.screen.query_one("#entry-pack").focus()
-        await pilot.press("enter")
-        await pilot.pause()
-        destination_input = app.screen.query_one("#pack-destination-input", Input)
+        await wait_for_screen(pilot, app, "home")
+        await focus_and_press(pilot, app, "#entry-pack")
+        confirmation = await wait_for_screen(pilot, app, PackConfirmationScreen)
+        destination_input = await wait_for_widget(pilot, confirmation, "#pack-destination-input")
         requested_before_typing = list(requested)
         destination_input.focus()
+        await wait_for_focus(pilot, app, destination_input)
         await pilot.press(*"课程 提交/最终 中文.zip")
-        await pilot.pause()
         assert requested == requested_before_typing
 
 
@@ -883,13 +875,13 @@ async def test_pack_result_shows_exact_path_size_verify_and_summary(
     )
 
     async with app.run_test(size=size) as pilot:
-        await pilot.pause()
-        app.screen.query_one("#entry-pack").focus()
-        await pilot.press("enter")
-        await pilot.pause()
-        destination_input = app.screen.query_one("#pack-destination-input", Input)
+        await wait_for_screen(pilot, app, "home")
+        await focus_and_press(pilot, app, "#entry-pack")
+        confirmation = await wait_for_screen(pilot, app, PackConfirmationScreen)
+        destination_input = await wait_for_widget(pilot, confirmation, "#pack-destination-input")
+        await wait_for_focus(pilot, app, destination_input)
         destination_input.value = str(destination)
-        await pilot.click("#pack-confirm")
+        await pilot.press("enter")
         await _wait_until(
             pilot,
             lambda: (
@@ -899,12 +891,10 @@ async def test_pack_result_shows_exact_path_size_verify_and_summary(
                 and app.screen.focused.id == "pack-confirm"
             ),
         )
-        await _wait_until(
-            pilot,
-            lambda: not app.screen.query_one("#pack-confirm", Button).has_class("-active"),
-        )
-        await pilot.press("enter")
-        await _wait_until(pilot, lambda: _pack_result_ready(app))
+        await wait_for_disabled(pilot, confirmation, "#pack-confirm", False)
+        await focus_and_press(pilot, app, "#pack-confirm")
+        await wait_for_screen(pilot, app, PackResultScreen)
+        await wait_for_rendered(pilot, app.screen, "#pack-result-body")
 
         assert isinstance(app.screen, PackResultScreen)
         result_text = _screen_text(app.screen)
@@ -921,11 +911,11 @@ async def test_pack_result_shows_exact_path_size_verify_and_summary(
                 display_width(line) <= widget.content_region.width
                 for line in str(widget.renderable).splitlines()
             )
-        await pilot.press("enter")
-        await pilot.pause()
-        assert isinstance(app.screen, PackConfirmationScreen)
-        assert app.screen.query_one("#pack-destination-input", Input).value == str(destination)
-        assert "正在打包并验证" not in _screen_text(app.screen)
+        await focus_and_press(pilot, app, "#pack-result-return")
+        confirmation = await wait_for_screen(pilot, app, PackConfirmationScreen)
+        destination_input = await wait_for_widget(pilot, confirmation, "#pack-destination-input")
+        assert destination_input.value == str(destination)
+        assert "正在打包并验证" not in _screen_text(confirmation)
 
 
 @pytest.mark.asyncio
@@ -963,13 +953,13 @@ async def test_real_pack_delivery_keeps_source_and_excludes_build_cache_and_self
     )
 
     async with app.run_test(size=(120, 35)) as pilot:
-        await pilot.pause()
-        app.screen.query_one("#entry-pack").focus()
-        await pilot.press("enter")
-        await pilot.pause()
-        assert isinstance(app.screen, PackConfirmationScreen)
-        assert ".env.example" in _screen_text(app.screen)
-        destination_input = app.screen.query_one("#pack-destination-input", Input)
+        await wait_for_screen(pilot, app, "home")
+        await focus_and_press(pilot, app, "#entry-pack")
+        confirmation = await wait_for_screen(pilot, app, PackConfirmationScreen)
+        await wait_for_rendered(pilot, confirmation, "#pack-summary")
+        assert ".env.example" in _screen_text(confirmation)
+        destination_input = await wait_for_widget(pilot, confirmation, "#pack-destination-input")
+        await wait_for_focus(pilot, app, destination_input)
         destination_input.value = str(destination)
         await pilot.press("enter")
         await _wait_until(
@@ -981,8 +971,9 @@ async def test_real_pack_delivery_keeps_source_and_excludes_build_cache_and_self
                 and app.screen.focused.id == "pack-confirm"
             ),
         )
-        await pilot.press("enter")
-        await _wait_until(pilot, lambda: _pack_result_ready(app))
+        await focus_and_press(pilot, app, "#pack-confirm")
+        await wait_for_screen(pilot, app, PackResultScreen)
+        await wait_for_rendered(pilot, app.screen, "#pack-result-body")
 
         assert isinstance(app.screen, PackResultScreen)
         result_text = _screen_text(app.screen)
@@ -1029,18 +1020,15 @@ async def test_real_pack_secret_rejection_is_actionable_without_leaking_secret(
     )
 
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
-        app.screen.query_one("#entry-pack").focus()
-        await pilot.press("enter")
-        await _wait_until(pilot, lambda: isinstance(app.screen, PackConfirmationScreen))
-
-        assert isinstance(app.screen, PackConfirmationScreen)
-        text = _screen_text(app.screen)
+        await wait_for_screen(pilot, app, "home")
+        await focus_and_press(pilot, app, "#entry-pack")
+        confirmation = await wait_for_screen(pilot, app, PackConfirmationScreen)
+        await wait_for_rendered(pilot, confirmation, "#pack-items")
+        await wait_for_disabled(pilot, confirmation, "#pack-confirm", True)
+        text = _screen_text(confirmation)
         assert "暂时不能打包" in text
         assert "硬编码 secret" in text
         assert secret not in text
-        assert app.screen.query_one("#pack-confirm", Button).disabled is True
         await pilot.press("enter")
-        await pilot.pause()
 
     assert not destination.exists()

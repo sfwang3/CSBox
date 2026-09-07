@@ -5,7 +5,6 @@ import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from time import monotonic
 from typing import Any
 
 import pytest
@@ -37,6 +36,17 @@ from csbox.locales import load_locale
 from csbox.tui.app import ApiApp, CSBoxApp
 from csbox.tui.screens.api import ApiScreen
 from csbox.tui.screens.home import HomeScreen
+from tui_harness import (
+    focus_and_press,
+    wait_for_busy,
+    wait_for_focus,
+    wait_for_screen,
+    wait_for_widget,
+    wait_for_worker_start,
+)
+from tui_harness import (
+    wait_until as _wait_until,
+)
 
 SECRET = "CSBOX_SECRET_SENTINEL_api_tui"
 
@@ -50,15 +60,6 @@ def _screen_text(screen: Any) -> str:
             *(str(button.label) for button in buttons),
         ]
     )
-
-
-async def _wait_until(pilot: Any, predicate: Any, *, timeout: float = 3.0) -> None:
-    deadline = monotonic() + timeout
-    while monotonic() < deadline:
-        if predicate():
-            return
-        await pilot.pause()
-    assert predicate()
 
 
 def _api_export_result_rendered(app: ApiApp) -> bool:
@@ -86,6 +87,7 @@ def _api_export_dialog_ready(app: ApiApp) -> bool:
         list(selects[0].query("SelectOverlay"))
         and focused is not None
         and focused.id == "api-export-destination"
+        and not submit.disabled
         and submit.visible
         and submit.size.width > 0
         and submit.size.height > 0
@@ -210,7 +212,11 @@ class FakeRunner:
 
 
 class TransportFailingRunner:
+    def __init__(self) -> None:
+        self.started = threading.Event()
+
     async def run(self, _scenario: ApiScenario, _variables: dict[str, str], **_: object) -> ApiRun:
+        self.started.set()
         raise ApiTransportError(
             "发生了什么：接口请求未完成。在哪里：网络传输。怎么处理：检查网络后重试。",
             debug_message="httpx.ConnectError",
@@ -290,7 +296,10 @@ async def test_api_app_has_actionable_empty_scenario_and_run_states(
     app = ApiApp(repository, ScenarioLoader(), lambda: FakeRunner(_run("unused")), load_locale())
 
     async with app.run_test(size=size) as pilot:
-        await pilot.pause()
+        await wait_for_screen(pilot, app, ApiScreen)
+        await wait_for_widget(pilot, app.screen, "#api-quick-create")
+        await wait_for_widget(pilot, app.screen, "#api-openapi-import")
+        await wait_for_widget(pilot, app.screen, "#api-runs")
 
         assert isinstance(app.screen, ApiScreen)
         assert "暂无 API 场景" in str(app.screen.query_one("#api-scenarios").renderable)
@@ -314,20 +323,17 @@ async def test_api_quick_create_persists_minimal_cjk_scenario_and_selects_it(
     app = ApiApp(repository, ScenarioLoader(), lambda: FakeRunner(_run("unused")), load_locale())
 
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
-        await pilot.click("#api-quick-create")
-        await pilot.pause()
-
-        assert app.screen.name == "api-quick-create"
-        app.screen.query_one("#api-quick-create-name", Input).value = "中文起步场景"
-        app.screen.query_one(
-            "#api-quick-create-url", Input
-        ).value = "http://localhost:8080/api/test?中文=值"
-        app.screen.query_one("#api-quick-create-url", Input).focus()
+        await wait_for_screen(pilot, app, ApiScreen)
+        await focus_and_press(pilot, app, "#api-quick-create")
+        dialog = await wait_for_screen(pilot, app, "api-quick-create")
+        name_input = await wait_for_widget(pilot, dialog, "#api-quick-create-name")
+        url_input = await wait_for_widget(pilot, dialog, "#api-quick-create-url")
+        name_input.value = "中文起步场景"
+        url_input.value = "http://localhost:8080/api/test?中文=值"
+        url_input.focus()
+        await wait_for_focus(pilot, app, url_input)
         await pilot.press("enter")
-        await pilot.pause()
-
-        assert isinstance(app.screen, ApiScreen)
+        await wait_for_screen(pilot, app, ApiScreen)
         files = tuple((tmp_path / ".csbox/api/scenarios").glob("*.toml"))
         assert len(files) == 1
         loaded = ScenarioLoader().load(files[0])
@@ -345,19 +351,18 @@ async def test_api_quick_create_cancel_and_invalid_submit_do_not_write(tmp_path:
     app = ApiApp(repository, ScenarioLoader(), lambda: FakeRunner(_run("unused")), load_locale())
 
     async with app.run_test(size=(80, 24)) as pilot:
-        await pilot.pause()
-        await pilot.click("#api-quick-create")
-        await pilot.pause()
-        await pilot.click("#api-quick-create-submit")
-        await pilot.pause()
-
-        assert app.screen.name == "api-quick-create"
-        assert "请输入" in _screen_text(app.screen)
+        await wait_for_screen(pilot, app, ApiScreen)
+        await focus_and_press(pilot, app, "#api-quick-create")
+        dialog = await wait_for_screen(pilot, app, "api-quick-create")
+        name_input = await wait_for_widget(pilot, dialog, "#api-quick-create-name")
+        await wait_for_focus(pilot, app, name_input)
+        await pilot.press("enter")
+        await _wait_until(pilot, lambda: "请输入" in _screen_text(dialog))
+        assert "请输入" in _screen_text(dialog)
         assert not (tmp_path / ".csbox/api/scenarios").exists()
 
         await pilot.press("escape")
-        await pilot.pause()
-        assert isinstance(app.screen, ApiScreen)
+        await wait_for_screen(pilot, app, ApiScreen)
         assert not (tmp_path / ".csbox/api/scenarios").exists()
 
 
@@ -373,16 +378,14 @@ async def test_api_quick_create_input_changes_do_not_write_or_reload(
 
     monkeypatch.setattr(api_screen_module, "write_scenario_files", unexpected_write)
     async with app.run_test(size=(80, 24)) as pilot:
-        await pilot.pause()
-        await pilot.click("#api-quick-create")
-        await pilot.pause()
-        app.screen.query_one("#api-quick-create-name", Input).value = "输入中的场景"
-        app.screen.query_one(
-            "#api-quick-create-url", Input
-        ).value = "http://localhost:8080/api/test?value=long"
-        await pilot.pause()
-
-        assert app.screen.name == "api-quick-create"
+        await wait_for_screen(pilot, app, ApiScreen)
+        await focus_and_press(pilot, app, "#api-quick-create")
+        dialog = await wait_for_screen(pilot, app, "api-quick-create")
+        name_input = await wait_for_widget(pilot, dialog, "#api-quick-create-name")
+        url_input = await wait_for_widget(pilot, dialog, "#api-quick-create-url")
+        name_input.value = "输入中的场景"
+        url_input.value = "http://localhost:8080/api/test?value=long"
+        assert dialog.name == "api-quick-create"
         assert not (tmp_path / ".csbox/api/scenarios").exists()
 
 
@@ -395,16 +398,18 @@ async def test_api_quick_create_rejects_non_concrete_url_without_write(
     app = ApiApp(repository, ScenarioLoader(), lambda: FakeRunner(_run("unused")), load_locale())
 
     async with app.run_test(size=(80, 24)) as pilot:
-        await pilot.pause()
-        await pilot.click("#api-quick-create")
-        await pilot.pause()
-        app.screen.query_one("#api-quick-create-name", Input).value = "坏 URL 场景"
-        app.screen.query_one("#api-quick-create-url", Input).value = url
-        await pilot.click("#api-quick-create-submit")
-        await pilot.pause()
-
-        assert app.screen.name == "api-quick-create"
-        assert "URL" in _screen_text(app.screen)
+        await wait_for_screen(pilot, app, ApiScreen)
+        await focus_and_press(pilot, app, "#api-quick-create")
+        dialog = await wait_for_screen(pilot, app, "api-quick-create")
+        name_input = await wait_for_widget(pilot, dialog, "#api-quick-create-name")
+        url_input = await wait_for_widget(pilot, dialog, "#api-quick-create-url")
+        name_input.value = "坏 URL 场景"
+        url_input.value = url
+        url_input.focus()
+        await wait_for_focus(pilot, app, url_input)
+        await pilot.press("enter")
+        await _wait_until(pilot, lambda: "URL" in _screen_text(dialog))
+        assert "URL" in _screen_text(dialog)
         assert not (tmp_path / ".csbox/api/scenarios").exists()
 
 
@@ -421,7 +426,9 @@ async def test_api_invalid_only_scenarios_keep_beginner_bootstrap_actions(tmp_pa
     )
 
     async with app.run_test(size=(80, 24)) as pilot:
-        await pilot.pause()
+        await wait_for_screen(pilot, app, ApiScreen)
+        await wait_for_widget(pilot, app.screen, "#api-quick-create")
+        await wait_for_widget(pilot, app.screen, "#api-openapi-import")
         assert app.screen.query_one("#api-quick-create", Button)
         assert app.screen.query_one("#api-openapi-import", Button)
         assert app.screen.focused is not None
@@ -463,16 +470,12 @@ async def test_api_openapi_import_opens_from_empty_state_and_cancel_writes_nothi
     app = ApiApp(repository, ScenarioLoader(), lambda: FakeRunner(_run("unused")), load_locale())
 
     async with app.run_test(size=(80, 24)) as pilot:
-        await pilot.pause()
-        await pilot.click("#api-openapi-import")
-        await pilot.pause()
-
-        assert app.screen.name == "api-openapi-import"
-        assert app.screen.query_one("#api-openapi-path", Input)
+        await wait_for_screen(pilot, app, ApiScreen)
+        await focus_and_press(pilot, app, "#api-openapi-import")
+        dialog = await wait_for_screen(pilot, app, "api-openapi-import")
+        await wait_for_widget(pilot, dialog, "#api-openapi-path")
         await pilot.press("escape")
-        await pilot.pause()
-
-        assert isinstance(app.screen, ApiScreen)
+        await wait_for_screen(pilot, app, ApiScreen)
         assert not (tmp_path / ".csbox/api/scenarios").exists()
 
 
@@ -486,12 +489,13 @@ async def test_api_openapi_import_success_reports_count_todo_and_deterministic_s
     app = ApiApp(repository, ScenarioLoader(), lambda: fake_runner, load_locale())
 
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
-        await pilot.click("#api-openapi-import")
-        await pilot.pause()
-        path_input = app.screen.query_one("#api-openapi-path", Input)
+        await wait_for_screen(pilot, app, ApiScreen)
+        await focus_and_press(pilot, app, "#api-openapi-import")
+        dialog = await wait_for_screen(pilot, app, "api-openapi-import")
+        path_input = await wait_for_widget(pilot, dialog, "#api-openapi-path")
         path_input.value = str(source)
         path_input.focus()
+        await wait_for_focus(pilot, app, path_input)
         await pilot.press("enter")
         await _wait_until(
             pilot,
@@ -551,12 +555,13 @@ async def test_api_openapi_import_zero_or_one_selection_is_deterministic(
     app = ApiApp(repository, ScenarioLoader(), lambda: fake_runner, load_locale())
 
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
-        await pilot.click("#api-openapi-import")
-        await pilot.pause()
-        path_input = app.screen.query_one("#api-openapi-path", Input)
+        await wait_for_screen(pilot, app, ApiScreen)
+        await focus_and_press(pilot, app, "#api-openapi-import")
+        dialog = await wait_for_screen(pilot, app, "api-openapi-import")
+        path_input = await wait_for_widget(pilot, dialog, "#api-openapi-path")
         path_input.value = str(source)
         path_input.focus()
+        await wait_for_focus(pilot, app, path_input)
         await pilot.press("enter")
         await _wait_until(
             pilot,
@@ -599,15 +604,25 @@ async def test_api_openapi_import_zero_keeps_existing_selection(
     app = ApiApp(repository, ScenarioLoader(), lambda: FakeRunner(_run("unused")), load_locale())
 
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await wait_for_screen(pilot, app, ApiScreen)
         assert app.screen.selected_scenario_index == 0
         app.screen._open_openapi_import()  # type: ignore[attr-defined]
-        await pilot.pause()
-        path_input = app.screen.query_one("#api-openapi-path", Input)
+        dialog = await wait_for_screen(pilot, app, "api-openapi-import")
+        path_input = await wait_for_widget(pilot, dialog, "#api-openapi-path")
         path_input.value = str(source)
         path_input.focus()
+        await wait_for_focus(pilot, app, path_input)
         await pilot.press("enter")
-        await _wait_until(pilot, lambda: isinstance(app.screen, ApiScreen))
+        await _wait_until(
+            pilot,
+            lambda: (
+                isinstance(app.screen, ApiScreen)
+                and not app.screen.is_working
+                and app.screen.selected_scenario_index == 0
+                and app.screen.scenarios[0].path == existing
+                and "生成场景：0 个" in _screen_text(app.screen)
+            ),
+        )
         assert app.screen.selected_scenario_index == 0
         assert app.screen.scenarios[0].path == existing
 
@@ -619,12 +634,14 @@ async def test_api_openapi_import_invalid_path_keeps_dialog_and_path(tmp_path: P
     missing = tmp_path / "不存在 文件.yaml"
 
     async with app.run_test(size=(80, 24)) as pilot:
-        await pilot.pause()
-        await pilot.click("#api-openapi-import")
-        await pilot.pause()
-        path_input = app.screen.query_one("#api-openapi-path", Input)
+        await wait_for_screen(pilot, app, ApiScreen)
+        await focus_and_press(pilot, app, "#api-openapi-import")
+        dialog = await wait_for_screen(pilot, app, "api-openapi-import")
+        path_input = await wait_for_widget(pilot, dialog, "#api-openapi-path")
         path_input.value = str(missing)
-        await pilot.click("#api-openapi-submit")
+        path_input.focus()
+        await wait_for_focus(pilot, app, path_input)
+        await pilot.press("enter")
         await _wait_until(
             pilot,
             lambda: (
@@ -656,11 +673,14 @@ async def test_api_openapi_import_conflict_requires_confirmation_and_cancel_keep
     app = ApiApp(repository, ScenarioLoader(), lambda: FakeRunner(_run("unused")), load_locale())
 
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await wait_for_screen(pilot, app, ApiScreen)
         app.screen._open_openapi_import()  # type: ignore[attr-defined]
-        await pilot.pause()
-        app.screen.query_one("#api-openapi-path", Input).value = str(source)
-        await pilot.click("#api-openapi-submit")
+        dialog = await wait_for_screen(pilot, app, "api-openapi-import")
+        path_input = await wait_for_widget(pilot, dialog, "#api-openapi-path")
+        path_input.value = str(source)
+        path_input.focus()
+        await wait_for_focus(pilot, app, path_input)
+        await pilot.press("enter")
         await _wait_until(
             pilot,
             lambda: (
@@ -689,11 +709,20 @@ async def test_api_scenario_enter_runs_persists_reloads_and_renders_safe_result(
     app = ApiApp(repository, ScenarioLoader(), lambda *_args: fake_runner, load_locale())
 
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
-        scenario_button = app.screen.query_one("#scenario-0")
+        await wait_for_screen(pilot, app, ApiScreen)
+        scenario_button = await wait_for_widget(pilot, app.screen, "#scenario-0")
         scenario_button.focus()
+        await wait_for_focus(pilot, app, scenario_button)
         await pilot.press("enter")
-        await pilot.pause()
+        await wait_for_worker_start(pilot, lambda: bool(fake_runner.calls))
+        await _wait_until(
+            pilot,
+            lambda: (
+                not app.screen.is_working
+                and app.screen.selected_run is not None
+                and app.screen.selected_run.id == run.id
+            ),
+        )
 
         assert fake_runner.calls
         assert app.screen.selected_run is not None
@@ -716,20 +745,27 @@ async def test_api_arrow_keys_move_focus_and_preview_rows(tmp_path: Path) -> Non
     app = ApiApp(repository, ScenarioLoader(), lambda: FakeRunner(_run("unused")), load_locale())
 
     async with app.run_test(size=(80, 24)) as pilot:
-        await pilot.pause()
+        await wait_for_screen(pilot, app, ApiScreen)
+        first = await wait_for_widget(pilot, app.screen, "#scenario-0")
+        second = await wait_for_widget(pilot, app.screen, "#scenario-1")
+        await wait_for_focus(pilot, app, first)
         assert app.screen.focused.id == "scenario-0"
         await pilot.press("down")
-        await pilot.pause()
+        await wait_for_focus(pilot, app, second)
+        await _wait_until(
+            pilot,
+            lambda: "场景 B" in str(app.screen.query_one("#api-detail").renderable),
+        )
         assert app.screen.focused.id == "scenario-1"
         assert "场景 B" in str(app.screen.query_one("#api-detail").renderable)
         await pilot.press("up")
-        await pilot.pause()
+        await wait_for_focus(pilot, app, first)
         assert app.screen.focused.id == "scenario-0"
         await pilot.press("tab")
-        await pilot.pause()
+        await _wait_until(pilot, lambda: app.screen.active_pane == "runs")
         assert app.screen.active_pane == "runs"
         await pilot.press("left")
-        await pilot.pause()
+        await _wait_until(pilot, lambda: app.screen.active_pane == "scenarios")
         assert app.screen.active_pane == "scenarios"
 
 
@@ -749,17 +785,18 @@ async def test_api_run_list_renders_fail_and_runtime_error_without_raw_cause(
     app = ApiApp(repository, ScenarioLoader(), lambda: FakeRunner(_run("unused")), load_locale())
 
     async with app.run_test(size=(120, 35)) as pilot:
-        await pilot.pause()
+        await wait_for_screen(pilot, app, ApiScreen)
+        await wait_for_widget(pilot, app.screen, "#run-0")
 
         run_list = str(app.screen.query_one("#api-runs").renderable)
         assert "失败 (FAIL)" in run_list
         assert "运行错误 (RUNTIME_ERROR)" in run_list
         assert SECRET not in _screen_text(app.screen)
-        run_buttons = list(app.screen.query("#run-0"))
-        assert run_buttons
-        run_buttons[0].focus()
-        await pilot.press("enter")
-        await pilot.pause()
+        await focus_and_press(pilot, app, "#run-0")
+        await _wait_until(
+            pilot,
+            lambda: "断言" in str(app.screen.query_one("#api-detail").renderable),
+        )
         assert "断言" in str(app.screen.query_one("#api-detail").renderable)
 
 
@@ -772,11 +809,12 @@ async def test_api_export_success_and_failure_are_safe_user_actions(tmp_path: Pa
 
     app = ApiApp(repository, ScenarioLoader(), lambda: FakeRunner(run), load_locale())
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await wait_for_screen(pilot, app, ApiScreen)
+        await wait_for_widget(pilot, app.screen, "#run-0")
         app.screen.select_run(0)
         await pilot.press("e")
         await _wait_until(pilot, lambda: _api_export_dialog_ready(app))
-        await pilot.click("#api-export-submit")
+        await focus_and_press(pilot, app, "#api-export-submit")
         await _wait_until(pilot, lambda: _api_export_result_rendered(app), timeout=5.0)
         assert (tmp_path / "evidence" / "api-evidence.md").is_file()
         assert "导出完成" in _screen_text(app.screen)
@@ -790,11 +828,12 @@ async def test_api_export_success_and_failure_are_safe_user_actions(tmp_path: Pa
         exporter_factory=lambda: _FailingExporter(),
     )
     async with failing.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await wait_for_screen(pilot, failing, ApiScreen)
+        await wait_for_widget(pilot, failing.screen, "#run-0")
         failing.screen.select_run(0)
         await pilot.press("e")
         await _wait_until(pilot, lambda: _api_export_dialog_ready(failing))
-        await pilot.click("#api-export-submit")
+        await focus_and_press(pilot, failing, "#api-export-submit")
         await _wait_until(pilot, lambda: _api_export_failure_ready(failing))
         text = _screen_text(failing.screen)
         assert "导出失败" in text
@@ -809,11 +848,12 @@ async def test_api_export_success_and_failure_are_safe_user_actions(tmp_path: Pa
         exporter_factory=lambda: _MissingFontExporter(),
     )
     async with missing_font.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await wait_for_screen(pilot, missing_font, ApiScreen)
+        await wait_for_widget(pilot, missing_font.screen, "#run-0")
         missing_font.screen.select_run(0)
         await pilot.press("e")
         await _wait_until(pilot, lambda: _api_export_dialog_ready(missing_font))
-        await pilot.click("#api-export-submit")
+        await focus_and_press(pilot, missing_font, "#api-export-submit")
         await _wait_until(pilot, lambda: _api_export_failure_ready(missing_font))
         text = _screen_text(missing_font.screen)
         assert "导出失败" in text
@@ -833,7 +873,8 @@ async def test_api_export_dialog_default_custom_restore_and_exact_result(
 
     app = ApiApp(repository, ScenarioLoader(), lambda: FakeRunner(run), load_locale())
     async with app.run_test(size=size) as pilot:
-        await pilot.pause()
+        await wait_for_screen(pilot, app, ApiScreen)
+        await wait_for_widget(pilot, app.screen, "#run-0")
         app.screen.select_run(0)
         await pilot.press("e")
         await _wait_until(pilot, lambda: _api_export_dialog_ready(app))
@@ -842,11 +883,10 @@ async def test_api_export_dialog_default_custom_restore_and_exact_result(
         assert run.id in _screen_text(app.screen)
         assert destination_input.value == str(tmp_path / "evidence")
         destination_input.value = str(custom)
-        await pilot.click("#api-export-restore-default")
-        await pilot.pause()
+        await focus_and_press(pilot, app, "#api-export-restore-default")
         assert destination_input.value == str(tmp_path / "evidence")
         destination_input.value = str(custom)
-        await pilot.click("#api-export-submit")
+        await focus_and_press(pilot, app, "#api-export-submit")
         await _wait_until(pilot, lambda: _api_export_result_rendered(app), timeout=5.0)
 
         text = _screen_text(app.screen)
@@ -873,7 +913,8 @@ async def test_api_export_dialog_supports_keyboard_submit_and_return(tmp_path: P
     )
 
     async with app.run_test(size=(80, 24)) as pilot:
-        await pilot.pause()
+        await wait_for_screen(pilot, app, ApiScreen)
+        await wait_for_widget(pilot, app.screen, "#run-0")
         app.screen.select_run(0)
         await pilot.press("e")
         await _wait_until(pilot, lambda: _api_export_dialog_ready(app))
@@ -900,12 +941,14 @@ async def test_api_export_keeps_api_screen_visible_while_worker_is_busy(tmp_path
     )
 
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await wait_for_screen(pilot, app, ApiScreen)
+        await wait_for_widget(pilot, app.screen, "#run-0")
         app.screen.select_run(0)
         await pilot.press("e")
         await _wait_until(pilot, lambda: _api_export_dialog_ready(app))
-        await pilot.click("#api-export-submit")
-        await _wait_until(pilot, exporter.started.is_set)
+        await focus_and_press(pilot, app, "#api-export-submit")
+        await wait_for_worker_start(pilot, exporter.started.is_set)
+        await wait_for_busy(pilot, app.screen, True)
 
         await pilot.press("escape", "q")
         await pilot.pause()
@@ -954,12 +997,13 @@ async def test_api_export_existing_target_cancel_preserves_custom_destination(
     app = ApiApp(repository, ScenarioLoader(), lambda: FakeRunner(run), load_locale())
 
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await wait_for_screen(pilot, app, ApiScreen)
+        await wait_for_widget(pilot, app.screen, "#run-0")
         app.screen.select_run(0)
         await pilot.press("e")
         await _wait_until(pilot, lambda: _api_export_dialog_ready(app))
         app.screen.query_one("#api-export-destination", Input).value = str(destination)
-        await pilot.click("#api-export-submit")
+        await focus_and_press(pilot, app, "#api-export-submit")
         await _wait_until(
             pilot,
             lambda: (
@@ -970,7 +1014,7 @@ async def test_api_export_existing_target_cancel_preserves_custom_destination(
 
         assert "覆盖" in _screen_text(app.screen)
         await pilot.press("escape")
-        await _wait_until(pilot, lambda: app.screen.name == "api-export")
+        await _wait_until(pilot, lambda: _api_export_dialog_ready(app))
         assert app.screen.query_one("#api-export-destination", Input).value == str(destination)
 
 
@@ -987,12 +1031,13 @@ async def test_api_export_existing_target_requires_confirmation_then_forces_expo
     app = ApiApp(repository, ScenarioLoader(), lambda: FakeRunner(run), load_locale())
 
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await wait_for_screen(pilot, app, ApiScreen)
+        await wait_for_widget(pilot, app.screen, "#run-0")
         app.screen.select_run(0)
         await pilot.press("e")
         await _wait_until(pilot, lambda: _api_export_dialog_ready(app))
         app.screen.query_one("#api-export-destination", Input).value = str(destination)
-        await pilot.click("#api-export-submit")
+        await focus_and_press(pilot, app, "#api-export-submit")
         await _wait_until(
             pilot,
             lambda: (
@@ -1000,7 +1045,7 @@ async def test_api_export_existing_target_requires_confirmation_then_forces_expo
                 and bool(list(app.screen.query("#api-export-overwrite-confirm")))
             ),
         )
-        await pilot.click("#api-export-overwrite-confirm")
+        await focus_and_press(pilot, app, "#api-export-overwrite-confirm")
         await _wait_until(pilot, lambda: _api_export_result_rendered(app), timeout=5.0)
 
         assert (destination / "api-evidence.md").is_file()
@@ -1018,12 +1063,13 @@ async def test_api_export_regular_file_failure_is_controlled_and_untouched(tmp_p
     app = ApiApp(repository, ScenarioLoader(), lambda: FakeRunner(run), load_locale())
 
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await wait_for_screen(pilot, app, ApiScreen)
+        await wait_for_widget(pilot, app.screen, "#run-0")
         app.screen.select_run(0)
         await pilot.press("e")
         await _wait_until(pilot, lambda: _api_export_dialog_ready(app))
         app.screen.query_one("#api-export-destination", Input).value = str(destination)
-        await pilot.click("#api-export-submit")
+        await focus_and_press(pilot, app, "#api-export-submit")
         await _wait_until(pilot, lambda: _api_export_failure_ready(app))
 
         text = _screen_text(app.screen)
@@ -1052,17 +1098,18 @@ async def test_api_export_failure_returns_to_dialog_and_retry_keeps_destination(
     )
 
     async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
+        await wait_for_screen(pilot, app, ApiScreen)
+        await wait_for_widget(pilot, app.screen, "#run-0")
         app.screen.select_run(0)
         await pilot.press("e")
         await _wait_until(pilot, lambda: _api_export_dialog_ready(app))
         app.screen.query_one("#api-export-destination", Input).value = str(destination)
-        await pilot.click("#api-export-submit")
+        await focus_and_press(pilot, app, "#api-export-submit")
         await _wait_until(pilot, lambda: _api_export_failure_ready(app))
 
         assert "导出失败" in _screen_text(app.screen)
         assert app.screen.query_one("#api-export-destination", Input).value == str(destination)
-        await pilot.click("#api-export-submit")
+        await focus_and_press(pilot, app, "#api-export-submit")
         await _wait_until(pilot, lambda: _api_export_result_rendered(app), timeout=5.0)
         assert calls == [(destination, "dark", False), (destination, "dark", False)]
 
@@ -1083,7 +1130,8 @@ async def test_corrupted_run_is_not_rendered_as_valid_data_and_config_error_is_a
     app = ApiApp(repository, ScenarioLoader(), lambda: FakeRunner(_run("unused")), load_locale())
 
     async with app.run_test(size=(80, 24)) as pilot:
-        await pilot.pause()
+        await wait_for_screen(pilot, app, ApiScreen)
+        await wait_for_widget(pilot, app.screen, "#scenario-0")
         scenarios = str(app.screen.query_one("#api-scenarios").renderable)
         runs = str(app.screen.query_one("#api-runs").renderable)
         assert "配置错误" in scenarios
@@ -1109,31 +1157,53 @@ url = "https://example.test/{{missing_url}}"
         encoding="utf-8",
     )
     repository = ApiRunRepository.from_cwd(tmp_path)
-    app = ApiApp(repository, ScenarioLoader(), lambda: TransportFailingRunner(), load_locale())
+    missing_app = ApiApp(
+        repository,
+        ScenarioLoader(),
+        lambda: TransportFailingRunner(),
+        load_locale(),
+    )
 
-    async with app.run_test(size=(80, 24)) as pilot:
-        await pilot.pause()
-        app.screen.query_one("#scenario-0").focus()
+    async with missing_app.run_test(size=(80, 24)) as pilot:
+        await wait_for_screen(pilot, missing_app, ApiScreen)
+        scenario_button = await wait_for_widget(pilot, missing_app.screen, "#scenario-0")
+        scenario_button.focus()
+        await wait_for_focus(pilot, missing_app, scenario_button)
         await pilot.press("enter")
-        await pilot.pause()
-        assert "变量" in _screen_text(app.screen)
-        assert SECRET not in _screen_text(app.screen)
+        await _wait_until(
+            pilot,
+            lambda: (
+                not missing_app.screen.is_working and "变量" in _screen_text(missing_app.screen)
+            ),
+        )
+        assert "变量" in _screen_text(missing_app.screen)
+        assert SECRET not in _screen_text(missing_app.screen)
 
     transport_dir = tmp_path / "transport" / ".csbox" / "api" / "scenarios"
     transport_dir.mkdir(parents=True)
     _scenario(transport_dir / "transport.toml", name="传输错误")
     transport_repository = ApiRunRepository.from_cwd(tmp_path / "transport")
+    transport_runner = TransportFailingRunner()
     transport_app = ApiApp(
         transport_repository,
         ScenarioLoader(),
-        lambda: TransportFailingRunner(),
+        lambda: transport_runner,
         load_locale(),
     )
     async with transport_app.run_test(size=(80, 24)) as pilot:
-        await pilot.pause()
-        transport_app.screen.query_one("#scenario-0").focus()
+        await wait_for_screen(pilot, transport_app, ApiScreen)
+        scenario_button = await wait_for_widget(pilot, transport_app.screen, "#scenario-0")
+        scenario_button.focus()
+        await wait_for_focus(pilot, transport_app, scenario_button)
         await pilot.press("enter")
-        await pilot.pause()
+        await wait_for_worker_start(pilot, transport_runner.started.is_set)
+        await _wait_until(
+            pilot,
+            lambda: (
+                not transport_app.screen.is_working
+                and "网络传输" in _screen_text(transport_app.screen)
+            ),
+        )
         text = _screen_text(transport_app.screen)
         assert "网络传输" in text
         assert "httpx.ConnectError" not in text
@@ -1150,14 +1220,11 @@ async def test_api_screen_escape_returns_home_and_standalone_q_exits(tmp_path: P
         api_runner_factory=lambda *_args: FakeRunner(_run("unused")),
     )
     async with embedded.run_test(size=(80, 24)) as pilot:
-        await pilot.pause()
-        embedded.screen.query_one("#entry-api").focus()
-        await pilot.press("enter")
-        await pilot.pause()
-        assert isinstance(embedded.screen, ApiScreen)
+        await wait_for_screen(pilot, embedded, "home")
+        await focus_and_press(pilot, embedded, "#entry-api")
+        await wait_for_screen(pilot, embedded, ApiScreen)
         await pilot.press("escape")
-        await pilot.pause()
-        assert isinstance(embedded.screen, HomeScreen)
+        await wait_for_screen(pilot, embedded, HomeScreen)
 
     standalone = ApiApp(
         ApiRunRepository.from_cwd(tmp_path),
@@ -1166,10 +1233,9 @@ async def test_api_screen_escape_returns_home_and_standalone_q_exits(tmp_path: P
         load_locale(),
     )
     async with standalone.run_test(size=(80, 24)) as pilot:
-        await pilot.pause()
+        await wait_for_screen(pilot, standalone, ApiScreen)
         await pilot.press("q")
-        await pilot.pause()
-        assert standalone.is_running is False
+        await _wait_until(pilot, lambda: standalone.is_running is False)
 
 
 @pytest.mark.asyncio
@@ -1217,10 +1283,12 @@ async def test_api_detail_uses_display_cells_for_cjk_and_ascii_mixed_content(
     app = ApiApp(repository, ScenarioLoader(), lambda: FakeRunner(_run("unused")), load_locale())
 
     async with app.run_test(size=(80, 24)) as pilot:
-        await pilot.pause()
+        await wait_for_screen(pilot, app, ApiScreen)
+        await wait_for_widget(pilot, app.screen, "#run-0")
         app.screen.select_run(0)
-        await pilot.pause()
-        detail = app.screen.query_one("#api-detail")
+        await _wait_until(pilot, lambda: app.screen.selected_run is not None)
+        detail = await wait_for_widget(pilot, app.screen, "#api-detail")
+        await _wait_until(pilot, lambda: detail.size.width > 0 and detail.size.height > 0)
         for line in str(detail.renderable).splitlines():
             assert display_width(line) <= max(2, detail.size.width - 2)
         assert "计算机网络实验" in _screen_text(app.screen)
