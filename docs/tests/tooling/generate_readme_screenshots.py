@@ -7,8 +7,10 @@ render; CairoSVG turns that render into a CJK-readable PNG for GitHub.
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import os
+import re
 import tempfile
 from contextlib import contextmanager
 from dataclasses import replace
@@ -29,6 +31,8 @@ ROOT = Path(__file__).resolve().parents[3]
 OUTPUT = ROOT / "docs" / "assets" / "readme"
 HOME_SIZE = (120, 43)
 REVIEW_SIZE = (120, 35)
+_BOX_DRAWING_GLYPHS = frozenset("─━│┃┌┐└┘├┤┬┴┼╭╮╰╯═║╔╗╚╝╠╣╦╩╬▁▂▃▄▅▆▇▉▊▋▌▍▎▏▔ ")
+_SVG_TEXT = re.compile(r"(<text\b[^>]*>)(.*?)(</text>)", re.DOTALL)
 
 
 @contextmanager
@@ -43,6 +47,29 @@ def screenshot_color_environment():
             os.environ.pop("NO_COLOR", None)
         else:
             os.environ["NO_COLOR"] = previous
+
+
+def prepare_svg_for_png(svg: str) -> str:
+    """Use CJK glyphs for content and a narrow face for terminal borders."""
+
+    prepared = svg.replace(
+        "font-family: Fira Code, monospace;",
+        'font-family: "Noto Sans Mono CJK SC", "Noto Sans CJK SC", sans-serif;',
+    )
+
+    def keep_terminal_font(match: re.Match[str]) -> str:
+        content = html.unescape(match.group(2)).replace("\xa0", " ")
+        content = content.replace("\n", "").replace("\r", "")
+        if not content.strip() or not all(
+            character in _BOX_DRAWING_GLYPHS for character in content
+        ):
+            return match.group(0)
+        opening = match.group(1)
+        if "font-family=" not in opening:
+            opening = f'{opening[:-1]} font-family="Fira Code, monospace">'
+        return f"{opening}{match.group(2)}{match.group(3)}"
+
+    return _SVG_TEXT.sub(keep_terminal_font, prepared)
 
 
 class DemoHomeDataSource(FakeHomeDataSource):
@@ -163,10 +190,7 @@ def write_png(app: CSBoxApp | ReviewApp, destination: Path) -> None:
 
     # Textual's export uses Fira Code, which intentionally has no CJK glyphs.
     # The existing Linux CI image provides Noto CJK fonts for the same reason.
-    svg = app.export_screenshot().replace(
-        "font-family: Fira Code, monospace;",
-        'font-family: "Noto Sans Mono CJK SC", "Noto Sans CJK SC", sans-serif;',
-    )
+    svg = prepare_svg_for_png(app.export_screenshot())
     cairosvg.svg2png(
         bytestring=svg.encode("utf-8"),
         write_to=str(destination),

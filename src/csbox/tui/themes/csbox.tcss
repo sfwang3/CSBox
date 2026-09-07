@@ -117,7 +117,7 @@ Screen {
 }
 
 .entry-button:focus {
-    border: tall #969dff;
+    border: round #969dff;
     text-style: bold;
 }
 
@@ -215,6 +215,12 @@ HelpDialog {
     height: 1fr;
     min-height: 1;
     scrollbar-size: 1 1;
+    scrollbar-background: #101c29;
+    scrollbar-background-hover: #162d43;
+    scrollbar-background-active: #162d43;
+    scrollbar-color: #326fa2;
+    scrollbar-color-hover: #6d79e8;
+    scrollbar-color-active: #969dff;
     overflow-y: auto;
 }
 
@@ -252,6 +258,10 @@ HelpDialog {
     margin-right: 1;
     margin-bottom: 0;
     overflow-y: auto;
+}
+
+.wide #action-panel .entry-card {
+    margin-bottom: 0;
 }
 
 .wide #home-context {
@@ -926,6 +936,7 @@ ReportProfileDialog {
 
 #review-terminal {
     width: 1fr;
+    height: 1fr;
 }
 
 #review-sidebar {
