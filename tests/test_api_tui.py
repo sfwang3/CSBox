@@ -328,11 +328,10 @@ async def test_api_quick_create_persists_minimal_cjk_scenario_and_selects_it(
         dialog = await wait_for_screen(pilot, app, "api-quick-create")
         name_input = await wait_for_widget(pilot, dialog, "#api-quick-create-name")
         url_input = await wait_for_widget(pilot, dialog, "#api-quick-create-url")
+        await wait_for_focus(pilot, app, name_input)
         name_input.value = "中文起步场景"
         url_input.value = "http://localhost:8080/api/test?中文=值"
-        url_input.focus()
-        await wait_for_focus(pilot, app, url_input)
-        await pilot.press("enter")
+        await focus_and_press(pilot, app, "#api-quick-create-url")
         await wait_for_screen(pilot, app, ApiScreen)
         files = tuple((tmp_path / ".csbox/api/scenarios").glob("*.toml"))
         assert len(files) == 1
@@ -403,11 +402,10 @@ async def test_api_quick_create_rejects_non_concrete_url_without_write(
         dialog = await wait_for_screen(pilot, app, "api-quick-create")
         name_input = await wait_for_widget(pilot, dialog, "#api-quick-create-name")
         url_input = await wait_for_widget(pilot, dialog, "#api-quick-create-url")
+        await wait_for_focus(pilot, app, name_input)
         name_input.value = "坏 URL 场景"
         url_input.value = url
-        url_input.focus()
-        await wait_for_focus(pilot, app, url_input)
-        await pilot.press("enter")
+        await focus_and_press(pilot, app, "#api-quick-create-url")
         await _wait_until(pilot, lambda: "URL" in _screen_text(dialog))
         assert "URL" in _screen_text(dialog)
         assert not (tmp_path / ".csbox/api/scenarios").exists()
@@ -494,9 +492,7 @@ async def test_api_openapi_import_success_reports_count_todo_and_deterministic_s
         dialog = await wait_for_screen(pilot, app, "api-openapi-import")
         path_input = await wait_for_widget(pilot, dialog, "#api-openapi-path")
         path_input.value = str(source)
-        path_input.focus()
-        await wait_for_focus(pilot, app, path_input)
-        await pilot.press("enter")
+        await focus_and_press(pilot, app, "#api-openapi-path")
         await _wait_until(
             pilot,
             lambda: _api_import_result_ready(app),
@@ -560,9 +556,7 @@ async def test_api_openapi_import_zero_or_one_selection_is_deterministic(
         dialog = await wait_for_screen(pilot, app, "api-openapi-import")
         path_input = await wait_for_widget(pilot, dialog, "#api-openapi-path")
         path_input.value = str(source)
-        path_input.focus()
-        await wait_for_focus(pilot, app, path_input)
-        await pilot.press("enter")
+        await focus_and_press(pilot, app, "#api-openapi-path")
         await _wait_until(
             pilot,
             lambda: (
@@ -610,9 +604,7 @@ async def test_api_openapi_import_zero_keeps_existing_selection(
         dialog = await wait_for_screen(pilot, app, "api-openapi-import")
         path_input = await wait_for_widget(pilot, dialog, "#api-openapi-path")
         path_input.value = str(source)
-        path_input.focus()
-        await wait_for_focus(pilot, app, path_input)
-        await pilot.press("enter")
+        await focus_and_press(pilot, app, "#api-openapi-path")
         await _wait_until(
             pilot,
             lambda: (
@@ -639,9 +631,7 @@ async def test_api_openapi_import_invalid_path_keeps_dialog_and_path(tmp_path: P
         dialog = await wait_for_screen(pilot, app, "api-openapi-import")
         path_input = await wait_for_widget(pilot, dialog, "#api-openapi-path")
         path_input.value = str(missing)
-        path_input.focus()
-        await wait_for_focus(pilot, app, path_input)
-        await pilot.press("enter")
+        await focus_and_press(pilot, app, "#api-openapi-path")
         await _wait_until(
             pilot,
             lambda: (
@@ -678,9 +668,7 @@ async def test_api_openapi_import_conflict_requires_confirmation_and_cancel_keep
         dialog = await wait_for_screen(pilot, app, "api-openapi-import")
         path_input = await wait_for_widget(pilot, dialog, "#api-openapi-path")
         path_input.value = str(source)
-        path_input.focus()
-        await wait_for_focus(pilot, app, path_input)
-        await pilot.press("enter")
+        await focus_and_press(pilot, app, "#api-openapi-path")
         await _wait_until(
             pilot,
             lambda: (
