@@ -10,7 +10,7 @@ Record terminal work, keep evidence reviewable, and hand in a checked project bu
 
 [![CI](https://img.shields.io/github/actions/workflow/status/sfwang3/CSBox/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/sfwang3/CSBox/actions/workflows/ci.yml) [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/) [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-2ea44f?style=flat-square)](LICENSE) [![0.5.1](https://img.shields.io/badge/version-0.5.1-informational?style=flat-square)](CHANGELOG.md)
 
-**0.5.1 · not published to PyPI**
+**0.5.1 · published on PyPI**
 
 </div>
 
