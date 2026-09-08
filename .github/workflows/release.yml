@@ -1,0 +1,146 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build distributions
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out tagged public source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref }}
+
+      - name: Verify tag is on public main
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag_commit="$(git rev-list -n 1 "$GITHUB_REF")"
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$tag_commit" FETCH_HEAD; then
+            echo "The release tag must point to a commit in public origin/main." >&2
+            exit 1
+          fi
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+          python-version: "3.11"
+
+      - name: Build wheel and source distribution
+        run: uv build --clear --out-dir dist
+
+      - name: Verify version and distribution metadata
+        shell: bash
+        env:
+          EXPECTED_PROJECT: csbox
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          sdists=(dist/*.tar.gz)
+          if (( ${#wheels[@]} != 1 || ${#sdists[@]} != 1 )); then
+            echo "Expected exactly one wheel and one source distribution." >&2
+            exit 1
+          fi
+          tag_version="${GITHUB_REF_NAME#v}"
+          python - "$EXPECTED_PROJECT" "$tag_version" "${wheels[0]}" "${sdists[0]}" <<'PY'
+          import sys
+          import tarfile
+          import zipfile
+          from email.parser import Parser
+
+          project, expected_version, wheel_path, sdist_path = sys.argv[1:]
+
+          def check_metadata(label, text):
+              metadata = Parser().parsestr(text)
+              name = metadata.get("Name")
+              version = metadata.get("Version")
+              if name != project or version != expected_version:
+                  raise SystemExit(
+                      f"{label}: expected {project} {expected_version}, got {name} {version}"
+                  )
+
+          with zipfile.ZipFile(wheel_path) as wheel:
+              metadata_paths = [
+                  path for path in wheel.namelist() if path.endswith(".dist-info/METADATA")
+              ]
+              if len(metadata_paths) != 1:
+                  raise SystemExit(f"wheel: expected one .dist-info/METADATA file")
+              check_metadata("wheel", wheel.read(metadata_paths[0]).decode("utf-8"))
+
+          with tarfile.open(sdist_path, "r:gz") as sdist:
+              metadata_members = [
+                  member for member in sdist.getmembers() if member.name.endswith("/PKG-INFO")
+              ]
+              if len(metadata_members) != 1:
+                  raise SystemExit("sdist: expected one PKG-INFO file")
+              metadata_file = sdist.extractfile(metadata_members[0])
+              if metadata_file is None:
+                  raise SystemExit("sdist: could not read PKG-INFO")
+              check_metadata("sdist", metadata_file.read().decode("utf-8"))
+
+          print(f"Verified {project} {expected_version}: {wheel_path}, {sdist_path}")
+          PY
+
+      - name: Upload distribution artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: python-distributions
+          path: dist/
+          if-no-files-found: error
+
+  github-release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download distribution artifact
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: python-distributions
+          path: dist/
+
+      - name: Create release and upload distributions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download distribution artifact
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: python-distributions
+          path: dist/
+
+      - name: Publish distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
