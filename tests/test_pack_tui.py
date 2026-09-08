@@ -471,6 +471,8 @@ async def test_pack_race_conflict_opens_same_overwrite_recovery_dialog(tmp_path:
         await wait_for_screen(pilot, app, "home")
         await focus_and_press(pilot, app, "#entry-pack")
         confirmation = await wait_for_screen(pilot, app, PackConfirmationScreen)
+        destination_input = await wait_for_widget(pilot, confirmation, "#pack-destination-input")
+        await wait_for_focus(pilot, app, destination_input)
         await wait_for_disabled(pilot, confirmation, "#pack-confirm", False)
         await focus_and_press(pilot, app, "#pack-confirm")
         await _wait_until(
