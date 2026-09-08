@@ -41,21 +41,15 @@ You do not need to memorize subcommands for the normal path. Home presents **开
 
 On Home, use <kbd>↑</kbd>/<kbd>↓</kbd> or <kbd>Tab</kbd> to move, press <kbd>Enter</kbd> to open, and press <kbd>?</kbd> or <kbd>F1</kbd> for help.
 
-### Installation: what works today
+### Installation
 
-This release is **not on PyPI**. There is no public-index install command yet.
-
-#### Ordinary users: install a local wheel
-
-If a course staff member or project maintainer gives you a `csbox-0.5.1-py3-none-any.whl` file, install that local file with `uv`:
+Install the current public release from PyPI with `uv`:
 
 ```bash
-uv tool install /path/to/csbox-0.5.1-py3-none-any.whl
+uv tool install csbox
 cd path/to/your-course-project
 csbox
 ```
-
-This version is not publicly published yet. If you do not have a local wheel or source checkout, there is no ordinary-user install route to copy today.
 
 #### Contributors: run from a source checkout
 

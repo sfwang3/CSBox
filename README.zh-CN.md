@@ -43,21 +43,15 @@ CSBox 是一套面向计算机专业学生的本地优先工具：把上机实�
 
 在 Home 中可以用 <kbd>↑</kbd>/<kbd>↓</kbd> 或 <kbd>Tab</kbd> 移动，按 <kbd>Enter</kbd> 打开，按 <kbd>?</kbd> 或 <kbd>F1</kbd> 查看帮助。
 
-### 安装：当前真正可行的路径
+### 安装：从 PyPI 安装
 
-当前版本 **尚未发布到 PyPI**，暂时没有公开索引安装命令。
-
-#### 普通用户：安装本地 wheel
-
-如果课程老师或项目维护者提供了 `csbox-0.5.1-py3-none-any.whl` 文件，可以用 `uv` 安装这个本地文件：
+使用 `uv` 从 PyPI 安装当前公开版本：
 
 ```bash
-uv tool install /path/to/csbox-0.5.1-py3-none-any.whl
+uv tool install csbox
 cd path/to/your-course-project
 csbox
 ```
-
-当前版本没有公开发布。如果你手上没有本地 wheel 或源码 checkout，今天还没有可以直接复制的普通用户安装路径。
 
 #### 贡献者：从源码 checkout 运行
 
