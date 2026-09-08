@@ -7,7 +7,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -21,7 +21,7 @@ from csbox.lab.models import SessionPaths
 from csbox.lab.proxy import TerminalProxy
 from csbox.lab.screen import TerminalEmulator
 from csbox.lab.surface import AlternateScreenSurface
-from csbox.lab.windows_host import LaunchIntentStore
+from csbox.lab.windows_host import LaunchIntentStore, LaunchProtocolError
 
 pytestmark = [pytest.mark.pty, pytest.mark.windows, pytest.mark.integration]
 
@@ -79,12 +79,12 @@ def _read_until_interactive_prompt(
     )
 
 
-def _run_process_after_output(
+def _run_process_after_readiness(
     argv: list[str],
     *,
     cwd: Path,
     env: dict[str, str],
-    target: bytes,
+    readiness: Callable[[], bool],
     input_data: bytes,
     timeout: float = 20.0,
 ) -> tuple[int, bytes, bytes]:
@@ -98,7 +98,6 @@ def _run_process_after_output(
     )
     stdout = bytearray()
     stderr = bytearray()
-    target_seen = threading.Event()
     reader_errors: list[BaseException] = []
 
     def collect_stdout() -> None:
@@ -106,11 +105,8 @@ def _run_process_after_output(
             assert process.stdout is not None
             while chunk := process.stdout.read(1):
                 stdout.extend(chunk)
-                if target in stdout:
-                    target_seen.set()
         except BaseException as exc:
             reader_errors.append(exc)
-            target_seen.set()
 
     def collect_stderr() -> None:
         try:
@@ -124,13 +120,23 @@ def _run_process_after_output(
     stdout_reader.start()
     stderr_reader.start()
     try:
-        if not target_seen.wait(timeout=10.0) or reader_errors:
-            process.kill()
+        ready = False
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if reader_errors or process.poll() is not None:
+                break
+            if readiness():
+                ready = True
+                break
+            time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+        if not ready or reader_errors:
+            if process.poll() is None:
+                process.kill()
             process.wait(timeout=5.0)
             stdout_reader.join(timeout=5.0)
             stderr_reader.join(timeout=5.0)
             pytest.fail(
-                f"dedicated host did not emit {target!r}; "
+                "dedicated host did not reach the readiness contract; "
                 f"stdout={bytes(stdout[-500:])!r}; stderr={bytes(stderr[-500:])!r}"
             )
         assert process.stdin is not None
@@ -323,7 +329,14 @@ def test_native_windows_dedicated_host_resolves_ps7_runs_command_and_exits_zero(
         "Write-Output ($prefix + $suffix); exit 0\r\n"
     ).encode()
     assert marker.encode() not in input_data
-    return_code, stdout, stderr = _run_process_after_output(
+
+    def host_ready() -> bool:
+        try:
+            return LaunchIntentStore.load_status(intent).state == "ready"
+        except LaunchProtocolError:
+            return False
+
+    return_code, stdout, stderr = _run_process_after_readiness(
         [
             sys.executable,
             "-m",
@@ -337,13 +350,12 @@ def test_native_windows_dedicated_host_resolves_ps7_runs_command_and_exits_zero(
         ],
         cwd=cwd,
         env=child_env,
-        target=b"PS ",
+        readiness=host_ready,
         input_data=input_data,
     )
 
     assert return_code == 0, stderr.decode("utf-8", errors="replace")
     assert marker.encode() in stdout
-    assert b"PS " in stdout
     status = store.load_status(intent)
     assert status.state == "finished"
     assert status.session_status == "completed"

@@ -36,6 +36,7 @@ from csbox.tui.screens.evidence import EvidenceSetEditorScreen, EvidenceSetsScre
 from csbox.tui.screens.evidence_sources import EvidenceCaptureBrowserScreen
 from csbox.tui.screens.home import HomeScreen
 from csbox.tui.screens.report import ReportExportResultScreen
+from tui_harness import wait_for_focus, wait_for_screen, wait_for_widget
 
 
 def _environment() -> EnvironmentSnapshot:
@@ -1039,14 +1040,17 @@ async def test_realistic_report_handoff_uses_configured_renderer_and_publishes_b
     async with app.run_test(size=(140, 40)) as pilot:
         await open_saved_editor(app, pilot)
         await pilot.press("p")
-        await pilot.pause()
-        assert isinstance(app.screen, ReportExportDialog)
-        app.screen.query_one("#report-destination-input", Input).value = str(destination)
+        dialog = await wait_for_screen(pilot, app, ReportExportDialog)
+        destination_input = await wait_for_widget(
+            pilot,
+            dialog,
+            "#report-destination-input",
+        )
+        destination_input.focus()
+        await wait_for_focus(pilot, app, destination_input)
+        destination_input.value = str(destination)
         await pilot.press("enter")
-        await pilot.pause(0.3)
-        await pilot.pause()
-
-        assert isinstance(app.screen, ReportExportResultScreen)
+        await wait_for_screen(pilot, app, ReportExportResultScreen)
         await wait_for_report_result_text(app, pilot, "导出完成")
 
     markdown = (destination / "report.md").read_text(encoding="utf-8")
