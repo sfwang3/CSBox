@@ -9,8 +9,8 @@ def test_readme_leads_with_beginner_first_story() -> None:
     readme = (PROJECT_ROOT / "README.en.md").read_text(encoding="utf-8")
     quick_start = readme[readme.index("## Quick Start") : readme.index("## See the current UI")]
 
-    assert "0.6.0rc1" in readme
-    assert "release candidate; not published" in readme
+    assert "0.6.0" in readme
+    assert "stable release on PyPI" in readme
     assert "git clone" in readme
     assert (
         "Home → 开始实验 → enter a name → work in the terminal → F12 → "
@@ -62,14 +62,14 @@ def test_both_readmes_keep_the_beginner_boundaries() -> None:
         assert "F12" in readme
         assert "Check" in readme
         assert "Pack" in readme
-        assert "0.6.0rc1" in readme
+        assert "0.6.0" in readme
     assert "不生成结论、答案或课程作业正文" in chinese
 
 
 def test_changelog_leads_with_the_current_v06_surface() -> None:
     changelog = (PROJECT_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
 
-    assert changelog.startswith("# Changelog\n\n## 0.6.0rc1")
+    assert changelog.startswith("# Changelog\n\n## 0.6.0")
     assert "This version is not published to PyPI" not in changelog
     for surface in ("Lab Evidence", "API Evidence", "Evidence Collection", "Report Handoff"):
         assert surface in changelog

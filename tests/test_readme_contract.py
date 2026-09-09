@@ -47,7 +47,7 @@ def test_public_readmes_have_the_two_file_pypi_safe_contract() -> None:
             assert f'src="{url}"' in text
         for command in COMMON_COMMANDS:
             assert command in text
-        assert "0.6.0rc1" in text
+        assert "0.6.0" in text
         assert "Check" in text
         assert "Pack" in text
         assert "does not generate" in text or "不生成" in text
@@ -59,7 +59,7 @@ def test_readme_metadata_and_changelog_match_the_development_baseline() -> None:
 
     assert 'readme = "README.md"' in pyproject
     assert '"README.en.md"' in pyproject
-    assert "## 0.6.0rc1" in changelog
+    assert "## 0.6.0" in changelog
     released = changelog.split("## 0.5.0rc1", maxsplit=1)[0]
     assert "not published to PyPI" not in released
     assert "尚未发布到 PyPI" not in released

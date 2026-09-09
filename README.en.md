@@ -8,9 +8,9 @@ Record terminal work, keep evidence reviewable, and hand in a checked project bu
 
 [简体中文](https://github.com/sfwang3/CSBox/blob/main/README.md) · [English](https://github.com/sfwang3/CSBox/blob/main/README.en.md)
 
-[![CI](https://img.shields.io/github/actions/workflow/status/sfwang3/CSBox/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/sfwang3/CSBox/actions/workflows/ci.yml) [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/) [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-2ea44f?style=flat-square)](LICENSE) [![0.6.0rc1](https://img.shields.io/badge/version-0.6.0rc1-informational?style=flat-square)](CHANGELOG.md)
+[![CI](https://img.shields.io/github/actions/workflow/status/sfwang3/CSBox/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/sfwang3/CSBox/actions/workflows/ci.yml) [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/) [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-2ea44f?style=flat-square)](LICENSE) [![0.6.0](https://img.shields.io/badge/version-0.6.0-informational?style=flat-square)](CHANGELOG.md)
 
-**0.6.0rc1 · release candidate; not published**
+**0.6.0 · stable release**
 
 </div>
 
@@ -49,7 +49,7 @@ On Home, use <kbd>↑</kbd>/<kbd>↓</kbd> or <kbd>Tab</kbd> to move, press <kbd
 
 ### Installation
 
-`0.6.0rc1` is the current release-candidate source version and is not published to PyPI. To install the current public stable release `0.5.1`, use `uv`:
+`0.6.0` is the current stable release on PyPI. Install it with `uv`:
 
 ```bash
 uv tool install csbox
@@ -80,7 +80,7 @@ For diagnostics, `csbox --help`, `csbox --version`, and `csbox doctor` are avail
 
 ```console
 $ csbox --version
-0.6.0rc1
+0.6.0
 ```
 
 ## See the current UI

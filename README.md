@@ -8,9 +8,9 @@
 
 [简体中文](https://github.com/sfwang3/CSBox/blob/main/README.md) · [English](https://github.com/sfwang3/CSBox/blob/main/README.en.md)
 
-[![CI](https://img.shields.io/github/actions/workflow/status/sfwang3/CSBox/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/sfwang3/CSBox/actions/workflows/ci.yml) [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/) [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-2ea44f?style=flat-square)](LICENSE) [![0.6.0rc1](https://img.shields.io/badge/version-0.6.0rc1-informational?style=flat-square)](CHANGELOG.md)
+[![CI](https://img.shields.io/github/actions/workflow/status/sfwang3/CSBox/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/sfwang3/CSBox/actions/workflows/ci.yml) [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/) [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-2ea44f?style=flat-square)](LICENSE) [![0.6.0](https://img.shields.io/badge/version-0.6.0-informational?style=flat-square)](CHANGELOG.md)
 
-**0.6.0rc1 · Release Candidate，尚未发布**
+**0.6.0 · 稳定版已发布**
 
 </div>
 
@@ -51,7 +51,7 @@ API Step ────┘
 
 ### 安装：从 PyPI 安装
 
-`0.6.0rc1` 是当前 Release Candidate 源码版本，尚未发布到 PyPI。安装当前公开稳定版 `0.5.1` 时，使用 `uv` 从 PyPI 安装：
+`0.6.0` 是当前公开稳定版，使用 `uv` 从 PyPI 安装：
 
 ```bash
 uv tool install csbox
@@ -83,7 +83,7 @@ Home → 开始实验 → 输入名称 → 在终端中操作 → F12 → 输入
 
 ```console
 $ csbox --version
-0.6.0rc1
+0.6.0
 ```
 
 ## 看看当前界面

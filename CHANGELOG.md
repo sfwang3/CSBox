@@ -1,7 +1,8 @@
 # Changelog
 
-## 0.6.0rc1
+## 0.6.0
 
+- **Release:** v0.6.0 is the current stable release.
 - **Unified Evidence:** add typed Lab Capture and saved API Run Step sources to one ordered Evidence Set, with deterministic v1 read / v2 save compatibility.
 - **Mixed Reports:** resolve both canonical source families through their existing safe renderers and preserve Evidence Set order in Markdown, DOCX, and assets.
 - **Documentation:** make Simplified Chinese the default README, add the full English README, and use PyPI-safe absolute language and screenshot links.

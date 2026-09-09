@@ -53,7 +53,7 @@ wheels = [
 
 [[package]]
 name = "csbox"
-version = "0.6.0rc1"
+version = "0.6.0"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },

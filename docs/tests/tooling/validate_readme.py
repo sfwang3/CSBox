@@ -114,16 +114,16 @@ def _check_local_links(name: str, text: str) -> None:
 
 
 def _check_readme(name: str, text: str) -> None:
-    assert "0.6.0rc1" in text
+    assert "0.6.0" in text
     assert "README.zh-CN.md" not in text
     assert "uv tool install csbox" in text
     assert "pip install csbox" not in text.lower()
     if name == "chinese":
         assert re.search(r"[\u4e00-\u9fff]", text)
-        assert "尚未发布到 PyPI" in text
+        assert "稳定版" in text
         assert "不生成结论、答案或课程作业正文" in text
     else:
-        assert "not published to PyPI" in text
+        assert "stable release on PyPI" in text
         assert "does not generate conclusions, answers, or coursework prose" in text
     assert "Lab Capture ─┐" in text
     assert "Evidence Set ── Report" in text
@@ -154,7 +154,7 @@ def main() -> None:
     assert '"README.en.md"' in pyproject
 
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    assert changelog.startswith("# Changelog\n\n## 0.6.0rc1")
+    assert changelog.startswith("# Changelog\n\n## 0.6.0")
     released = changelog.split("## 0.5.0rc1", maxsplit=1)[0]
     assert "This version is not published to PyPI" not in released
 
