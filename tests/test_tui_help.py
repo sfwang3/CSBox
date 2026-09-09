@@ -412,22 +412,22 @@ async def test_review_help_freezes_and_restores_playback_state(tmp_path: Path) -
         assert isinstance(review, ReviewScreen)
         await pilot.pause(0.25)
         assert controller.playing is True
-        before_help = controller.current_time
 
         await pilot.press("?")
-        await pilot.pause()
-        assert isinstance(app.screen, HelpDialog)
+        await wait_for_screen(pilot, app, HelpDialog)
+        await _wait_until(pilot, lambda: controller.playing is False)
+        paused_at = controller.current_time
+        # Review ticks every 0.1 seconds; wait across several ticks after
+        # suspension has settled to prove Help freezes playback.
         await pilot.pause(0.35)
-        assert controller.current_time == pytest.approx(before_help)
-        assert controller.playing is False
+        assert controller.current_time == pytest.approx(paused_at)
 
         await pilot.press("escape")
-        await pilot.pause()
+        await wait_for_screen(pilot, app, "review")
+        await _wait_until(pilot, lambda: controller.playing is True)
         assert app.screen is review
-        assert controller.playing is True
         resumed_at = controller.current_time
-        await pilot.pause(0.25)
-        assert controller.current_time > resumed_at
+        await _wait_until(pilot, lambda: controller.current_time > resumed_at)
 
 
 @pytest.mark.asyncio
