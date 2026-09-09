@@ -669,9 +669,8 @@ async def test_pack_normal_confirmation_is_keyboard_actionable_at_all_layouts(
         assert_visible_geometry(app.screen)
         app.screen.query_one("#pack-confirm").focus()
         await pilot.press("enter")
-        await pilot.pause()
-        assert calls == ["packed"]
-        assert "打包完成" in screen_text(app.screen)
+        await _wait_until(pilot, lambda: calls == ["packed"])
+        await _wait_until(pilot, lambda: "打包完成" in screen_text(app.screen))
         assert SECRET not in screen_text(app.screen)
         assert_static_lines_fit(app.screen)
         await pilot.press("escape")
