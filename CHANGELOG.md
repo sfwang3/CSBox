@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.0rc1
+
+- **Unified Evidence:** add typed Lab Capture and saved API Run Step sources to one ordered Evidence Set, with deterministic v1 read / v2 save compatibility.
+- **Mixed Reports:** resolve both canonical source families through their existing safe renderers and preserve Evidence Set order in Markdown, DOCX, and assets.
+- **Documentation:** make Simplified Chinese the default README, add the full English README, and use PyPI-safe absolute language and screenshot links.
+
 ## 0.5.1
 
 - **Lab & Review:** record a continuous terminal session, capture point-in-time evidence with F12, and review, edit, delete, or export completed records.
@@ -8,8 +14,6 @@
 - **Beginner TUI & Help:** make Home, Help, Lab, Records, Evidence, Check, Pack, Report, and API workflows discoverable with consistent terminology and keyboard guidance.
 - **Documentation & Installation:** provide aligned English and Simplified Chinese guidance, current UI screenshots, and installable wheel/sdist artifacts for Python 3.11+.
 - **Windows / Reliability:** validate the supported Windows terminal, PowerShell, ConPTY, CJK layout, and cross-platform packaging paths in automated CI.
-
-This version is not published to PyPI.
 
 ## 0.5.0rc1
 

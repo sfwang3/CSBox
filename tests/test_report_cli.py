@@ -91,6 +91,34 @@ def test_default_report_profile_uses_existing_config_without_generating_prose(
     assert all(section.body == "" for section in profile.sections)
 
 
+def test_default_report_profile_maps_all_existing_course_and_student_defaults(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / ".csbox" / "config.toml"
+    config_path.parent.mkdir()
+    config_path.write_text(
+        """[student]
+id = "2026001"
+name = "张三"
+[course]
+name = "计算机网络"
+code = "CS201"
+instructor = "王老师"
+semester = "2026 秋"
+""",
+        encoding="utf-8",
+    )
+
+    profile = default_report_profile(tmp_path)
+
+    assert profile.course_name == "计算机网络"
+    assert profile.course_code == "CS201"
+    assert profile.instructor == "王老师"
+    assert profile.semester == "2026 秋"
+    assert profile.student_name == "张三"
+    assert profile.student_id == "2026001"
+
+
 def test_report_export_cli_uses_saved_profile_and_prints_outputs(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

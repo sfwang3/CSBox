@@ -159,6 +159,7 @@ class CSBoxApp(App[LabStartRequest | None]):
             locale=self.locale,
             project_dir=self.project_dir,
             report_export_action=self.report_export_action,
+            api_repository=self.api_repository,
         )
 
     def _critical_workflow_active(self) -> bool:

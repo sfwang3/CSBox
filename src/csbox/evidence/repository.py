@@ -17,7 +17,8 @@ from csbox.core.safe_paths import (
 )
 from csbox.evidence.models import EvidenceSet, EvidenceSetSummary, validate_identifier
 
-EVIDENCE_SET_VERSION = 1
+EVIDENCE_SET_VERSION = 2
+_LEGACY_EVIDENCE_SET_VERSION = 1
 _MAX_EVIDENCE_SET_BYTES = 4 * 1024 * 1024
 _CANONICAL_UTC_DATETIME = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
@@ -101,12 +102,24 @@ class EvidenceSetRepository:
     def save(self, evidence_set: EvidenceSet) -> EvidenceSet:
         if not isinstance(evidence_set, EvidenceSet):
             raise TypeError("evidence_set must be an EvidenceSet")
-        path = self.path_for(evidence_set.evidence_set_id)
+        try:
+            candidate = EvidenceSet.model_validate(
+                {
+                    "id": evidence_set.evidence_set_id,
+                    "title": evidence_set.title,
+                    "items": evidence_set.items,
+                    "created_at": evidence_set.created_at,
+                    "updated_at": evidence_set.updated_at,
+                }
+            )
+        except (AttributeError, TypeError, ValueError, ValidationError) as exc:
+            raise EvidencePersistenceError("证据集信息无效，无法保存。") from exc
+        path = self.path_for(candidate.evidence_set_id)
         if not path.exists() or path.is_symlink() or not path.is_file():
             raise EvidencePersistenceError("证据集文件不存在或不可写。")
         try:
-            persisted = self._read(path, expected_id=evidence_set.evidence_set_id)
-            updated = evidence_set.model_copy(
+            persisted = self._read(path, expected_id=candidate.evidence_set_id)
+            updated = candidate.model_copy(
                 update={
                     "created_at": persisted.created_at,
                     "updated_at": self._now(),
@@ -206,10 +219,16 @@ class EvidenceSetRepository:
         raw = json.loads(read_regular_text(path, max_bytes=_MAX_EVIDENCE_SET_BYTES))
         if not isinstance(raw, dict) or set(raw) != _DOCUMENT_KEYS:
             raise ValueError("invalid Evidence Set document keys")
-        if raw.get("version") != EVIDENCE_SET_VERSION:
+        version = raw.get("version")
+        if type(version) is not int or version not in {
+            _LEGACY_EVIDENCE_SET_VERSION,
+            EVIDENCE_SET_VERSION,
+        }:
             raise ValueError("unsupported Evidence Set version")
         if raw.get("id") != expected_id:
             raise ValueError("Evidence Set ID does not match its filename")
+        if version == _LEGACY_EVIDENCE_SET_VERSION:
+            raw = _normalize_v1(raw)
         for field_name in ("created_at", "updated_at"):
             raw[field_name] = _parse_timestamp(raw[field_name], field_name=field_name)
         model_payload = {key: value for key, value in raw.items() if key != "version"}
@@ -229,6 +248,35 @@ def _serialize(evidence_set: EvidenceSet) -> str:
         "updated_at": _utc_iso(evidence_set.updated_at),
     }
     return json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+
+
+def _normalize_v1(raw: dict[str, object]) -> dict[str, object]:
+    """Convert a legacy Lab-only document in memory without mutating its file."""
+
+    items = raw.get("items")
+    if not isinstance(items, list):
+        raise ValueError("invalid legacy Evidence Set items")
+
+    normalized_items: list[dict[str, object]] = []
+    item_keys = frozenset({"source", "title", "caption", "note"})
+    source_keys = frozenset({"source_type", "session_id", "capture_id"})
+    for item in items:
+        if not isinstance(item, dict) or set(item) != item_keys:
+            raise ValueError("invalid legacy Evidence Set item")
+        source = item.get("source")
+        if (
+            not isinstance(source, dict)
+            or set(source) != source_keys
+            or source.get("source_type") != "lab_capture"
+        ):
+            raise ValueError("invalid legacy Lab source")
+        normalized = dict(item)
+        normalized["source"] = dict(source)
+        normalized_items.append(normalized)
+
+    normalized_document = dict(raw)
+    normalized_document["items"] = normalized_items
+    return normalized_document
 
 
 def _parse_timestamp(value: object, *, field_name: str) -> datetime:

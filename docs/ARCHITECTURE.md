@@ -12,6 +12,22 @@ tui / cli  ───────────────→  check / pack servic
 
 `core` 的终端协议层只描述事件、尺寸、显示宽度和 backend 边界，不依赖 Recorder、pyte、Pillow 或 Textual。`core.fonts` 是 API 与 Lab evidence 共用的兼容入口，它委托 `lab.fonts` 并使用 Pillow。`lab` 将真实 backend 的字节转换为统一 `TerminalEvent`，再分发给 recorder、emulator 和 Capture store。`check`、`pack` 是独立 service；`pack` 通过 `CheckService` 复用检查结果，但不修改源项目。CLI/TUI 负责编排和展示。
 
+## Unified Evidence 与 Report
+
+Evidence Set 使用闭合的带 discriminator 的 source union：`LabCaptureSource` 保存
+`(source_type, session_id, capture_id)`，`ApiStepSource` 保存
+`(source_type, run_id, step_index)`。Evidence Item 只在这两个来源引用与用户的
+`title`、`caption`、`note` 之间建立顺序关系，不复制来源 payload。
+
+旧的 v1 Lab-only Evidence Set 在读取时只做内存中的确定性规范化，不改写文件；新建或
+显式保存的文档使用 Evidence Set schema v2。未知版本、未知 source type、未知字段和
+损坏文档都 fail closed，单个损坏文件不会阻塞其他集合列出。
+
+Report 先通过 `EvidenceSourceResolver` 将每一项路由到 `LabCaptureResolver` 或
+`ApiStepResolver`，再把 Lab Capture 交给 `TerminalEvidenceRenderer`，把安全的
+`ApiEvidence` 交给 `ApiEvidenceRenderer`。所有来源在进入既有 staging/publication
+事务前按 Evidence Set 顺序完成解析；因此混合来源不会按类型分组，也不会发布部分报告。
+
 ## 实验事件流
 
 ```text
@@ -50,10 +66,15 @@ Unix backend 使用真实 PTY，支持初始尺寸、resize、Ctrl+C、EOF 和 c
 
 `ApiResponse` 可以作为 assertion 执行期间的瞬态内部表示，但不得直接进入 persistence、evidence、日志或 TUI。所有这些外部消费者必须先调用 `ApiResponse.redacted_copy(redactor)`，并且只保存或展示返回的副本。HTTPX transport 当前在构造返回值前已执行同一套 URL、header 和 body 脱敏；消费边界再次调用时保持幂等。
 
+`ApiStepResolver` 只从 `ApiRunRepository.load()` 得到已持久化的安全 `ApiRun`，再复用
+`ApiEvidenceBuilder` 和 `redact_evidence()` 构造报告所需的安全视图。Evidence Set、
+Report exporter、Markdown、DOCX、PNG 和 TUI 都不接触瞬态 raw assertion view，也不触发
+API transport。
+
 `Redactor` 依据显式 policy、request-derived 精确值和敏感字段名工作。它不会假设能够推断任意未知 secret，也不会把普通 response body 全部遮蔽；无法通过 policy 或结构识别的未知内容属于调用方必须明确配置的剩余风险。
 
 ## Distribution 与安装态
 
-项目使用 Hatchling 的 `src/csbox` package layout。wheel 只包含运行时 Python package、locale JSON、Textual TCSS 和 distribution metadata；sdist 只保留公开 README、许可证、用户文档、`src/csbox` 与构建所需配置，不包含测试、参考图片或内部开发资料。版本由 distribution metadata 提供给运行时，`csbox --version`、session/manifest 字段和 wheel metadata 使用同一个 `0.5.1` 版本。
+项目使用 Hatchling 的 `src/csbox` package layout。wheel 只包含运行时 Python package、locale JSON、Textual TCSS 和 distribution metadata；sdist 只保留公开 README、许可证、用户文档、`src/csbox` 与构建所需配置，不包含测试、参考图片或内部开发资料。版本由 distribution metadata 提供给运行时，`csbox --version`、session/manifest 字段和 wheel metadata 使用同一个 `0.6.0rc1` 版本。公开文档以 Simplified Chinese `README.md` 为默认 README，完整英文文档为 `README.en.md`。
 
 安装后的入口是 `csbox` console script。用户可以用普通 venv 或 `uv tool install <wheel>` 安装，再从项目目录之外运行 `csbox --help`、`doctor`、`check` 和 `pack`；locale、TCSS 与 renderer 通过 package/resource 或系统字体查找，不依赖当前 Git checkout。

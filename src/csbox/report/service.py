@@ -12,8 +12,11 @@ def default_report_profile(cwd: Path | str) -> ReportProfile:
     config = load_config(Path(cwd))
     return ReportProfile.default(
         course_name=config.course.name or "",
+        course_code=config.course.code or "",
         student_name=config.student.name or "",
         student_id=config.student.id or "",
+        instructor=config.course.instructor or "",
+        semester=config.course.semester or "",
     )
 
 

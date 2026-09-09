@@ -9,6 +9,7 @@ from csbox.config import (
     ApiConfig,
     ConfigPaths,
     ConfigurationError,
+    CourseConfig,
     CSBoxConfig,
     LabConfig,
     load_config,
@@ -244,3 +245,23 @@ def test_save_project_config_round_trips_api_settings(tmp_path: Path) -> None:
     )
 
     assert loaded.api.variables == {"BASE_URL": "https://example.test"}
+
+
+def test_course_defaults_round_trip_without_parallel_persistence(tmp_path: Path) -> None:
+    config = CSBoxConfig(
+        course=CourseConfig(
+            name="计算机网络",
+            code="CS201",
+            instructor="王老师",
+            semester="2026 秋",
+        )
+    )
+
+    config_path = save_project_config(config, tmp_path)
+    loaded = load_config(
+        tmp_path,
+        paths=ConfigPaths(user=tmp_path / "user.toml", project=config_path),
+    )
+
+    assert loaded.course == config.course
+    assert not (tmp_path / ".csbox" / "course.json").exists()

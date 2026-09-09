@@ -161,6 +161,8 @@ def test_built_artifacts_contain_runtime_package_and_resources_without_local_mat
             )
             for member in members
         )
+    sdist_members = _sdist_members(sdist)
+    assert {"README.md", "README.en.md"} <= sdist_members
     assert SECRET_SENTINEL not in wheel.read_bytes()
     assert SECRET_SENTINEL not in sdist.read_bytes()
 
@@ -417,4 +419,4 @@ def test_uv_tool_install_runs_built_wheel_outside_repository(tmp_path: Path) -> 
         text=True,
         encoding="utf-8",
     )
-    assert result.stdout.strip() == "0.5.1"
+    assert result.stdout.strip() == "0.6.0rc1"

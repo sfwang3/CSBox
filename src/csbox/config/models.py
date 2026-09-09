@@ -16,6 +16,9 @@ class StudentConfig(_ConfigModel):
 
 class CourseConfig(_ConfigModel):
     name: str | None = None
+    code: str | None = None
+    instructor: str | None = None
+    semester: str | None = None
 
 
 class LabConfig(_ConfigModel):

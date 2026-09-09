@@ -102,15 +102,21 @@ class ReportProfile(BaseModel):
         cls,
         *,
         course_name: str = "",
+        course_code: str = "",
         student_name: str = "",
         student_id: str = "",
+        instructor: str = "",
+        semester: str = "",
     ) -> ReportProfile:
         """Return the deterministic built-in structure with supplied metadata defaults."""
 
         return cls(
             course_name=course_name,
+            course_code=course_code,
             student_name=student_name,
             student_id=student_id,
+            instructor=instructor,
+            semester=semester,
             sections=(ReportSection(heading="实验记录", include_evidence=True),),
         )
 

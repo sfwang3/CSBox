@@ -13,6 +13,7 @@ from textual.events import Resize
 from textual.screen import Screen
 from textual.widgets import Button, Static
 
+from csbox.api.repository import ApiRunRepository
 from csbox.config.loader import ConfigurationError
 from csbox.core.display_width import truncate_cells
 from csbox.core.text_layout import wrap_cells
@@ -22,9 +23,15 @@ from csbox.evidence.exporter import (
     ReportExportRequest,
     ReportExportResult,
 )
-from csbox.evidence.models import EvidenceItem, EvidenceSet, EvidenceSetSummary
+from csbox.evidence.models import (
+    ApiStepSource,
+    EvidenceItem,
+    EvidenceSet,
+    EvidenceSetSummary,
+    LabCaptureSource,
+)
 from csbox.evidence.repository import EvidencePersistenceError, EvidenceSetRepository
-from csbox.evidence.resolver import LabCaptureResolver
+from csbox.evidence.resolver import ApiStepResolver, EvidenceSourceResolver, LabCaptureResolver
 from csbox.evidence.service import create_report_handoff_service
 from csbox.lab.repository import SessionRepository
 from csbox.locales import Translator
@@ -62,6 +69,7 @@ class EvidenceSetsScreen(Screen[None]):
         locale: Translator,
         project_dir: Path | str | None = None,
         report_export_action: ReportExportAction | None = None,
+        api_repository: ApiRunRepository | None = None,
     ) -> None:
         super().__init__(name="evidence-sets")
         self.repository = repository
@@ -69,6 +77,7 @@ class EvidenceSetsScreen(Screen[None]):
         self.locale = locale
         self.project_dir = Path(project_dir) if project_dir is not None else Path.cwd()
         self.report_export_action = report_export_action
+        self.api_repository = api_repository or ApiRunRepository.from_cwd(self.project_dir)
         self.summaries: tuple[EvidenceSetSummary, ...] = ()
         self.selected_evidence_set_id: str | None = None
         self._load_failed = False
@@ -242,6 +251,7 @@ class EvidenceSetsScreen(Screen[None]):
                 locale=self.locale,
                 project_dir=self.project_dir,
                 report_export_action=self.report_export_action,
+                api_repository=self.api_repository,
             )
         )
 
@@ -265,6 +275,7 @@ class EvidenceSetsScreen(Screen[None]):
                 locale=self.locale,
                 project_dir=self.project_dir,
                 report_export_action=self.report_export_action,
+                api_repository=self.api_repository,
             )
         )
 
@@ -309,6 +320,7 @@ class EvidenceSetEditorScreen(Screen[None]):
         locale: Translator,
         project_dir: Path | str | None = None,
         report_export_action: ReportExportAction | None = None,
+        api_repository: ApiRunRepository | None = None,
     ) -> None:
         super().__init__(name="evidence-editor")
         self.repository = repository
@@ -316,9 +328,14 @@ class EvidenceSetEditorScreen(Screen[None]):
         self.locale = locale
         self.project_dir = Path(project_dir) if project_dir is not None else Path.cwd()
         self.report_export_action = report_export_action
+        self.api_repository = api_repository or ApiRunRepository.from_cwd(self.project_dir)
         self.report_profile_repository = ReportProfileRepository.from_cwd(self.project_dir)
         self.working_set = evidence_set
-        self.resolver = LabCaptureResolver(session_repository)
+        self.api_resolver = ApiStepResolver(self.api_repository)
+        self.resolver = EvidenceSourceResolver(
+            LabCaptureResolver(session_repository),
+            self.api_resolver,
+        )
         self.selected_index = 0
         self.save_failed = False
         self.status = self.locale("evidence.status.saved")
@@ -463,13 +480,37 @@ class EvidenceSetEditorScreen(Screen[None]):
             self.locale("evidence.item.detail.title", value=item.title),
             self.locale("evidence.item.detail.source", value=_source_text(item.source)),
             source_status,
-            self.locale(
-                "evidence.item.detail.session",
-                value=resolved.session_name or "（不可用）",
-            ),
-            self.locale("evidence.item.detail.caption", value=item.caption or "（空）"),
-            self.locale("evidence.item.detail.note", value=item.note or "（空）"),
         ]
+        if isinstance(item.source, LabCaptureSource):
+            lines.append(
+                self.locale(
+                    "evidence.item.detail.session",
+                    value=resolved.session_name or "（不可用）",
+                )
+            )
+        elif isinstance(item.source, ApiStepSource):
+            lines.extend(
+                (
+                    self.locale(
+                        "evidence.item.detail.scenario",
+                        value=resolved.scenario_name or "（不可用）",
+                    ),
+                    self.locale(
+                        "evidence.item.detail.step",
+                        value=resolved.step_name or "（不可用）",
+                    ),
+                    self.locale(
+                        "evidence.item.detail.run_status",
+                        value=resolved.run_status or "（不可用）",
+                    ),
+                )
+            )
+        lines.extend(
+            (
+                self.locale("evidence.item.detail.caption", value=item.caption or "（空）"),
+                self.locale("evidence.item.detail.note", value=item.note or "（空）"),
+            )
+        )
         return "\n".join(line for raw in lines for line in wrap_cells(raw, width))
 
     def _fit(self, text: str, width: int) -> str:
@@ -512,6 +553,7 @@ class EvidenceSetEditorScreen(Screen[None]):
                 session_repository=self.session_repository,
                 existing_sources=tuple(item.source for item in self.working_set.items),
                 locale=self.locale,
+                api_repository=self.api_repository,
             ),
             self._handle_item_add,
         )
@@ -884,7 +926,11 @@ def _format_local_time(value: datetime | None) -> str:
 
 
 def _source_text(source: object) -> str:
-    return f"实验记录 {source.session_id} / 关键画面 {source.capture_id}"
+    if isinstance(source, LabCaptureSource):
+        return f"实验记录 {source.session_id} / 关键画面 {source.capture_id}"
+    if isinstance(source, ApiStepSource):
+        return f"API 运行 {source.run_id} / 第 {source.step_index} 步"
+    return "未知来源"
 
 
 def default_report_destination(project_dir: Path | str, evidence_set_id: str) -> Path:

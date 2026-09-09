@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "csbox"
-version = "0.5.1"
+version = "0.6.0rc1"
 description = "计算机实验与项目交付工具"
 readme = "README.md"
 license = "Apache-2.0"
@@ -46,8 +46,10 @@ include = [
   "CHANGELOG.md",
   "LICENSE",
   "README.md",
+  "README.en.md",
   "docs/API_EVIDENCE.md",
   "docs/ARCHITECTURE.md",
+  "docs/EVIDENCE_FORMAT.md",
   "docs/SECURITY.md",
   "docs/SESSION_FORMAT.md",
   "docs/TERMINAL_BACKENDS.md",

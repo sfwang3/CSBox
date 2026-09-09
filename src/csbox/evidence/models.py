@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Annotated, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -47,19 +48,16 @@ def _utc_datetime(value: datetime, *, field_name: str) -> datetime:
     return value.astimezone(UTC)
 
 
-class EvidenceSource(BaseModel):
-    """A stable reference to an existing source artifact."""
+class _SourceModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
 
-    source_type: str
+class LabCaptureSource(_SourceModel):
+    """A stable reference to one canonical Lab Capture."""
+
+    source_type: Literal["lab_capture"] = "lab_capture"
     session_id: str
     capture_id: str
-
-    @field_validator("source_type", mode="before")
-    @classmethod
-    def _validate_source_type(cls, value: object) -> str:
-        return _required_text(value, field_name="source_type")
 
     @field_validator("session_id", "capture_id", mode="before")
     @classmethod
@@ -74,12 +72,60 @@ class EvidenceSource(BaseModel):
         return (self.source_type, self.session_id, self.capture_id)
 
 
+class ApiStepSource(_SourceModel):
+    """A stable reference to one already-persisted API run step."""
+
+    source_type: Literal["api_step"] = "api_step"
+    run_id: str
+    step_index: int = Field(ge=1)
+
+    @field_validator("run_id", mode="before")
+    @classmethod
+    def _validate_run_id(cls, value: object) -> str:
+        return validate_identifier(value, field_name="run_id")
+
+    @field_validator("step_index", mode="before")
+    @classmethod
+    def _validate_step_index(cls, value: object) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError("step_index must be a positive integer")
+        return value
+
+    @property
+    def equality_key(self) -> tuple[str, str, int]:
+        """Return the complete source reference used for duplicate detection."""
+
+        return (self.source_type, self.run_id, self.step_index)
+
+
+EvidenceSourceValue: TypeAlias = Annotated[
+    LabCaptureSource | ApiStepSource,
+    Field(discriminator="source_type"),
+]
+
+
+def EvidenceSource(**data: object) -> EvidenceSourceValue:
+    """Construct a typed source while retaining the v0.5 call syntax.
+
+    Nested Pydantic validation uses ``EvidenceSourceValue``. The factory keeps
+    the v0.5 call syntax for the two supported variants while rejecting every
+    other discriminator.
+    """
+
+    source_type = data.get("source_type")
+    if source_type == "lab_capture":
+        return LabCaptureSource.model_validate(data)
+    if source_type == "api_step":
+        return ApiStepSource.model_validate(data)
+    raise ValueError("unsupported Evidence source type")
+
+
 class EvidenceItem(BaseModel):
     """Presentation metadata plus a stable source reference."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    source: EvidenceSource
+    source: EvidenceSourceValue
     title: str
     caption: str = ""
     note: str = ""
@@ -141,6 +187,9 @@ __all__ = [
     "EvidenceItem",
     "EvidenceSet",
     "EvidenceSetSummary",
+    "ApiStepSource",
     "EvidenceSource",
+    "EvidenceSourceValue",
+    "LabCaptureSource",
     "validate_identifier",
 ]

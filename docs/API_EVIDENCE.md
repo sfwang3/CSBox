@@ -21,3 +21,23 @@ csbox api export <RUN_ID> --output evidence --theme dark
 - JSON 输出使用 `schema_version: 1`，适合脚本读取；JSON 不包含原始 transport secret。
 
 API Evidence 不是终端截图：终端实验仍使用 `csbox lab export` 生成基于 terminal cell 的证据 PNG。
+
+## 进入统一 Evidence Set
+
+API Evidence 进入 Evidence Set 时使用一个严格的 `ApiStepSource` 引用：
+
+```json
+{
+  "source_type": "api_step",
+  "run_id": "run-2026-09-01",
+  "step_index": 1
+}
+```
+
+`step_index` 与 `ApiEvidenceBuilder` 的既有约定一致，从 `1` 开始。Evidence Set
+只保存这个引用以及用户填写的标题、图注和备注，不复制 request、response、断言或
+PNG。Evidence 浏览和 Report 导出都只读取 `.csbox/api/runs/` 中已经保存、已经脱敏的
+`ApiRun`；它们不会发送网络请求、重新执行场景或修改原运行记录。
+
+解析失败时 API 步骤会保留在 Evidence Set 中，并显示受控的不可用状态。CSBox 不会
+根据步骤标题猜测另一个步骤，也不会用瞬态的原始断言视图替代已保存的安全表示。

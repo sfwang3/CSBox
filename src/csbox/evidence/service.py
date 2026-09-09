@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from csbox.api.renderer import ApiEvidenceRenderer
+from csbox.api.repository import ApiRunRepository
 from csbox.config.loader import load_config
 from csbox.evidence.exporter import EvidenceReportExporter, PhaseCallback, ReportExportResult
 from csbox.evidence.models import EvidenceSet
-from csbox.evidence.resolver import LabCaptureResolver
+from csbox.evidence.resolver import ApiStepResolver, EvidenceSourceResolver, LabCaptureResolver
 from csbox.lab.fonts import FontResolver
 from csbox.lab.renderer import TerminalEvidenceRenderer
 from csbox.lab.repository import SessionRepository
@@ -43,17 +45,28 @@ def create_report_handoff_service(
     *,
     repository: SessionRepository | None = None,
     renderer: TerminalEvidenceRenderer | None = None,
+    api_repository: ApiRunRepository | None = None,
+    api_renderer: ApiEvidenceRenderer | None = None,
 ) -> ReportHandoffService:
     working_directory = Path(cwd)
     config = load_config(working_directory)
     session_repository = repository or SessionRepository.from_cwd(working_directory)
+    api_run_repository = api_repository or ApiRunRepository.from_cwd(working_directory)
     selected_renderer = renderer or TerminalEvidenceRenderer(
+        FontResolver(explicit=config.render.font)
+    )
+    selected_api_renderer = api_renderer or ApiEvidenceRenderer(
         FontResolver(explicit=config.render.font)
     )
     return ReportHandoffService(
         EvidenceReportExporter(
-            LabCaptureResolver(session_repository),
+            EvidenceSourceResolver(
+                LabCaptureResolver(session_repository),
+                ApiStepResolver(api_run_repository),
+            ),
             selected_renderer,
+            api_renderer=selected_api_renderer,
+            api_theme=config.render.theme,
         )
     )
 

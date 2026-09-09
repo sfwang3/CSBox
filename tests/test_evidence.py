@@ -4,6 +4,7 @@ import json
 import os
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -352,7 +353,7 @@ def test_resolver_does_not_treat_unsupported_source_type_as_lab_path(tmp_path: P
     resolver = LabCaptureResolver(SessionRepository(tmp_path / "sessions"))
 
     resolved = resolver.resolve(
-        EvidenceSource(
+        SimpleNamespace(
             source_type="future_source",
             session_id="session",
             capture_id="capture",

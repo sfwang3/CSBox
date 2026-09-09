@@ -8,6 +8,8 @@ import pytest
 from textual.widget import Widget
 from textual.widgets import Button, Checkbox, Input, Static, TextArea
 
+from csbox.api.models import ApiRequest, ApiRun, ApiRunResult, ApiScenario, ApiStep
+from csbox.api.repository import ApiRunRepository
 from csbox.core.display_width import display_width
 from csbox.core.events import TerminalSize
 from csbox.core.models import EnvironmentSnapshot
@@ -37,6 +39,108 @@ from csbox.tui.screens.evidence_sources import EvidenceCaptureBrowserScreen
 from csbox.tui.screens.home import HomeScreen
 from csbox.tui.screens.report import ReportExportResultScreen
 from tui_harness import wait_for_focus, wait_for_screen, wait_for_widget
+
+
+@pytest.mark.asyncio
+async def test_add_api_step_from_saved_run_uses_source_picker(tmp_path: Path) -> None:
+    api_repository = ApiRunRepository(tmp_path / ".csbox" / "api" / "runs")
+    api_repository.save(
+        ApiRun(
+            id="run-1",
+            scenario=ApiScenario(
+                name="中文 API 场景",
+                steps=(
+                    ApiStep(
+                        name="登录步骤",
+                        request=ApiRequest(method="GET", url="https://example.test/login"),
+                    ),
+                ),
+            ),
+            started_at=datetime(2026, 9, 1, tzinfo=UTC),
+            results=(ApiRunResult(step_name="登录步骤"),),
+            ended_at=datetime(2026, 9, 1, 0, 1, tzinfo=UTC),
+        )
+    )
+    app = evidence_app(tmp_path)
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await open_empty_editor(app, pilot)
+        await pilot.press("a")
+        await pilot.pause()
+        assert isinstance(app.screen, EvidenceCaptureBrowserScreen)
+        assert "实验关键画面" in screen_text(app.screen)
+        assert "API 实验步骤" in screen_text(app.screen)
+
+        await pilot.press("down", "enter")
+        await pilot.pause()
+        assert app.screen.stage == "api_runs"
+        assert "中文 API 场景" in screen_text(app.screen)
+        assert "API_SECRET" not in screen_text(app.screen)
+
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.screen.stage == "api_steps"
+        assert "登录步骤" in screen_text(app.screen)
+
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.screen, EvidenceSetEditorScreen)
+        item = app.screen.working_set.items[0]
+        assert item.source.source_type == "api_step"
+        assert item.source.run_id == "run-1"
+        assert item.source.step_index == 1
+        assert item.title == "登录步骤"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", ((80, 24), (100, 30), (120, 35), (160, 45)))
+async def test_api_evidence_browser_keeps_safe_cjk_rows_inside_viewport(
+    tmp_path: Path,
+    size: tuple[int, int],
+) -> None:
+    api_repository = ApiRunRepository(tmp_path / ".csbox" / "api" / "runs")
+    secret = "API_TUI_SECRET_SENTINEL"
+    steps = tuple(
+        ApiStep(
+            name=f"第 {index} 个中文步骤" * 4,
+            request=ApiRequest(
+                method="GET",
+                url=f"https://example.test/{index}?token={secret}",
+            ),
+        )
+        for index in (1, 2)
+    )
+    api_repository.save(
+        ApiRun(
+            id="run-cjk",
+            scenario=ApiScenario(name="很长的中文 API 场景" * 4, steps=steps),
+            started_at=datetime(2026, 9, 1, tzinfo=UTC),
+            results=tuple(ApiRunResult(step_name=step.name) for step in steps),
+            ended_at=datetime(2026, 9, 1, 0, 1, tzinfo=UTC),
+        )
+    )
+    app = evidence_app(tmp_path, api_repository=api_repository)
+
+    async with app.run_test(size=size) as pilot:
+        await open_empty_editor(app, pilot)
+        await pilot.press("a", "down", "enter")
+        await pilot.pause()
+        assert isinstance(app.screen, EvidenceCaptureBrowserScreen)
+        assert app.screen.stage == "api_runs"
+        assert_static_lines_fit(app.screen)
+        assert_visible_geometry(app.screen)
+        assert secret not in screen_text(app.screen)
+
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.screen.stage == "api_steps"
+        assert_static_lines_fit(app.screen)
+        assert_visible_geometry(app.screen)
+        assert secret not in screen_text(app.screen)
+
+        await pilot.press("escape", "escape")
+        await pilot.pause()
+        assert isinstance(app.screen, EvidenceSetEditorScreen)
 
 
 def _environment() -> EnvironmentSnapshot:
@@ -88,6 +192,7 @@ def evidence_app(
     evidence_id_factory: object | None = None,
     session_repository: SessionRepository | None = None,
     evidence_repository: EvidenceSetRepository | None = None,
+    api_repository: ApiRunRepository | None = None,
     report_export_action: object | None = None,
 ) -> CSBoxApp:
     session_repository = session_repository or SessionRepository(
@@ -103,6 +208,7 @@ def evidence_app(
         locale=load_locale(),
         session_repository=session_repository,
         evidence_repository=evidence_repository,
+        api_repository=api_repository,
         report_export_action=report_export_action,  # type: ignore[arg-type]
     )
 
@@ -670,6 +776,8 @@ async def test_running_session_is_visible_but_not_addable(tmp_path: Path) -> Non
         await pilot.press("a")
         await pilot.pause()
         assert isinstance(app.screen, EvidenceCaptureBrowserScreen)
+        await pilot.press("enter")
+        await pilot.pause()
         assert "尚未结束" in screen_text(app.screen)
         await pilot.press("enter")
         await pilot.pause()

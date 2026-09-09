@@ -36,8 +36,13 @@ from csbox.core.safe_paths import (
     safe_rename,
 )
 from csbox.evidence.models import EvidenceItem, EvidenceSet
-from csbox.evidence.resolver import LabCaptureResolver
-from csbox.lab.models import CaptureRecord
+from csbox.evidence.resolver import (
+    EvidenceSourceResolver,
+    LabCaptureResolver,
+    ResolvedApiStep,
+    ResolvedLabCapture,
+    ResolvedReportableEvidence,
+)
 from csbox.lab.renderer import TerminalEvidenceRenderer
 from csbox.report.models import ReportProfile, ReportSection
 
@@ -150,17 +155,23 @@ def _destination_lock(destination: Path) -> Iterator[None]:
 
 
 class EvidenceReportExporter:
-    """Export an Evidence Set through canonical Lab Captures only."""
+    """Export an Evidence Set through its canonical typed source resolvers."""
 
     def __init__(
         self,
-        resolver: LabCaptureResolver,
+        resolver: EvidenceSourceResolver | LabCaptureResolver,
         renderer: TerminalEvidenceRenderer,
         *,
+        api_renderer: object | None = None,
+        api_theme: str = "dark",
         docx_writer: DocxWriter | None = None,
     ) -> None:
         self.resolver = resolver
         self.renderer = renderer
+        if api_theme not in {"dark", "light"}:
+            raise ValueError("api_theme must be dark or light")
+        self.api_renderer = api_renderer
+        self.api_theme = api_theme
         self.docx_writer = docx_writer
 
     def export(
@@ -199,9 +210,20 @@ class EvidenceReportExporter:
                 mkdir_exclusive(assets)
 
                 rendered: list[tuple[EvidenceItem, Path]] = []
-                for index, (item, capture) in enumerate(resolved, start=1):
+                for index, (item, resolved_source) in enumerate(resolved, start=1):
                     image_path = assets / _asset_name(index, item.title)
-                    self.renderer.render(capture.snapshot, image_path)
+                    if resolved_source.capture is not None:
+                        self.renderer.render(resolved_source.capture.snapshot, image_path)
+                    elif resolved_source.api_evidence is not None:
+                        if self.api_renderer is None:
+                            raise ValueError("API evidence renderer is not configured")
+                        self.api_renderer.render(
+                            resolved_source.api_evidence,
+                            image_path,
+                            theme=self.api_theme,
+                        )
+                    else:
+                        raise ValueError("resolved evidence has no reportable payload")
                     rendered.append((item, image_path))
 
                 markdown_path = staging / "report.md"
@@ -275,18 +297,18 @@ class EvidenceReportExporter:
     def _resolve_all(
         self,
         evidence_set: EvidenceSet,
-    ) -> tuple[tuple[EvidenceItem, CaptureRecord], ...]:
-        resolved: list[tuple[EvidenceItem, CaptureRecord]] = []
+    ) -> tuple[tuple[EvidenceItem, ResolvedReportableEvidence], ...]:
+        resolved: list[tuple[EvidenceItem, ResolvedReportableEvidence]] = []
         unavailable: list[str] = []
         for item in evidence_set.items:
             try:
-                source = self.resolver.resolve(item.source)
+                source = self._resolve_source(item.source)
             except Exception:
                 source = None
-            if source is None or not source.available or source.capture is None:
+            if source is None or not source.available:
                 unavailable.append(item.title)
                 continue
-            resolved.append((item, source.capture))
+            resolved.append((item, source))
         if unavailable:
             raise ReportExportError(
                 "有证据来源不可用，请恢复来源、移除不可用引用，或返回 Evidence Set。",
@@ -295,19 +317,43 @@ class EvidenceReportExporter:
             )
         return tuple(resolved)
 
-    def _reject_source_destination(self, destination: Path) -> None:
-        repository = getattr(self.resolver, "repository", None)
-        source_root = getattr(repository, "root", None)
-        if source_root is None:
-            return
-        candidate = Path(os.path.abspath(destination))
-        source_root = Path(os.path.abspath(Path(source_root)))
-        if candidate == source_root or candidate.is_relative_to(source_root):
-            raise ReportExportError(
-                "报告不能写入 Lab 源目录，请选择源目录之外的位置。",
-                destination=destination,
-                kind="destination",
+    def _resolve_source(self, source: object) -> ResolvedReportableEvidence | None:
+        resolved = self.resolver.resolve(source)
+        if isinstance(resolved, ResolvedReportableEvidence):
+            return resolved
+        if isinstance(resolved, ResolvedLabCapture):
+            return ResolvedReportableEvidence(
+                source=resolved.source,
+                capture=resolved.capture,
+                session_name=resolved.session_name,
+                unavailable_reason=resolved.unavailable_reason,
             )
+        if isinstance(resolved, ResolvedApiStep):
+            return ResolvedReportableEvidence(
+                source=resolved.source,
+                api_evidence=resolved.evidence,
+                scenario_name=resolved.scenario_name,
+                step_name=resolved.step_name,
+                run_status=resolved.run_status,
+                unavailable_reason=resolved.unavailable_reason,
+            )
+        return None
+
+    def _reject_source_destination(self, destination: Path) -> None:
+        candidate = Path(os.path.abspath(destination))
+        source_roots = getattr(self.resolver, "source_roots", None)
+        if source_roots is None:
+            repository = getattr(self.resolver, "repository", None)
+            source_root = getattr(repository, "root", None)
+            source_roots = () if source_root is None else (source_root,)
+        for source_root in source_roots:
+            canonical_root = Path(os.path.abspath(Path(source_root)))
+            if candidate == canonical_root or candidate.is_relative_to(canonical_root):
+                raise ReportExportError(
+                    "报告不能写入证据源目录，请选择源目录之外的位置。",
+                    destination=destination,
+                    kind="destination",
+                )
 
     @staticmethod
     def _emit(callback: PhaseCallback | None, phase: ReportExportPhase) -> None:
