@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security boundaries
+    url: https://github.com/sfwang3/CSBox/blob/main/docs/SECURITY.md
+    about: Read the product security boundaries; do not post secrets or vulnerability details in public Issues.

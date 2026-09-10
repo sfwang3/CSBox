@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.1
+
+- **Open-source project surface:** add a concise contributor guide, structured issue forms, and pull request guidance.
+- **Contribution workflow:** document targeted testing, Ruff and formatting checks, CJK/display-width expectations, supported platforms, security boundaries, and academic integrity.
+- **GitHub metadata:** refresh the repository description, homepage, topics, and historical pull request housekeeping.
+- **Package project URLs:** expose the canonical repository, issue tracker, and changelog links in distribution metadata.
+- **Release presentation:** make the release-note contract explicit and improve the public v0.6.0 and v0.6.1 release descriptions.
+- **Public documentation:** link both README variants to `CONTRIBUTING.md` and update the current stable version to 0.6.1.
+
 ## 0.6.0
 
 - **Release:** v0.6.0 is the current stable release.

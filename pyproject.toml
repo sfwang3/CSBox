@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "csbox"
-version = "0.6.0"
+version = "0.6.1"
 description = "计算机实验与项目交付工具"
 readme = "README.md"
 license = "Apache-2.0"
@@ -28,6 +28,12 @@ dependencies = [
 [project.scripts]
 csbox = "csbox.cli:main"
 
+[project.urls]
+Homepage = "https://github.com/sfwang3/CSBox"
+Repository = "https://github.com/sfwang3/CSBox"
+Issues = "https://github.com/sfwang3/CSBox/issues"
+Changelog = "https://github.com/sfwang3/CSBox/blob/main/CHANGELOG.md"
+
 [dependency-groups]
 dev = [
   "pytest>=8.0",
@@ -44,6 +50,7 @@ packages = ["src/csbox"]
 [tool.hatch.build.targets.sdist]
 include = [
   "CHANGELOG.md",
+  "CONTRIBUTING.md",
   "LICENSE",
   "README.md",
   "README.en.md",

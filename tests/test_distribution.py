@@ -14,6 +14,12 @@ from csbox import __version__
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SECRET_SENTINEL = b"CSBOX_SECRET_SENTINEL"
+PROJECT_URLS = {
+    "Homepage": "https://github.com/sfwang3/CSBox",
+    "Repository": "https://github.com/sfwang3/CSBox",
+    "Issues": "https://github.com/sfwang3/CSBox/issues",
+    "Changelog": "https://github.com/sfwang3/CSBox/blob/main/CHANGELOG.md",
+}
 LOCAL_ONLY_MARKERS = (
     ".superpowers/",
     "docs/superpowers/",
@@ -162,7 +168,11 @@ def test_built_artifacts_contain_runtime_package_and_resources_without_local_mat
             for member in members
         )
     sdist_members = _sdist_members(sdist)
-    assert {"README.md", "README.en.md"} <= sdist_members
+    assert {"README.md", "README.en.md", "CONTRIBUTING.md"} <= sdist_members
+    assert not any(
+        member == "CONTRIBUTING.md" or member.startswith(".github/")
+        for member in _wheel_members(wheel)
+    )
     assert SECRET_SENTINEL not in wheel.read_bytes()
     assert SECRET_SENTINEL not in sdist.read_bytes()
 
@@ -195,6 +205,10 @@ def test_wheel_metadata_declares_version_license_and_console_entrypoint(tmp_path
     assert metadata["Name"] == "csbox"
     assert metadata["Version"] == importlib.metadata.version("csbox") == __version__
     assert metadata["Requires-Python"] == ">=3.11"
+    assert {
+        item.split(", ", 1)[0]: item.split(", ", 1)[1]
+        for item in metadata.get_all("Project-URL", [])
+    } == PROJECT_URLS
     assert (
         metadata.get("License-Expression") == "Apache-2.0"
         or metadata.get("License") == "Apache-2.0"
@@ -419,4 +433,4 @@ def test_uv_tool_install_runs_built_wheel_outside_repository(tmp_path: Path) -> 
         text=True,
         encoding="utf-8",
     )
-    assert result.stdout.strip() == "0.6.0"
+    assert result.stdout.strip() == "0.6.1"

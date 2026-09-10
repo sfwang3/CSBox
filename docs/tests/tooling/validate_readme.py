@@ -114,7 +114,7 @@ def _check_local_links(name: str, text: str) -> None:
 
 
 def _check_readme(name: str, text: str) -> None:
-    assert "0.6.0" in text
+    assert "0.6.1" in text
     assert "README.zh-CN.md" not in text
     assert "uv tool install csbox" in text
     assert "pip install csbox" not in text.lower()
@@ -154,7 +154,7 @@ def main() -> None:
     assert '"README.en.md"' in pyproject
 
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    assert changelog.startswith("# Changelog\n\n## 0.6.0")
+    assert changelog.startswith("# Changelog\n\n## 0.6.1")
     released = changelog.split("## 0.5.0rc1", maxsplit=1)[0]
     assert "This version is not published to PyPI" not in released
 

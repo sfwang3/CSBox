@@ -8,9 +8,9 @@
 
 [简体中文](https://github.com/sfwang3/CSBox/blob/main/README.md) · [English](https://github.com/sfwang3/CSBox/blob/main/README.en.md)
 
-[![CI](https://img.shields.io/github/actions/workflow/status/sfwang3/CSBox/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/sfwang3/CSBox/actions/workflows/ci.yml) [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/) [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-2ea44f?style=flat-square)](LICENSE) [![0.6.0](https://img.shields.io/badge/version-0.6.0-informational?style=flat-square)](CHANGELOG.md)
+[![CI](https://img.shields.io/github/actions/workflow/status/sfwang3/CSBox/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/sfwang3/CSBox/actions/workflows/ci.yml) [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/) [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-2ea44f?style=flat-square)](LICENSE) [![0.6.1](https://img.shields.io/badge/version-0.6.1-informational?style=flat-square)](CHANGELOG.md)
 
-**0.6.0 · 稳定版已发布**
+**0.6.1 · 稳定版已发布**
 
 </div>
 
@@ -51,7 +51,7 @@ API Step ────┘
 
 ### 安装：从 PyPI 安装
 
-`0.6.0` 是当前公开稳定版，使用 `uv` 从 PyPI 安装：
+`0.6.1` 是当前公开稳定版，使用 `uv` 从 PyPI 安装：
 
 ```bash
 uv tool install csbox
@@ -83,7 +83,7 @@ Home → 开始实验 → 输入名称 → 在终端中操作 → F12 → 输入
 
 ```console
 $ csbox --version
-0.6.0
+0.6.1
 ```
 
 ## 看看当前界面
@@ -262,6 +262,7 @@ Pack 输出 ZIP，也可以加入 `manifest.json`。它排除 `.csbox`、常见�
 - [Session format](docs/SESSION_FORMAT.md) — 记录格式。
 - [TUI design](docs/TUI_DESIGN.md) — beginner-first 交互与 CJK 布局。
 - [CHANGELOG](CHANGELOG.md) — 版本历史。
+- [CONTRIBUTING.md](CONTRIBUTING.md) — 报告问题、开发设置、测试与贡献约定。
 
 <details>
 <summary>高级：直接使用 CLI 命令</summary>
@@ -294,6 +295,8 @@ uv build
 ```
 
 完整 CI 还覆盖 Linux/Windows 矩阵、终端集成、CJK 渲染和 checkout 外安装 smoke。直接 CLI 命令面向高级自动化和诊断；普通用户仍从 `csbox` 开始。
+
+完整贡献说明见 [CONTRIBUTING.md](CONTRIBUTING.md)，包括报告问题、开发环境、测试、平台注意事项和 PR 约定。
 
 </details>
 

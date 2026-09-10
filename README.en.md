@@ -8,9 +8,9 @@ Record terminal work, keep evidence reviewable, and hand in a checked project bu
 
 [简体中文](https://github.com/sfwang3/CSBox/blob/main/README.md) · [English](https://github.com/sfwang3/CSBox/blob/main/README.en.md)
 
-[![CI](https://img.shields.io/github/actions/workflow/status/sfwang3/CSBox/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/sfwang3/CSBox/actions/workflows/ci.yml) [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/) [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-2ea44f?style=flat-square)](LICENSE) [![0.6.0](https://img.shields.io/badge/version-0.6.0-informational?style=flat-square)](CHANGELOG.md)
+[![CI](https://img.shields.io/github/actions/workflow/status/sfwang3/CSBox/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/sfwang3/CSBox/actions/workflows/ci.yml) [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/) [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-2ea44f?style=flat-square)](LICENSE) [![0.6.1](https://img.shields.io/badge/version-0.6.1-informational?style=flat-square)](CHANGELOG.md)
 
-**0.6.0 · stable release**
+**0.6.1 · stable release**
 
 </div>
 
@@ -49,7 +49,7 @@ On Home, use <kbd>↑</kbd>/<kbd>↓</kbd> or <kbd>Tab</kbd> to move, press <kbd
 
 ### Installation
 
-`0.6.0` is the current stable release on PyPI. Install it with `uv`:
+`0.6.1` is the current stable release on PyPI. Install it with `uv`:
 
 ```bash
 uv tool install csbox
@@ -80,7 +80,7 @@ For diagnostics, `csbox --help`, `csbox --version`, and `csbox doctor` are avail
 
 ```console
 $ csbox --version
-0.6.0
+0.6.1
 ```
 
 ## See the current UI
@@ -257,6 +257,7 @@ Use `csbox doctor` to inspect the current OS, Python, shell availability, and te
 - [Session format](docs/SESSION_FORMAT.md) — recording details.
 - [TUI design](docs/TUI_DESIGN.md) — beginner interaction and CJK layout.
 - [CHANGELOG](CHANGELOG.md) — release history.
+- [CONTRIBUTING.md](CONTRIBUTING.md) — bug reports, development setup, tests, and contribution expectations.
 
 <details>
 <summary>Advanced: direct CLI commands</summary>
@@ -289,6 +290,8 @@ uv build
 ```
 
 The full CI workflow also covers the Linux/Windows matrix, terminal integrations, CJK rendering, and install smoke. Direct CLI commands are an advanced and diagnostic interface; the normal beginner path remains `csbox`.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for bug reports, development setup, tests, platform notes, and pull request expectations.
 
 </details>
 

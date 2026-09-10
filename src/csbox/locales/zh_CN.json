@@ -1,7 +1,7 @@
 {
   "brand.name": "CSBox",
   "brand.subtitle": "计算机实验与项目交付工具",
-  "brand.version": "v0.6.0 · Local tool",
+  "brand.version": "v0.6.1 · Local tool",
   "home.greeting": "从一次清晰的操作开始",
   "home.description": "从当前项目开始实验、检查并整理提交内容。",
   "home.quick_start": "第一次使用？\n上实验课选“开始实验”；回看选“实验记录”。F12 保存关键画面，输入 exit 结束。\n交作业前先“检查项目”，再“安全打包”。",

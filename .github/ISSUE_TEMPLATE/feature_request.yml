@@ -1,0 +1,36 @@
+name: Feature request
+description: Suggest a focused improvement to CSBox
+title: "[Feature]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        CSBox is a local-first tool for recording, checking, organizing, and safely packaging student project evidence. Please keep proposals inside that scope.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Real user problem
+      description: What concrete student or contributor problem would this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: workaround
+    attributes:
+      label: Current workaround
+      description: How do you handle this today?
+    validations:
+      required: true
+  - type: textarea
+    id: desired
+    attributes:
+      label: Desired behavior
+      description: Describe the smallest useful outcome, not an implementation plan.
+    validations:
+      required: true
+  - type: textarea
+    id: fit
+    attributes:
+      label: Why it belongs in CSBox
+      description: Explain how this supports the local-first evidence, checking, organizing, or safe-packaging scope. Generic platform or vague AI requests are not a fit.
+    validations:
+      required: true
