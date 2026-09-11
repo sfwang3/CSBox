@@ -789,7 +789,12 @@ def _prepare_submission(service: object, plan: SubmissionPlan, force: bool) -> o
 
 def _check_submission_format(plain: bool, json_output: bool) -> None:
     if plain and json_output:
-        raise typer.BadParameter("--plain 与 --json 不能同时使用。")
+        typer.echo(
+            "发生了什么：--plain 与 --json 不能同时使用。\n"
+            "在哪里：提交命令的输出选项。\n"
+            "怎么处理：仅选择一种输出格式后重试。"
+        )
+        raise typer.Exit(code=2)
 
 
 @submit_app.command("plan", cls=_LocalizedHelpCommand, help=_locale("cli.submit.plan.help"))

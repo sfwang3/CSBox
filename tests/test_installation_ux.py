@@ -66,11 +66,17 @@ def test_both_readmes_keep_the_beginner_boundaries() -> None:
     assert "不生成结论、答案或课程作业正文" in chinese
 
 
-def test_changelog_leads_with_the_current_v06_surface() -> None:
+def test_changelog_leads_with_the_current_v07_rc_surface() -> None:
     changelog = (PROJECT_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
 
-    assert changelog.startswith("# Changelog\n\n## 0.7.0 (development)")
+    assert changelog.startswith("# Changelog\n\n## 0.7.0rc1 (release candidate)")
     assert "## 0.6.1" in changelog
     assert "This version is not published to PyPI" not in changelog
-    for surface in ("Lab Evidence", "API Evidence", "Evidence Collection", "Report Handoff"):
+    for surface in (
+        "Lab Evidence",
+        "API Evidence",
+        "Evidence Collection",
+        "Report Handoff",
+        "Submission Handoff",
+    ):
         assert surface in changelog

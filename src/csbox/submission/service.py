@@ -838,6 +838,27 @@ class _InvalidDestination(ValueError):
     pass
 
 
+def _close_lock_descriptor(descriptor: object) -> OSError | ValueError | None:
+    """Close a lock descriptor without masking the primary lease error.
+
+    Windows can report ``PermissionError`` while a competing process holds
+    the byte-range lock.  The close fallback still releases our OS handle if
+    the buffered wrapper could not finish its own close operation.
+    """
+
+    try:
+        descriptor.close()  # type: ignore[attr-defined]
+    except (OSError, ValueError) as error:
+        try:
+            descriptor_fd = descriptor.fileno()  # type: ignore[attr-defined]
+        except (OSError, ValueError, AttributeError):
+            return error
+        with suppress(OSError, ValueError):
+            os.close(descriptor_fd)
+        return error
+    return None
+
+
 def _canonical_project_dir(project_dir: Path | str) -> Path:
     try:
         raw = Path(project_dir)
@@ -905,8 +926,9 @@ def _destination_lease(destination: Path, key: str):
             raise SubmissionError(
                 "提交目录无法安全锁定，请稍后重试。", kind="lock_failed"
             ) from None
-        with descriptor:
-            native_locked = False
+        native_locked = False
+        primary_error: BaseException | None = None
+        try:
             try:
                 if os.name == "posix":
                     import fcntl
@@ -932,20 +954,27 @@ def _destination_lease(destination: Path, key: str):
                 raise SubmissionError(
                     "提交目录无法安全锁定，请稍后重试。", kind="lock_failed"
                 ) from None
-            try:
-                yield
-            finally:
-                if native_locked:
-                    with suppress(OSError, ValueError):
-                        if os.name == "posix":
-                            import fcntl
+            yield
+        except BaseException as error:
+            primary_error = error
+            raise
+        finally:
+            if native_locked:
+                with suppress(OSError, ValueError):
+                    if os.name == "posix":
+                        import fcntl
 
-                            fcntl.flock(descriptor.fileno(), fcntl.LOCK_UN)
-                        elif os.name == "nt":
-                            import msvcrt
+                        fcntl.flock(descriptor.fileno(), fcntl.LOCK_UN)
+                    elif os.name == "nt":
+                        import msvcrt
 
-                            descriptor.seek(0)
-                            msvcrt.locking(descriptor.fileno(), msvcrt.LK_UNLCK, 1)
+                        descriptor.seek(0)
+                        msvcrt.locking(descriptor.fileno(), msvcrt.LK_UNLCK, 1)
+            close_error = _close_lock_descriptor(descriptor)
+            if close_error is not None and primary_error is None:
+                raise SubmissionError(
+                    "提交目录无法安全解锁，请稍后重试。", kind="lock_failed"
+                ) from close_error
     finally:
         process_lock.release()
 

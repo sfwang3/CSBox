@@ -372,8 +372,9 @@ def test_artifact_path_casefold_colliding_with_manifest_name_is_rejected(
     valid_handoff: Path,
 ) -> None:
     colliding_name = "Submission-Manifest.json"
-    (valid_handoff / colliding_name).write_bytes((valid_handoff / _REPORT_NAME).read_bytes())
-    (valid_handoff / _REPORT_NAME).unlink()
+    if os.name != "nt":
+        (valid_handoff / colliding_name).write_bytes((valid_handoff / _REPORT_NAME).read_bytes())
+        (valid_handoff / _REPORT_NAME).unlink()
     _rewrite_manifest(
         valid_handoff,
         lambda payload: payload["files"][0].update({"path": colliding_name}),
