@@ -32,6 +32,7 @@ class HelpContext(StrEnum):
     REPORT_EXPORT = "report_export"
     CHECK = "check"
     PACK = "pack"
+    SUBMISSION = "submission"
     API = "api"
 
 
@@ -58,6 +59,7 @@ _SCREEN_CONTEXTS = {
     "project-check": HelpContext.CHECK,
     "pack-confirmation": HelpContext.PACK,
     "pack-result": HelpContext.PACK,
+    "submission": HelpContext.SUBMISSION,
     "api": HelpContext.API,
     "api-export": HelpContext.API,
     "api-export-result": HelpContext.API,

@@ -13,8 +13,8 @@ def test_readme_leads_with_beginner_first_story() -> None:
     assert "stable release on PyPI" in readme
     assert "git clone" in readme
     assert (
-        "Home → 开始实验 → enter a name → work in the terminal → F12 → "
-        "type exit → 实验记录 → 导出材料" in quick_start
+        "Home → Record → Evidence → Prepare Submission → Verify → "
+        "user manually uploads" in quick_start
     )
     for text in ("开始实验", "F12", "exit", "实验记录"):
         assert text in quick_start
@@ -69,7 +69,8 @@ def test_both_readmes_keep_the_beginner_boundaries() -> None:
 def test_changelog_leads_with_the_current_v06_surface() -> None:
     changelog = (PROJECT_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
 
-    assert changelog.startswith("# Changelog\n\n## 0.6.1")
+    assert changelog.startswith("# Changelog\n\n## 0.7.0 (development)")
+    assert "## 0.6.1" in changelog
     assert "This version is not published to PyPI" not in changelog
     for surface in ("Lab Evidence", "API Evidence", "Evidence Collection", "Report Handoff"):
         assert surface in changelog

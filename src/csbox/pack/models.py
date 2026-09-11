@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_serializer
@@ -16,6 +17,14 @@ class PackRequest(BaseModel):
     include_manifest: bool = False
     include: tuple[str, ...] = ()
     exclude: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class PackArchiveVerification:
+    verified: bool
+    contains_manifest: bool
+    entries: tuple[str, ...] = ()
+    archive_bytes: int = 0
 
 
 class PackPlan(BaseModel):
@@ -84,4 +93,4 @@ class PackReport(BaseModel):
         return data
 
 
-__all__ = ["PackPlan", "PackReport", "PackRequest"]
+__all__ = ["PackArchiveVerification", "PackPlan", "PackReport", "PackRequest"]

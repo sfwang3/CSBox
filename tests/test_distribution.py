@@ -168,7 +168,12 @@ def test_built_artifacts_contain_runtime_package_and_resources_without_local_mat
             for member in members
         )
     sdist_members = _sdist_members(sdist)
-    assert {"README.md", "README.en.md", "CONTRIBUTING.md"} <= sdist_members
+    assert {
+        "README.md",
+        "README.en.md",
+        "CONTRIBUTING.md",
+        "docs/SUBMISSION_HANDOFF.md",
+    } <= sdist_members
     assert not any(
         member == "CONTRIBUTING.md" or member.startswith(".github/")
         for member in _wheel_members(wheel)
@@ -433,4 +438,4 @@ def test_uv_tool_install_runs_built_wheel_outside_repository(tmp_path: Path) -> 
         text=True,
         encoding="utf-8",
     )
-    assert result.stdout.strip() == "0.6.1"
+    assert result.stdout.strip() == "0.7.0rc1"

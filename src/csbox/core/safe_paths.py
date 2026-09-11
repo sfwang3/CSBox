@@ -8,6 +8,7 @@ import shutil
 import stat
 import sys
 import tempfile
+import unicodedata
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path, PurePosixPath
@@ -25,6 +26,15 @@ _HAS_POSIX_DIRECTORY_FDS = (
     and os.rename in os.supports_dir_fd
 )
 _HAS_POSIX_NO_REPLACE_LINK = _HAS_POSIX_DIRECTORY_FDS and os.link in os.supports_dir_fd
+
+_PORTABLE_RESERVED_COMPONENT_NAMES = frozenset(
+    {"con", "prn", "aux", "nul"}
+    | {f"com{index}" for index in range(1, 10)}
+    | {f"lpt{index}" for index in range(1, 10)}
+)
+_PORTABLE_FORBIDDEN_COMPONENT_CHARACTERS = frozenset('<>:"/\\|?*')
+_MAX_PORTABLE_COMPONENT_BYTES = 255
+_MAX_PORTABLE_PATH_BYTES = 4096
 
 
 def _temporary_name() -> str:
@@ -46,6 +56,58 @@ def safe_relative_path(value: str) -> PurePosixPath:
     if parts[0] == "~" or ".." in parts:
         raise ValueError("home and parent paths are not allowed")
     return PurePosixPath(value)
+
+
+def validate_portable_relative_path(value: str) -> PurePosixPath:
+    """Validate one NFC-normalized, portable POSIX-relative path.
+
+    The returned path preserves the caller's spelling.  NFC normalization and
+    case folding are for identity comparisons by callers; this boundary never
+    silently rewrites a path supplied by an untrusted manifest or archive.
+    """
+
+    if not isinstance(value, str) or not value:
+        raise ValueError("path must be a non-empty portable relative POSIX path")
+    if value != unicodedata.normalize("NFC", value):
+        raise ValueError("path must be NFC-normalized")
+    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
+        raise ValueError("path contains a control character")
+    try:
+        path_bytes = value.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise ValueError("path must be valid UTF-8 text") from error
+    if len(path_bytes) > _MAX_PORTABLE_PATH_BYTES:
+        raise ValueError("path exceeds the portable byte limit")
+
+    if "\\" in value or value.startswith("/"):
+        raise ValueError("path must use relative POSIX separators")
+    if len(value) >= 2 and value[1] == ":" and value[0].isalpha():
+        raise ValueError("drive-qualified paths are not allowed")
+
+    parts = value.split("/")
+    if parts[0] == "~" or ".." in parts:
+        raise ValueError("home and parent paths are not allowed")
+    for component in parts:
+        if not component or component in {".", ".."}:
+            raise ValueError("path contains an unsafe component")
+        if any(character in _PORTABLE_FORBIDDEN_COMPONENT_CHARACTERS for character in component):
+            raise ValueError("path contains a Windows-forbidden character")
+        if component.endswith((".", " ")):
+            raise ValueError("path contains a Windows-unsafe component")
+        component_identity = component.split(".", 1)[0].casefold()
+        if component_identity in _PORTABLE_RESERVED_COMPONENT_NAMES:
+            raise ValueError("path contains a reserved Windows name")
+        try:
+            component_bytes = component.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise ValueError("path must be valid UTF-8 text") from error
+        if len(component_bytes) > _MAX_PORTABLE_COMPONENT_BYTES:
+            raise ValueError("path contains an oversized component")
+
+    normalized = safe_relative_path(value)
+    if normalized.as_posix() != value or not normalized.parts:
+        raise ValueError("path must already be normalized")
+    return normalized
 
 
 def _refuse_symlink_parent(path: Path) -> None:

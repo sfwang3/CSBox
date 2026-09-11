@@ -45,7 +45,7 @@ API Step ────┘
 
 > **打开文件夹 → 在该文件夹打开终端 → 运行 `csbox` → 从 Home 选择当前任务**
 
-普通使用不需要背子命令。Home 会展示 **开始实验**、**实验记录**、**整理证据**、**检查项目**、**安全打包** 和 **API 实验**，并显示状态和下一步。
+普通使用不需要背子命令。Home 会展示 **开始实验**、**实验记录**、**整理证据**、**准备提交**、**检查项目**、**安全打包** 和 **API 实验**，并显示状态和下一步。
 
 在 Home 中可以用 <kbd>↑</kbd>/<kbd>↓</kbd> 或 <kbd>Tab</kbd> 移动，按 <kbd>Enter</kbd> 打开，按 <kbd>?</kbd> 或 <kbd>F1</kbd> 查看帮助。
 
@@ -68,7 +68,7 @@ uv sync
 uv run csbox --help
 ```
 
-如果要从该 checkout 得到本地命令，运行 `uv build`，再安装它生成的 wheel；然后回到课程/项目文件夹运行 `csbox`。贡献者检查命令在后面。
+如果要从该 checkout 得到本地命令，运行 `uv build`，再安装它生成的 wheel；然后回到课程/项目文件夹运行 `csbox`。贡献者检查命令在后面。当前 source candidate 是 `0.7.0rc1`；PyPI 上公开稳定版仍是 `0.6.1`。RC 尚未发布到 PyPI，`uv tool install csbox` 仍安装 PyPI 稳定版，不是 RC。
 
 <a id="quick-cn"></a>
 ## 快速开始
@@ -76,7 +76,7 @@ uv run csbox --help
 在课程/项目文件夹中运行 `csbox`。第一次做上机实验可以按这个顺序：
 
 ```text
-Home → 开始实验 → 输入名称 → 在终端中操作 → F12 → 输入 exit → 实验记录 → 导出材料
+Home → 开始实验 → 输入名称 → 在终端中操作 → F12 → 输入 exit → 实验记录 → 整理证据 → 准备提交 → 独立校验 → 用户手动上传
 ```
 
 查看诊断信息可以使用 `csbox --help`、`csbox --version` 和 `csbox doctor`。当前版本输出：
@@ -92,7 +92,7 @@ $ csbox --version
 
 ### 1. 从 Home 开始
 
-Home 是选择当前任务的入口：开始实验、查看记录、整理证据、记录 API 实验、检查项目或准备 ZIP。
+Home 是选择当前任务的入口：开始实验、查看记录、整理证据、准备提交、记录 API 实验、检查项目或准备 ZIP。
 
 <p align="center">
   <a href="https://raw.githubusercontent.com/sfwang3/CSBox/main/docs/assets/readme/home.png">
@@ -128,19 +128,22 @@ Home 是选择当前任务的入口：开始实验、查看记录、整理证据
 
 ## 学生的一条完整路径
 
+产品交付流是：**Record → Evidence → Prepare Submission → Verify → 用户手动上传**。**准备提交**会先做一次可见预检，再用一次协调事务生成 `report.docx`、配置的项目 ZIP 和 `submission-manifest.json`；ZIP 会验证并包含 Pack manifest。准备不会改变源项目、Evidence 或 Profile。`WARN` 需要复核，不是 PASS 或 FAIL；`FAIL` 阻塞，`SKIP` 不是通过。校验可以在复制或移动后的目录独立运行，不需要源项目、Evidence、Profile 或网络。CSBox 只说“已准备/已验证”，不会上传，用户仍需手动上传。
+
 ```mermaid
 flowchart LR
     A[上机实验] --> B[开始实验]
     B --> C[F12 关键画面]
     C --> D[回看]
     D --> E[整理证据]
-    E --> F[配置/导出报告材料]
-    F --> G[检查项目]
-    G --> H[安全打包]
-    H --> I[提交]
-    B -. API 实验 .-> J[API 实验 / API Evidence]
-    J --> E
-    J --> F
+    E --> F[Evidence]
+    F --> G[Prepare Submission]
+    G --> H[report.docx + ZIP + manifest]
+    H --> I[Verify]
+    I --> J[用户手动上传]
+    B -. API 实验 .-> K[API 实验 / API Evidence]
+    K --> E
+    K --> F
 ```
 
 ## 使用前 → 交付后
@@ -169,6 +172,8 @@ flowchart LR
 
 **检查项目**（Check）查看项目结构、Git 状态、敏感文件、绝对路径线索、构建产物、缓存、日志和大文件。`WARN` 表示“请复核这一项”，既不是 `PASS`，也不是笼统的安全保证。**安全打包**（Pack）先在临时目录中整理，拒绝不安全或疑似凭据的输入，验证 ZIP，并保留源项目不变。
 
+**准备提交**（Prepare Submission）复用 Check、Pack、Evidence 和 Report，输出固定的三文件交接目录。目标默认是项目旁的安全 sibling；未拥有或已修改的目标不会被盲目覆盖，`--force` 只刷新可证明由 CSBox 拥有且未变化的 handoff。`submission-manifest.json` 记录安全相对路径、大小和 SHA-256；自身 digest 是完整性承诺，不是身份认证。详见 [Submission Handoff](docs/SUBMISSION_HANDOFF.md)。
+
 ## 键盘快捷键
 
 下面这些才是当前界面公开说明的快捷键：
@@ -191,7 +196,13 @@ flowchart LR
 
 Lab 导出 `evidence/<NN-title>.png`、`evidence.md`、`session.cast`、可选的 `commands.txt` 和内部生成清单。Report 导出 `report.md`、`report.docx`、`assets/*.png` 和内部生成的报告清单；证据集顺序可以混排 Lab Capture 与已保存 API Run Step。API 导出 `evidence/*.png`、`api-evidence.md`、`results.json` 和内部生成清单。
 
-Pack 输出 ZIP，也可以加入 `manifest.json`。它排除 `.csbox`、常见构建/缓存/日志目录、已有 `.zip` 文件、`.env` 与疑似凭据文件、私钥，以及输出文件本身。Check 和 Pack 是辅助工具，请在提交前自己检查预览和结果。
+Pack 输出 ZIP，也可以加入 `manifest.json`。准备提交输出 `report.docx`、配置的项目 ZIP 和 `submission-manifest.json`，并可用下面的命令在脱离源项目后独立校验：
+
+```bash
+csbox submit verify path/to/handoff --plain
+```
+
+它排除 `.csbox`、常见构建/缓存/日志目录、已有 `.zip` 文件、`.env` 与疑似凭据文件、私钥，以及输出文件本身。Check、Pack 和 Prepare Submission 都是辅助工具，请在手动上传前检查预览和结果；CSBox 永远不会上传。
 
 ## 能做 / 不能做
 
@@ -261,6 +272,7 @@ Pack 输出 ZIP，也可以加入 `manifest.json`。它排除 `.csbox`、常见�
 - [Security boundaries](docs/SECURITY.md) — Check 与 Pack 的边界。
 - [Session format](docs/SESSION_FORMAT.md) — 记录格式。
 - [TUI design](docs/TUI_DESIGN.md) — beginner-first 交互与 CJK 布局。
+- [Submission Handoff](docs/SUBMISSION_HANDOFF.md) — 准备、校验、清单和手动上传边界。
 - [CHANGELOG](CHANGELOG.md) — 版本历史。
 - [CONTRIBUTING.md](CONTRIBUTING.md) — 报告问题、开发设置、测试与贡献约定。
 

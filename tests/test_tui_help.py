@@ -144,6 +144,7 @@ async def test_home_explains_the_six_student_tasks_and_discoverable_help() -> No
             "entry-start",
             "entry-records",
             "entry-evidence",
+            "entry-submit",
             "entry-check",
             "entry-pack",
             "entry-api",
@@ -177,6 +178,9 @@ async def test_home_question_mark_opens_scrollable_beginner_help_and_restores_fo
         text = _screen_text(app.screen)
         assert "CSBox 能帮我做什么？" in text
         assert "正在做上机实验" in text
+        assert "准备提交" in text
+        assert "只想检查项目" in text
+        assert "只想生成提交 ZIP" in text
         assert "安全打包" in text
         assert "关键画面（Capture）" in text
         assert "不会写实验结论" in text
@@ -293,7 +297,7 @@ async def test_beginner_keyboard_journey_finds_start_review_check_and_pack() -> 
         assert app.screen is home
 
         # Continue down the same Home list to the delivery workflows.
-        for entry_id in ("entry-evidence", "entry-check", "entry-pack"):
+        for entry_id in ("entry-evidence", "entry-submit", "entry-check", "entry-pack"):
             await pilot.press("down")
             await pilot.pause()
             assert home.focused is home.query_one(f"#{entry_id}", Button)
@@ -523,6 +527,14 @@ def test_each_context_help_has_the_five_beginner_answers(context_name: str, expe
         assert prompt in text
     assert "schema" not in text.lower()
     assert "registry" not in text.lower()
+
+
+def test_home_context_help_explains_prepare_submission_and_reused_tools() -> None:
+    from csbox.tui.help import HelpContext, help_text
+
+    text = help_text(HelpContext.HOME, load_locale())
+    assert "准备提交" in text
+    assert "也可以单独使用检查项目或安全打包" in text
 
 
 def test_review_help_names_all_supported_secondary_controls() -> None:

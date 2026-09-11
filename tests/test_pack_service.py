@@ -255,3 +255,44 @@ def test_pack_rejection_error_has_safe_blocker_details(tmp_path: Path) -> None:
     assert caught.value.kind == "content_rejected"
     assert ".env:env" in caught.value.details
     assert "local-only" not in str(caught.value)
+
+
+def test_validate_plan_rechecks_source_without_publishing(tmp_path: Path) -> None:
+    source = tmp_path / "project"
+    source.mkdir()
+    (source / "main.py").write_text("print('safe')\n", encoding="utf-8")
+    destination = tmp_path / "final.zip"
+    service = PackService()
+    plan = service.plan(source, destination=destination)
+
+    validated = service.validate_plan(plan, verify=True, force=True)
+
+    assert validated.included == plan.included
+    assert validated.verification_requested is True
+    assert validated.force is True
+    assert not destination.exists()
+
+
+def test_pack_plan_can_relocate_same_validated_sources_to_staging_destination(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "project"
+    source.mkdir()
+    (source / "main.py").write_text("print('safe')\n", encoding="utf-8")
+    final_destination = tmp_path / "final.zip"
+    staging_destination = tmp_path / "outer-staging" / "unique.zip"
+    service = PackService()
+    plan = service.plan(source, destination=final_destination)
+
+    report = service.pack_plan(
+        plan,
+        verify=True,
+        destination=staging_destination,
+    )
+
+    assert report.destination == staging_destination
+    assert report.verified is True
+    assert report.include_manifest is True
+    assert not final_destination.exists()
+    with zipfile.ZipFile(staging_destination) as archive:
+        assert archive.namelist() == ["main.py", "manifest.json"]

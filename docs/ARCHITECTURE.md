@@ -54,6 +54,13 @@ Shell ←→ UnixPTYBackend / WindowsConPTYBackend
 
 `PackService` 的顺序是 `check → TemporaryDirectory staging → safe copy → exclusions → optional ZIP verify`。符号链接不跟随逃逸 root，真实 `.env`/私钥拒绝进入 archive，输出 ZIP 会自排除，任何失败都保留原项目不动。
 
+## Submission Handoff
+
+Submission Service 在已有 Evidence、Report、Check 和 Pack service 之上提供
+`Record → Evidence → Prepare Submission → Verify → user manual upload` 的交接编排。它先建立一个只读 preflight，派生 `READY`、`WARNING` 或 `BLOCKED`，再在临时区域协调生成 `report.docx`、配置的项目 ZIP 和 `submission-manifest.json` 三个最终文件。ZIP 重新打开验证且必须包含 Pack manifest；发布前会重新验证来源和目标状态，避免发布过期计划或半套目录。
+
+`submission-manifest.json` 是严格的完整性收据：两个 artifact 使用安全相对路径、大小和 SHA-256，manifest 以排除自身 digest 字段的规范内容计算 `manifest_sha256`。这是 integrity commitment，不是 authentication。目标默认使用项目旁的安全 sibling；unowned 或已修改目录不覆盖，`--force` 只刷新可证明归 CSBox 所有且未变化的 handoff。`csbox submit verify` 只依赖交接目录，因此复制或移动后不需要源项目、Evidence、Profile 或网络。Submission 不上传任何内容，源项目和 Evidence/Profile 在准备期间保持不变。
+
 ## CJK 与字体
 
 领域 snapshot 按 terminal cell 保存 continuation cell 和属性；`display_width` 是 TUI、screen、Capture、renderer、footer、路径和表格的唯一宽度语义。PNG renderer 按列定位 cell，以 ASCII mono advance 推导单元格宽度，并使用 CJK fallback 绘制双宽字符；FontResolver 优先显式配置，其次搜索平台字体。字体缺失是可见错误，不会以错误的单宽中文截图冒充证据。
@@ -75,6 +82,6 @@ API transport。
 
 ## Distribution 与安装态
 
-项目使用 Hatchling 的 `src/csbox` package layout。wheel 只包含运行时 Python package、locale JSON、Textual TCSS 和 distribution metadata；sdist 只保留公开 README、贡献指南、许可证、用户文档、`src/csbox` 与构建所需配置，不包含测试、参考图片或内部开发资料。版本由 distribution metadata 提供给运行时，`csbox --version`、session/manifest 字段和 wheel metadata 使用同一个 `0.6.1` 版本。公开文档以 Simplified Chinese `README.md` 为默认 README，完整英文文档为 `README.en.md`。
+项目使用 Hatchling 的 `src/csbox` package layout。wheel 只包含运行时 Python package、locale JSON、Textual TCSS 和 distribution metadata；sdist 只保留公开 README、贡献指南、许可证、用户文档、`src/csbox` 与构建所需配置，不包含测试、参考图片或内部开发资料。当前 source candidate 是 `0.7.0rc1`，PyPI stable 仍是 `0.6.1`；RC 未发布到 PyPI，安装 `csbox` 得到的仍不是 RC。公开文档以 Simplified Chinese `README.md` 为默认 README，完整英文文档为 `README.en.md`。
 
 安装后的入口是 `csbox` console script。用户可以用普通 venv 或 `uv tool install <wheel>` 安装，再从项目目录之外运行 `csbox --help`、`doctor`、`check` 和 `pack`；locale、TCSS 与 renderer 通过 package/resource 或系统字体查找，不依赖当前 Git checkout。

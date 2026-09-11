@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.0rc1 (release candidate)
+
+- **Submission Handoff:** add the beginner-first `Record → Evidence → Prepare Submission → Verify → manual upload` product path. One preflight and one coordinated transaction produce `report.docx`, the configured project ZIP, and `submission-manifest.json` without changing source project, Evidence, or Profile data.
+- **Integrity and boundaries:** expose READY/WARNING/BLOCKED readiness, preserve WARN/FAIL/SKIP truth, verify copied or moved handoffs offline, and keep CSBox local-first: prepared is not submitted, and CSBox never uploads.
+- **Documentation:** publish the Submission Handoff contract and distinguish the `0.7.0rc1` source candidate from the PyPI `0.6.1` stable release; the RC is not published to PyPI.
+
 ## 0.6.1
 
 - **Open-source project surface:** add a concise contributor guide, structured issue forms, and pull request guidance.

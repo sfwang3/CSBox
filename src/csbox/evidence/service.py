@@ -9,7 +9,12 @@ from csbox.api.repository import ApiRunRepository
 from csbox.config.loader import load_config
 from csbox.evidence.exporter import EvidenceReportExporter, PhaseCallback, ReportExportResult
 from csbox.evidence.models import EvidenceSet
-from csbox.evidence.resolver import ApiStepResolver, EvidenceSourceResolver, LabCaptureResolver
+from csbox.evidence.resolver import (
+    ApiStepResolver,
+    EvidenceSourceResolver,
+    LabCaptureResolver,
+    ResolvedReportableEvidence,
+)
 from csbox.lab.fonts import FontResolver
 from csbox.lab.renderer import TerminalEvidenceRenderer
 from csbox.lab.repository import SessionRepository
@@ -30,6 +35,7 @@ class ReportHandoffService:
         force: bool = False,
         phase_callback: PhaseCallback | None = None,
         report_profile: ReportProfile | None = None,
+        resolved_snapshot: tuple[tuple[object, ResolvedReportableEvidence], ...] | None = None,
     ) -> ReportExportResult:
         return self.exporter.export(
             evidence_set,
@@ -37,6 +43,7 @@ class ReportHandoffService:
             force=force,
             phase_callback=phase_callback,
             report_profile=report_profile,
+            resolved_snapshot=resolved_snapshot,  # type: ignore[arg-type]
         )
 
 

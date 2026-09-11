@@ -60,6 +60,7 @@ async def test_home_is_task_first_and_has_the_required_button_order() -> None:
             "entry-start",
             "entry-records",
             "entry-evidence",
+            "entry-submit",
             "entry-check",
             "entry-pack",
             "entry-api",

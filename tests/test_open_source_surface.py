@@ -83,7 +83,8 @@ def test_changelog_describes_maintenance_scope_and_current_release() -> None:
     changelog = (PROJECT_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     section = changelog.split("## 0.6.1", 1)[1].split("## 0.6.0", 1)[0]
 
-    assert changelog.startswith("# Changelog\n\n## 0.6.1")
+    assert changelog.startswith("# Changelog\n\n## 0.7.0")
+    assert "Submission Handoff" in changelog.split("## 0.6.1", 1)[0]
     section_lower = section.lower()
     for phrase in (
         "open-source project surface",

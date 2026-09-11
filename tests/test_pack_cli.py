@@ -62,3 +62,28 @@ def test_pack_json_routes_to_service(monkeypatch, tmp_path: Path) -> None:
     assert payload["schema_version"] == 1
     assert payload["verified"] is True
     assert calls == [(tmp_path, True, True)]
+
+
+def test_pack_verify_cli_still_reports_verified_for_a_real_archive(tmp_path: Path) -> None:
+    source = tmp_path / "project"
+    source.mkdir()
+    (source / "README.md").write_text("# demo\n", encoding="utf-8")
+    destination = tmp_path / "archive.zip"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "pack",
+            str(source),
+            "--output",
+            str(destination),
+            "--manifest",
+            "--verify",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["verified"] is True
+    assert payload["verification_status"] == "verified"

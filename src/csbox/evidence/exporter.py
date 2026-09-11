@@ -182,6 +182,8 @@ class EvidenceReportExporter:
         force: bool = False,
         phase_callback: PhaseCallback | None = None,
         report_profile: ReportProfile | None = None,
+        resolved_snapshot: tuple[tuple[EvidenceItem, ResolvedReportableEvidence], ...]
+        | None = None,
     ) -> ReportExportResult:
         if not isinstance(evidence_set, EvidenceSet):
             raise TypeError("evidence_set must be an EvidenceSet")
@@ -192,7 +194,11 @@ class EvidenceReportExporter:
         self._emit(phase_callback, ReportExportPhase.GENERATING)
         staging: Path | None = None
         try:
-            resolved = self._resolve_all(evidence_set)
+            resolved = (
+                self._validate_resolved_snapshot(evidence_set, resolved_snapshot)
+                if resolved_snapshot is not None
+                else self._resolve_all(evidence_set)
+            )
             self._reject_source_destination(output)
             with _destination_lock(output):
                 output_existed = _path_exists(output)
@@ -316,6 +322,24 @@ class EvidenceReportExporter:
                 kind="missing_source",
             )
         return tuple(resolved)
+
+    @staticmethod
+    def _validate_resolved_snapshot(
+        evidence_set: EvidenceSet,
+        snapshot: tuple[tuple[EvidenceItem, ResolvedReportableEvidence], ...],
+    ) -> tuple[tuple[EvidenceItem, ResolvedReportableEvidence], ...]:
+        if len(snapshot) != len(evidence_set.items):
+            raise ValueError("resolved snapshot does not match evidence set")
+        for expected, (item, resolved) in zip(evidence_set.items, snapshot, strict=True):
+            if item != expected or not isinstance(resolved, ResolvedReportableEvidence):
+                raise ValueError("resolved snapshot does not match evidence set")
+            if not resolved.available:
+                raise ReportExportError(
+                    "有证据来源不可用，请恢复来源、移除不可用引用，或返回 Evidence Set。",
+                    unavailable_titles=(item.title,),
+                    kind="missing_source",
+                )
+        return snapshot
 
     def _resolve_source(self, source: object) -> ResolvedReportableEvidence | None:
         resolved = self.resolver.resolve(source)

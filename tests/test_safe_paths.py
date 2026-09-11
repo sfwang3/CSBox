@@ -12,6 +12,7 @@ from csbox.core.safe_paths import (
     mkdir_exclusive,
     safe_relative_path,
     safe_rename,
+    validate_portable_relative_path,
 )
 
 _HAS_POSIX_DIRECTORY_FDS = (
@@ -52,6 +53,29 @@ def test_safe_relative_path_rejects_absolute_drive_unc_mixed_and_parent_paths(
 
 def test_safe_relative_path_returns_posix_path_for_a_nested_relative_path() -> None:
     assert safe_relative_path("课程/计算机网络/实验一") == PurePosixPath("课程/计算机网络/实验一")
+
+
+def test_validate_portable_relative_path_returns_a_normalized_posix_path() -> None:
+    value = "课程/计算机网络/实验一/结果.txt"
+
+    assert validate_portable_relative_path(value) == PurePosixPath(value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        "e\u0301.txt",
+        "报告\x7f.docx",
+        "CON.txt",
+        "name.",
+        "name ",
+        "x" * 256,
+        "/".join("x" * 255 for _ in range(17)),
+    ),
+)
+def test_validate_portable_relative_path_rejects_portability_boundary_cases(value: str) -> None:
+    with pytest.raises(ValueError):
+        validate_portable_relative_path(value)
 
 
 def test_atomic_write_text_refuses_a_symlink_destination(tmp_path: Path) -> None:

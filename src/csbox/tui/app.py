@@ -22,6 +22,7 @@ from csbox.lab.repository import (
 )
 from csbox.locales import Translator
 from csbox.pack.service import PackService, create_pack_service
+from csbox.submission import SubmissionVerifier, create_submission_service
 from csbox.tui.help import HELP_BINDINGS, open_help
 from csbox.tui.lab_workflow import (
     ActiveLabSession,
@@ -42,6 +43,7 @@ from csbox.tui.screens.pack import PackConfirmationScreen
 from csbox.tui.screens.project_check import ProjectCheckScreen
 from csbox.tui.screens.records import ExportAction, RecordsScreen
 from csbox.tui.screens.review import ReviewController, ReviewScreen
+from csbox.tui.screens.submission import SubmissionScreen
 
 
 class CSBoxApp(App[LabStartRequest | None]):
@@ -72,6 +74,9 @@ class CSBoxApp(App[LabStartRequest | None]):
         evidence_repository: EvidenceSetRepository | None = None,
         export_action: ExportAction | None = None,
         report_export_action: ReportExportAction | None = None,
+        submission_service: object | None = None,
+        submission_verifier_factory: Callable[[], object] | None = None,
+        report_profile_screen_factory: Callable[[str], object] | None = None,
     ) -> None:
         super().__init__()
         self.data_source = data_source
@@ -90,6 +95,14 @@ class CSBoxApp(App[LabStartRequest | None]):
         self.monitor_interval = monitor_interval
         self.export_action = export_action
         self.report_export_action = report_export_action
+        # Keep Home mountable for diagnostic/nonexistent project snapshots;
+        # the real service is constructed when the user opens Submission.
+        try:
+            self.submission_service = submission_service or create_submission_service(project_dir)
+        except Exception:
+            self.submission_service = submission_service
+        self.submission_verifier_factory = submission_verifier_factory or SubmissionVerifier
+        self.report_profile_screen_factory = report_profile_screen_factory
         source_repository = getattr(data_source, "repository", None)
         self.session_repository = session_repository or (
             source_repository
@@ -125,6 +138,7 @@ class CSBoxApp(App[LabStartRequest | None]):
             notice=self.home_notice,
             records_screen_factory=self._records_screen,
             evidence_screen_factory=self._evidence_screen,
+            submission_screen_factory=self._submission_screen,
             check_service=self.pack_service.check_service,
         )
         self.push_screen(self.home_screen)
@@ -162,6 +176,30 @@ class CSBoxApp(App[LabStartRequest | None]):
             api_repository=self.api_repository,
         )
 
+    def _submission_screen(self) -> SubmissionScreen:
+        service = self.submission_service or create_submission_service(self.project_dir)
+        return SubmissionScreen(
+            repository=self.evidence_repository,
+            locale=self.locale,
+            service=service,
+            verifier_factory=self.submission_verifier_factory,
+            report_profile_screen_factory=(
+                self.report_profile_screen_factory or self._report_profile_screen
+            ),
+        )
+
+    def _report_profile_screen(self, evidence_set_id: str) -> EvidenceSetEditorScreen:
+        evidence_set = self.evidence_repository.load(evidence_set_id)
+        return EvidenceSetEditorScreen(
+            repository=self.evidence_repository,
+            session_repository=self.session_repository,
+            evidence_set=evidence_set,
+            locale=self.locale,
+            project_dir=self.project_dir,
+            report_export_action=self.report_export_action,
+            api_repository=self.api_repository,
+        )
+
     def _critical_workflow_active(self) -> bool:
         screen = self.screen
         if isinstance(screen, HomeScreen):
@@ -173,6 +211,8 @@ class CSBoxApp(App[LabStartRequest | None]):
         if isinstance(screen, EvidenceSetEditorScreen):
             return screen.is_working
         if isinstance(screen, ApiScreen):
+            return screen.is_working
+        if isinstance(screen, SubmissionScreen):
             return screen.is_working
         return False
 

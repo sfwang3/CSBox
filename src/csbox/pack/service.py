@@ -18,9 +18,16 @@ from csbox import __version__
 from csbox.check.detectors import FileInventory
 from csbox.check.service import CheckService
 from csbox.config.loader import load_config
-from csbox.core.safe_paths import atomic_copy_file, is_reparse_metadata, safe_relative_path
+from csbox.core.safe_paths import (
+    atomic_copy_file,
+    is_reparse_metadata,
+    safe_relative_path,
+    validate_portable_relative_path,
+)
 from csbox.pack.filters import PackCandidate, PackFilter, PackSafetyError, PackSelection
-from csbox.pack.models import PackPlan, PackReport
+from csbox.pack.models import PackArchiveVerification, PackPlan, PackReport
+from csbox.pack.verifier import PackArchiveVerifier, _verify_archive
+from csbox.pack.verifier import _validate_zip_names as _validate_archive_names
 
 
 class PackServiceError(RuntimeError):
@@ -42,8 +49,6 @@ class PackServiceError(RuntimeError):
 
 
 _SAFE_REJECTION_CATEGORIES = frozenset({"env", "private-key", "hard-coded-secret"})
-_VERIFY_CHUNK_BYTES = 1024 * 1024
-_MAX_MANIFEST_BYTES = 8 * 1024 * 1024
 _OUTPUT_COMPONENT_BUDGET = 236
 
 
@@ -119,8 +124,48 @@ class PackService:
         *,
         verify: bool | None = None,
         force: bool | None = None,
+        destination: Path | str | None = None,
     ) -> PackReport:
         """Revalidate a displayed plan before publishing its archive."""
+        current = self._validated_plan_context(
+            plan,
+            verify=verify,
+            force=force,
+        )
+        if destination is None:
+            return self._publish(current)
+        return self._publish(self._relocate_context(current, Path(destination)))
+
+    def validate_plan(
+        self,
+        plan: PackPlan,
+        *,
+        verify: bool | None = None,
+        force: bool | None = None,
+    ) -> PackPlan:
+        """Revalidate a displayed plan without publishing its archive."""
+        return self._validated_plan_context(
+            plan,
+            verify=verify,
+            force=force,
+        ).plan
+
+    @staticmethod
+    def verify_existing(
+        path: Path | str,
+        *,
+        require_manifest: bool = False,
+    ) -> PackArchiveVerification:
+        """Verify an existing Pack archive without consulting its source tree."""
+        return PackArchiveVerifier.verify(path, require_manifest=require_manifest)
+
+    def _validated_plan_context(
+        self,
+        plan: PackPlan,
+        *,
+        verify: bool | None,
+        force: bool | None,
+    ) -> _PlanContext:
         current = self._build_plan(
             plan.source_root,
             destination=plan.destination,
@@ -141,7 +186,50 @@ class PackService:
                 path=affected_path,
                 details=changed_paths,
             )
-        return self._publish(current)
+        return current
+
+    def _relocate_context(self, context: _PlanContext, destination: Path) -> _PlanContext:
+        """Use a validated source snapshot for a unique external staging target."""
+        self._inspect_destination(destination)
+        candidates, extra_excluded, path_rejected = self._prepare_candidates(
+            PackSelection(candidates=context.candidates, excluded=(), rejected=()),
+            destination=destination,
+            include_manifest=True,
+            output_directory=None,
+        )
+        included = [candidate.relative.as_posix() for candidate in candidates]
+        included.append("manifest.json")
+        excluded = tuple(
+            sorted(
+                set((*context.plan.excluded, *extra_excluded)),
+                key=_stable_text_key,
+            )
+        )
+        rejected = tuple(
+            sorted(
+                set((*context.plan.rejected, *path_rejected)),
+                key=_stable_text_key,
+            )
+        )
+        staged_plan = context.plan.model_copy(
+            update={
+                "destination": destination,
+                "output_filename": destination.name,
+                "included": tuple(included),
+                "excluded": excluded,
+                "rejected": rejected,
+                "source_bytes": sum(candidate.size for candidate in candidates),
+                "include_manifest": True,
+                "verification_requested": True,
+                "force": False,
+                "output_exists": _path_exists(destination),
+            }
+        )
+        return _PlanContext(
+            plan=staged_plan,
+            inventory=context.inventory,
+            candidates=tuple(candidates),
+        )
 
     def _build_plan(
         self,
@@ -252,13 +340,24 @@ class PackService:
         candidates = list(selection.candidates)
         excluded: list[str] = []
         rejected: list[str] = []
+        path_identity_counts: dict[str, int] = {}
+        for candidate in candidates:
+            identity = _path_identity_key(candidate.relative.as_posix())
+            path_identity_counts[identity] = path_identity_counts.get(identity, 0) + 1
         destination_key = _lexical_path_key(destination)
         destination_parent_key = _lexical_path_key(destination.parent)
         publish_temp_prefix = f".{destination.name}-".casefold()
         kept: list[PackCandidate] = []
         for candidate in candidates:
-            if not _is_portable_zip_path(candidate.relative.as_posix()):
-                rejected.append(f"{candidate.relative.as_posix()}:path-unsafe")
+            candidate_name = candidate.relative.as_posix()
+            candidate_identity = _path_identity_key(candidate_name)
+            if path_identity_counts[candidate_identity] > 1:
+                rejected.append(f"{candidate_name}:path-conflict")
+                continue
+            try:
+                validate_portable_relative_path(candidate_name)
+            except ValueError:
+                rejected.append(f"{candidate_name}:path-unsafe")
                 continue
             if _lexical_path_key(candidate.absolute) == destination_key:
                 excluded.append(f"{candidate.relative.as_posix()}:output")
@@ -621,7 +720,7 @@ class PackService:
     @staticmethod
     def _write_archive_file(archive: zipfile.ZipFile, source: Path, name: str) -> None:
         try:
-            safe_relative_path(name)
+            validate_portable_relative_path(name)
         except ValueError:
             raise PackServiceError(
                 "ZIP 条目路径不安全。",
@@ -653,68 +752,17 @@ class PackService:
         return safe if safe.casefold().endswith(".zip") else f"{safe}.zip"
 
     @staticmethod
-    def _verification_error(message: str) -> PackServiceError:
-        return PackServiceError(message, kind="verify_failed")
-
-    @staticmethod
     def _verify(
         path: Path,
         expected: tuple[str, ...],
         manifest_payload: dict[str, object] | None = None,
     ) -> None:
-        try:
-            with zipfile.ZipFile(path) as archive:
-                names = tuple(archive.namelist())
-                _validate_zip_names(names)
-                if names != expected:
-                    raise PackService._verification_error("ZIP 条目与打包计划不一致。")
-                records: dict[str, tuple[int, str]] = {}
-                raw_manifest = bytearray()
-                for name in names:
-                    digest = hashlib.sha256()
-                    size = 0
-                    with archive.open(name) as stream:
-                        while chunk := stream.read(_VERIFY_CHUNK_BYTES):
-                            size += len(chunk)
-                            digest.update(chunk)
-                            if name == "manifest.json":
-                                if len(raw_manifest) + len(chunk) > _MAX_MANIFEST_BYTES:
-                                    raise PackService._verification_error(
-                                        "manifest 超过校验大小上限。"
-                                    )
-                                raw_manifest.extend(chunk)
-                    records[name] = (size, digest.hexdigest())
-                if manifest_payload is None:
-                    return
-                actual_manifest = json.loads(
-                    bytes(raw_manifest).decode("utf-8"),
-                    parse_constant=_reject_json_constant,
-                )
-                if actual_manifest != manifest_payload:
-                    raise PackService._verification_error("manifest 校验失败。")
-                files = actual_manifest.get("files") if isinstance(actual_manifest, dict) else None
-                if not isinstance(files, list):
-                    raise PackService._verification_error("manifest 文件清单无效。")
-                expected_files = expected[:-1]
-                if [item.get("path") for item in files if isinstance(item, dict)] != list(
-                    expected_files
-                ):
-                    raise PackService._verification_error("manifest 与 ZIP 条目不一致。")
-                for item in files:
-                    if not isinstance(item, dict):
-                        raise PackService._verification_error("manifest 文件清单无效。")
-                    name = item.get("path")
-                    if not isinstance(name, str):
-                        raise PackService._verification_error("manifest 文件路径无效。")
-                    record = records.get(name)
-                    if (
-                        record is None
-                        or item.get("size") != record[0]
-                        or item.get("sha256") != record[1]
-                    ):
-                        raise PackService._verification_error("manifest 文件摘要不一致。")
-        except (OSError, UnicodeError, json.JSONDecodeError, zipfile.BadZipFile):
-            raise PackService._verification_error("ZIP 校验失败。") from None
+        _verify_archive(
+            path,
+            require_manifest=manifest_payload is not None,
+            expected_entries=expected,
+            expected_manifest=manifest_payload,
+        )
 
 
 def _manifest_payload(plan: PackPlan, files: list[dict[str, object]]) -> dict[str, object]:
@@ -759,23 +807,19 @@ def _zip_info(name: str) -> zipfile.ZipInfo:
     return info
 
 
+def _is_portable_zip_path(name: str) -> bool:
+    try:
+        validate_portable_relative_path(name)
+    except ValueError:
+        return False
+    return True
+
+
 def _validate_zip_names(names: tuple[str, ...]) -> None:
-    identities: list[str] = []
-    for name in names:
-        if not name or name.endswith("/"):
-            raise PackService._verification_error("ZIP 条目路径不安全。")
-        try:
-            normalized = safe_relative_path(name)
-        except ValueError:
-            raise PackService._verification_error("ZIP 条目路径不安全。") from None
-        identity = _path_identity_key(name)
-        if normalized.as_posix() != name or not _is_portable_zip_path(name):
-            raise PackService._verification_error("ZIP 条目存在路径冲突。")
-        identities.append(identity)
-    identities.sort(key=lambda identity: tuple(identity.split("/")))
-    for previous, current in zip(identities, identities[1:], strict=False):
-        if current == previous or current.startswith(f"{previous}/"):
-            raise PackService._verification_error("ZIP 条目存在路径冲突。")
+    try:
+        _validate_archive_names(names, identity_key=_path_identity_key)
+    except ValueError as error:
+        raise PackServiceError(str(error), kind="verify_failed") from None
 
 
 _WINDOWS_RESERVED_BASENAMES = frozenset(
@@ -783,24 +827,6 @@ _WINDOWS_RESERVED_BASENAMES = frozenset(
     | {f"COM{index}" for index in range(1, 10)}
     | {f"LPT{index}" for index in range(1, 10)}
 )
-_WINDOWS_INVALID_PATH_CHARACTERS = frozenset('<>:"\\|?*')
-
-
-def _is_portable_zip_path(name: str) -> bool:
-    for component in name.split("/"):
-        if (
-            not component
-            or component.endswith((" ", "."))
-            or any(
-                ord(character) < 32 or character in _WINDOWS_INVALID_PATH_CHARACTERS
-                for character in component
-            )
-        ):
-            return False
-        basename = component.split(".", maxsplit=1)[0].upper()
-        if basename in _WINDOWS_RESERVED_BASENAMES:
-            return False
-    return True
 
 
 def _same_plan(left: PackPlan, right: PackPlan) -> bool:
@@ -943,10 +969,6 @@ def _changed_source_paths(left: PackPlan, right: PackPlan) -> tuple[str, ...]:
             key=_stable_text_key,
         )
     )
-
-
-def _reject_json_constant(value: str) -> None:
-    raise ValueError(f"invalid JSON constant: {value}")
 
 
 def _sanitize_filename(value: str) -> str:

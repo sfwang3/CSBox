@@ -54,16 +54,16 @@ def test_public_readmes_have_the_two_file_pypi_safe_contract() -> None:
         assert "does not generate" in text or "不生成" in text
 
 
-def test_readme_metadata_and_changelog_match_the_development_baseline() -> None:
+def test_readme_metadata_and_changelog_match_the_rc_baseline() -> None:
     pyproject = (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     changelog = (PROJECT_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
 
     assert 'readme = "README.md"' in pyproject
     assert '"README.en.md"' in pyproject
     assert "## 0.6.1" in changelog
-    released = changelog.split("## 0.5.0rc1", maxsplit=1)[0]
-    assert "not published to PyPI" not in released
-    assert "尚未发布到 PyPI" not in released
+    rc_section = changelog.split("## 0.7.0rc1", maxsplit=1)[1].split("## 0.6.1", 1)[0]
+    assert "not published to PyPI" in rc_section
+    assert "尚未发布到 PyPI" not in rc_section
 
 
 def test_readme_screenshot_targets_are_local_public_assets() -> None:
@@ -75,3 +75,41 @@ def test_readme_screenshot_targets_are_local_public_assets() -> None:
     for readme in (PROJECT_ROOT / "README.md", PROJECT_ROOT / "README.en.md"):
         text = readme.read_text(encoding="utf-8")
         assert not re.search(r"(?:src|href)=\"docs/assets/readme/", text)
+
+
+def test_readmes_describe_the_submission_handoff_product_path() -> None:
+    chinese = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    english = (PROJECT_ROOT / "README.en.md").read_text(encoding="utf-8")
+
+    assert "准备提交" in chinese
+    assert "Prepare Submission" in english
+    assert re.search(r"Evidence.*Submission.*report.*ZIP.*manifest", english, re.DOTALL)
+    assert re.search(r"证据.*提交.*report.*ZIP.*manifest", chinese, re.DOTALL)
+    for text in (chinese, english):
+        assert "independent" in text.lower() or "独立" in text
+        assert "upload" in text.lower() or "上传" in text
+        assert "提交成功" not in text
+
+
+def test_submission_handoff_docs_and_sdist_contract_exist() -> None:
+    handoff = PROJECT_ROOT / "docs" / "SUBMISSION_HANDOFF.md"
+    assert handoff.is_file()
+    text = handoff.read_text(encoding="utf-8")
+    for phrase in (
+        "READY",
+        "WARNING",
+        "BLOCKED",
+        "WARN",
+        "FAIL",
+        "SKIP",
+        "report.docx",
+        "submission-manifest.json",
+        "SHA-256",
+        "独立",
+        "上传",
+        "校验收据",
+    ):
+        assert phrase in text
+
+    pyproject = (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert "docs/SUBMISSION_HANDOFF.md" in pyproject

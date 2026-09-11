@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import re
 import sys
@@ -26,6 +27,13 @@ from csbox.locales import Translator, load_locale
 from csbox.pack.service import create_pack_service
 from csbox.report.repository import ReportProfileRepository
 from csbox.report.service import default_report_profile
+from csbox.submission import (
+    SubmissionError,
+    SubmissionPlan,
+    SubmissionReadiness,
+    SubmissionVerifier,
+    create_submission_service,
+)
 
 _locale = load_locale()
 
@@ -65,9 +73,15 @@ report_app = typer.Typer(
     help="配置并导出用户提供的报告材料。",
     no_args_is_help=True,
 )
+submit_app = typer.Typer(
+    cls=_LocalizedHelpGroup,
+    help=_locale("cli.submit.help"),
+    no_args_is_help=True,
+)
 app.add_typer(lab_app, name="lab")
 app.add_typer(api_app, name="api")
 app.add_typer(report_app, name="report")
+app.add_typer(submit_app, name="submit")
 
 
 def _yes_no(translator: Translator, value: bool) -> str:
@@ -670,6 +684,224 @@ def lab_host(
     except Exception:
         return_code = 1
     raise typer.Exit(code=return_code)
+
+
+def _submission_destination(project_root: Path, output: Path | None) -> Path | None:
+    if output is None or output.is_absolute():
+        return output
+    return project_root / output
+
+
+def _submission_public_name(value: Path | str, project_root: Path) -> str:
+    path = Path(value)
+    try:
+        relative = path.resolve(strict=False).relative_to(project_root.resolve(strict=False))
+        return relative.as_posix() or "."
+    except (OSError, ValueError):
+        return path.name or "."
+
+
+def _submission_message(value: object, fallback: str) -> str:
+    message = str(value).strip() if value else fallback
+    message = _redact_debug_detail(message)
+    # SubmissionError.user_message is already a safe boundary, but injected
+    # runners may provide arbitrary detail. Keep the CLI output path-free.
+    message = re.sub(r"(?<!\S)(?:[A-Za-z]:)?[/\\][^\s，。；;]+", "提交路径", message)
+    return message
+
+
+def _submission_plan_payload(plan: SubmissionPlan, project_root: Path) -> dict[str, object]:
+    return {
+        "source_root": ".",
+        "evidence_set_id": plan.evidence_set_id,
+        "readiness": plan.readiness.value,
+        "check": {
+            "status": plan.check.status.value,
+            "warning_count": plan.check.warning_count,
+            "deep_requested": plan.check.deep_requested,
+            "deep_status": plan.check.deep_status.value if plan.check.deep_status else None,
+        },
+        "counts": {
+            "sources": len(plan.resolved_sources),
+            "warnings": len(plan.warnings),
+            "blockers": len(plan.blockers),
+        },
+        "source_summary": {
+            "total": len(plan.resolved_sources),
+            "available": sum(1 for source in plan.resolved_sources if source.available),
+        },
+        "archive": {
+            "verified": plan.project_archive.verified,
+            "contains_manifest": plan.project_archive.contains_manifest,
+        },
+        "final_names": {
+            "destination": _submission_public_name(plan.destination, project_root),
+            "report": plan.report_filename,
+            "archive": plan.archive_filename,
+            "manifest": "submission-manifest.json",
+        },
+        "warnings": tuple(
+            _submission_message(item, "提交计划包含警告。") for item in plan.warnings
+        ),
+        "blockers": tuple(
+            _submission_message(item, "提交计划存在阻塞项。") for item in plan.blockers
+        ),
+    }
+
+
+def _submission_result_payload(result: object, project_root: Path) -> dict[str, object]:
+    return {
+        "status": "PASS" if bool(getattr(result, "verified", False)) else "FAIL",
+        "verified": bool(getattr(result, "verified", False)),
+        "check_status": getattr(getattr(result, "check_status", None), "value", None),
+        "warning_count": int(getattr(result, "warning_count", 0)),
+        "final_names": {
+            "destination": _submission_public_name(result.destination, project_root),
+            "report": Path(result.report_path).name,
+            "archive": Path(result.archive_path).name,
+            "manifest": Path(result.manifest_path).name,
+        },
+        "warnings": tuple(
+            _submission_message(item, "提交材料包含警告。") for item in result.warnings
+        ),
+    }
+
+
+def _submission_verify_payload(result: object) -> dict[str, object]:
+    return {
+        "status": result.status,
+        "verified": result.verified,
+        "warning_count": result.warning_count,
+        "files": tuple(Path(item).name for item in result.files),
+        "errors": tuple(_submission_message(item, "提交材料校验失败。") for item in result.errors),
+    }
+
+
+def _prepare_submission(service: object, plan: SubmissionPlan, force: bool) -> object:
+    prepare = service.prepare
+    parameters = inspect.signature(prepare).parameters
+    if "force" in parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    ):
+        return prepare(plan, force=force)
+    return prepare(plan)
+
+
+def _check_submission_format(plain: bool, json_output: bool) -> None:
+    if plain and json_output:
+        raise typer.BadParameter("--plain 与 --json 不能同时使用。")
+
+
+@submit_app.command("plan", cls=_LocalizedHelpCommand, help=_locale("cli.submit.plan.help"))
+def submission_plan(
+    evidence_set_id: str = typer.Argument(..., help="证据集 ID。"),
+    output: Annotated[Path | None, typer.Option("--output", help="提交目录。")] = None,
+    deep: bool = typer.Option(False, "--deep", help="执行深度检查。"),
+    plain: bool = typer.Option(False, "--plain", help="输出稳定纯文本结果。"),
+    json_output: bool = typer.Option(False, "--json", help="输出稳定 JSON。"),
+    verbose: bool = typer.Option(False, "--verbose", help="显示受控调试类型。"),
+) -> None:
+    _check_submission_format(plain, json_output)
+    project_root = Path.cwd()
+    destination = _submission_destination(project_root, output)
+    try:
+        plan = create_submission_service(project_root).plan(
+            evidence_set_id, destination=destination, deep=deep
+        )
+    except Exception as error:
+        _print_safe_failure(
+            _submission_message(
+                getattr(error, "user_message", None), "无法建立提交计划，请检查证据集和项目目录。"
+            ),
+            error,
+            verbose=verbose,
+        )
+        raise typer.Exit(code=1) from error
+    if json_output:
+        Console(markup=False, soft_wrap=True).print(
+            _strict_json(with_schema_version(_submission_plan_payload(plan, project_root)))
+        )
+    elif plain:
+        Console(markup=False).print(f"状态：{plan.readiness.value}")
+        Console(markup=False).print(
+            f"检查：{plan.check.status.value}  警告：{plan.check.warning_count}"
+        )
+        Console(markup=False).print(
+            f"来源：{len(plan.resolved_sources)}  可用："
+            f"{sum(1 for item in plan.resolved_sources if item.available)}"
+        )
+        for item in (*plan.warnings, *plan.blockers):
+            Console(markup=False).print(_submission_message(item, "提交计划包含提示。"))
+    else:
+        Console(markup=False).print(f"提交计划：{plan.readiness.value}")
+        Console(markup=False).print(
+            f"检查：{plan.check.status.value}  来源：{len(plan.resolved_sources)}"
+        )
+    if plan.readiness is SubmissionReadiness.BLOCKED:
+        raise typer.Exit(code=1)
+
+
+@submit_app.command("prepare", cls=_LocalizedHelpCommand, help=_locale("cli.submit.prepare.help"))
+def submission_prepare(
+    evidence_set_id: str = typer.Argument(..., help="证据集 ID。"),
+    output: Annotated[Path | None, typer.Option("--output", help="提交目录。")] = None,
+    force: bool = typer.Option(False, "--force", help="允许刷新已拥有的提交目录。"),
+    deep: bool = typer.Option(False, "--deep", help="执行深度检查。"),
+    plain: bool = typer.Option(False, "--plain", help="输出稳定纯文本结果。"),
+    json_output: bool = typer.Option(False, "--json", help="输出稳定 JSON。"),
+    verbose: bool = typer.Option(False, "--verbose", help="显示受控调试类型。"),
+) -> None:
+    _check_submission_format(plain, json_output)
+    project_root = Path.cwd()
+    destination = _submission_destination(project_root, output)
+    try:
+        service = create_submission_service(project_root)
+        plan = service.plan(evidence_set_id, destination=destination, deep=deep)
+        if plan.readiness is SubmissionReadiness.BLOCKED:
+            raise SubmissionError("提交预览未通过，无法准备材料。", kind="blocked")
+        result = _prepare_submission(service, plan, force)
+    except Exception as error:
+        _print_safe_failure(
+            _submission_message(
+                getattr(error, "user_message", None), "准备提交材料失败，请处理提示后重试。"
+            ),
+            error,
+            verbose=verbose,
+        )
+        raise typer.Exit(code=1) from error
+    if json_output:
+        Console(markup=False, soft_wrap=True).print(
+            _strict_json(with_schema_version(_submission_result_payload(result, project_root)))
+        )
+    else:
+        Console(markup=False).print("提交材料已准备。" if plain else "准备提交材料完成。")
+        if result.warnings:
+            Console(markup=False).print(f"警告：{len(result.warnings)}")
+
+
+@submit_app.command("verify", cls=_LocalizedHelpCommand, help=_locale("cli.submit.verify.help"))
+def submission_verify(
+    submission_dir: Path = typer.Argument(..., help="待验证的提交目录。"),  # noqa: B008
+    plain: bool = typer.Option(False, "--plain", help="输出稳定纯文本结果。"),
+    json_output: bool = typer.Option(False, "--json", help="输出稳定 JSON。"),
+    verbose: bool = typer.Option(False, "--verbose", help="显示受控调试类型。"),
+) -> None:
+    _check_submission_format(plain, json_output)
+    try:
+        result = SubmissionVerifier().verify(submission_dir)
+    except Exception as error:
+        _print_safe_failure("提交材料校验失败，请检查提交目录后重试。", error, verbose=verbose)
+        raise typer.Exit(code=1) from error
+    if json_output:
+        Console(markup=False, soft_wrap=True).print(
+            _strict_json(with_schema_version(_submission_verify_payload(result)))
+        )
+    else:
+        Console(markup=False).print(f"验证：{result.status}")
+        for item in result.errors:
+            Console(markup=False).print(_submission_message(item, "提交材料校验失败。"))
+    if result.status != "PASS":
+        raise typer.Exit(code=1)
 
 
 @lab_app.command(

@@ -196,6 +196,7 @@ async def test_home_geometry_and_tab_navigation_are_usable(
         for expected_id in (
             "entry-records",
             "entry-evidence",
+            "entry-submit",
             "entry-check",
             "entry-pack",
             "entry-api",

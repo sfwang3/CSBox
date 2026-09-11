@@ -48,6 +48,7 @@ class HomeScreen(Screen[None]):
         notice: HomeNotice | None = None,
         records_screen_factory: Callable[[], Screen[None]] | None = None,
         evidence_screen_factory: Callable[[], Screen[None]] | None = None,
+        submission_screen_factory: Callable[[], Screen[None]] | None = None,
         check_service: object | None = None,
     ) -> None:
         super().__init__(name="home")
@@ -61,6 +62,7 @@ class HomeScreen(Screen[None]):
         self.notice = notice
         self.records_screen_factory = records_screen_factory
         self.evidence_screen_factory = evidence_screen_factory
+        self.submission_screen_factory = submission_screen_factory
         self.check_service = check_service
         self.is_wide = False
         self._busy_workflow: str | None = None
@@ -126,6 +128,9 @@ class HomeScreen(Screen[None]):
             return
         if action_id == "evidence":
             self._open_evidence()
+            return
+        if action_id == "submit":
+            self._open_submission()
             return
         if action_id == "start":
             self.app.push_screen(
@@ -197,6 +202,17 @@ class HomeScreen(Screen[None]):
                 self.locale("home.entry.evidence"),
                 self.locale("evidence.list.load_error"),
             )
+            return
+        self.app.push_screen(screen)
+
+    def _open_submission(self) -> None:
+        if self.submission_screen_factory is None:
+            self._show_action_error("准备提交", "准备提交暂时无法打开，请稍后重试。")
+            return
+        try:
+            screen = self.submission_screen_factory()
+        except Exception:
+            self._show_action_error("准备提交", "准备提交暂时无法打开，请稍后重试。")
             return
         self.app.push_screen(screen)
 

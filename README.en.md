@@ -43,7 +43,7 @@ Keep this mental model:
 
 > **open the folder → open a terminal in that folder → run `csbox` → choose the current task from Home**
 
-You do not need to memorize subcommands for the normal path. Home presents **开始实验**, **实验记录**, **整理证据**, **检查项目**, **安全打包**, and **API 实验** with visible status and next steps.
+You do not need to memorize subcommands for the normal path. Home presents **开始实验**, **实验记录**, **整理证据**, **准备提交**, **检查项目**, **安全打包**, and **API 实验** with visible status and next steps.
 
 On Home, use <kbd>↑</kbd>/<kbd>↓</kbd> or <kbd>Tab</kbd> to move, press <kbd>Enter</kbd> to open, and press <kbd>?</kbd> or <kbd>F1</kbd> for help.
 
@@ -66,15 +66,17 @@ uv sync
 uv run csbox --help
 ```
 
-To make a local command from that checkout, run `uv build` and install the wheel it creates; then return to the course/project folder and run `csbox`. Contributor checks are documented below.
+To make a local command from that checkout, run `uv build` and install the wheel it creates; then return to the course/project folder and run `csbox`. Contributor checks are documented below. The current source candidate is `0.7.0rc1`; the public PyPI stable release remains `0.6.1`. The RC is not published to PyPI, so `uv tool install csbox` still installs the PyPI stable release, not the RC.
 
 ## Quick Start
 
 From your course/project folder, run `csbox`. For a first terminal experiment:
 
 ```text
-Home → 开始实验 → enter a name → work in the terminal → F12 → type exit → 实验记录 → 导出材料
+Home → Record → Evidence → Prepare Submission → Verify → user manually uploads
 ```
+
+Record begins at **开始实验**: enter a name, work in the terminal, press <kbd>F12</kbd>, then type `exit` and return to **实验记录**.
 
 For diagnostics, `csbox --help`, `csbox --version`, and `csbox doctor` are available. The current version prints:
 
@@ -89,7 +91,7 @@ The screenshots below follow the beginner path: start from Home, record work in 
 
 ### 1. Start at Home
 
-Home is where you choose what you are doing now: start a lab, revisit a record, organize evidence, run an API experiment, check a project, or prepare a ZIP.
+Home is where you choose what you are doing now: start a lab, revisit a record, organize evidence, prepare a submission, run an API experiment, check a project, or prepare a ZIP.
 
 <p align="center">
   <a href="https://raw.githubusercontent.com/sfwang3/CSBox/main/docs/assets/readme/home.png">
@@ -125,19 +127,22 @@ Regenerate them with `uv run --with cairosvg python docs/tests/tooling/generate_
 
 ## A student journey
 
+The product path is **Record → Evidence → Prepare Submission → Verify → user manually uploads**. **Prepare Submission** performs one visible preflight and one coordinated transaction that produces exactly `report.docx`, the configured project ZIP, and `submission-manifest.json`; the ZIP is verified and contains the Pack manifest. Preparation leaves the source project, Evidence, and Profile unchanged. `WARN` means review, not PASS or FAIL; `FAIL` blocks preparation, and `SKIP` is not a pass. Verify works after the handoff directory is copied or moved, without the source project, Evidence, Profile, or network. CSBox says prepared/verified, never submitted: the user manually uploads the result.
+
 ```mermaid
 flowchart LR
     A[上机实验] --> B[开始实验]
     B --> C[F12 关键画面]
     C --> D[回看]
     D --> E[整理证据]
-    E --> F[配置/导出报告材料]
-    F --> G[检查项目]
-    G --> H[安全打包]
-    H --> I[提交]
-    B -. API 实验 .-> J[API 实验 / API Evidence]
-    J --> E
-    J --> F
+    E --> F[Evidence]
+    F --> G[Prepare Submission]
+    G --> H[report.docx + ZIP + manifest]
+    H --> I[Verify]
+    I --> J[user manually uploads]
+    B -. API 实验 .-> K[API 实验 / API Evidence]
+    K --> E
+    K --> F
 ```
 
 ## Before → after
@@ -166,6 +171,8 @@ flowchart LR
 
 **检查项目** (Check) inspects project structure, Git state, sensitive files, absolute-path clues, build artifacts, caches, logs, and large files. A `WARN` means “review this finding”; it is not the same as `PASS`, and it is not a blanket security guarantee. **安全打包** (Pack) assembles files in a temporary area, refuses unsafe or credential-like inputs, verifies the ZIP, and leaves the source project in place.
 
+**Prepare Submission** reuses Check, Pack, Evidence, and Report to produce exactly the three-file handoff. The default destination is a safe sibling of the project; unowned or modified destinations are never blindly overwritten, and `--force` only refreshes a demonstrably owned unchanged handoff. `submission-manifest.json` records safe relative names, sizes, and SHA-256 values; its self-digest is an integrity commitment, not authentication. See [Submission Handoff](docs/SUBMISSION_HANDOFF.md).
+
 ## Keyboard shortcuts
 
 Only these shortcuts are part of the documented current UI contract:
@@ -188,7 +195,13 @@ Project-local working data is stored below `.csbox/`:
 
 Lab export produces `evidence/<NN-title>.png`, `evidence.md`, `session.cast`, optional `commands.txt`, and a generated internal manifest. Report export produces `report.md`, `report.docx`, `assets/*.png`, and a generated internal report manifest; its Evidence Set order can mix Lab Captures and saved API Run Steps. API export produces `evidence/*.png`, `api-evidence.md`, `results.json`, and a generated internal manifest.
 
-Pack produces a ZIP and optionally `manifest.json`. It excludes `.csbox`, common build/cache/log directories, existing `.zip` files, `.env` and credential-like files, private keys, and the output itself. Check and Pack are safety aids; inspect the proposed submission yourself.
+Pack produces a ZIP and optionally `manifest.json`. Prepare Submission produces `report.docx`, the configured project ZIP, and `submission-manifest.json`. Verify the handoff independently after copying or moving it:
+
+```bash
+csbox submit verify path/to/handoff --plain
+```
+
+Check, Pack, and Prepare Submission are safety aids; inspect the result before manually uploading. CSBox never uploads.
 
 ## Does / Does not
 
@@ -256,6 +269,7 @@ Use `csbox doctor` to inspect the current OS, Python, shell availability, and te
 - [Security boundaries](docs/SECURITY.md) — Check and Pack limits.
 - [Session format](docs/SESSION_FORMAT.md) — recording details.
 - [TUI design](docs/TUI_DESIGN.md) — beginner interaction and CJK layout.
+- [Submission Handoff](docs/SUBMISSION_HANDOFF.md) — preparation, verification, manifest, and manual-upload boundaries.
 - [CHANGELOG](CHANGELOG.md) — release history.
 - [CONTRIBUTING.md](CONTRIBUTING.md) — bug reports, development setup, tests, and contribution expectations.
 

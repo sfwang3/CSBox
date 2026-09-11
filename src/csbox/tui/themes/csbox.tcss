@@ -3,6 +3,55 @@ Screen {
     color: #dbe7f2;
 }
 
+#submission-layout {
+    height: 100%;
+    padding: 1 2 0 2;
+}
+
+#submission-title {
+    color: #9da4ff;
+    text-style: bold;
+    height: 1;
+    margin-bottom: 1;
+}
+
+#submission-scroll {
+    height: 1fr;
+    min-height: 1;
+    padding: 1;
+    background: #0e1a26;
+    border: round #29455f;
+    scrollbar-size: 1 1;
+}
+
+#submission-content {
+    height: auto;
+    color: #dbe7f2;
+}
+
+#submission-actions {
+    height: 3;
+    margin-top: 1;
+}
+
+#submission-actions Button {
+    width: 1fr;
+    margin-right: 1;
+}
+
+#submission-status {
+    height: auto;
+    min-height: 1;
+    color: #f0bd60;
+    margin-top: 1;
+}
+
+#submission-footer {
+    height: 1;
+    color: #a5bacd;
+    margin-top: 1;
+}
+
 #home-layout {
     height: 100%;
     padding: 1 2 0 2;

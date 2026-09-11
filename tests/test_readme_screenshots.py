@@ -51,7 +51,7 @@ async def test_home_readme_viewport_has_no_entry_overflow_or_scrollbar_artifacts
         await pilot.pause()
 
         action_panel = app.screen.query_one("#action-panel")
-        assert len(app.screen.query(".entry-card")) == 6
+        assert len(app.screen.query(".entry-card")) == 7
         assert action_panel.max_scroll_y == 0
         assert action_panel.show_vertical_scrollbar is False
         assert app.screen.query_one("#entry-start").styles.border.top[0] == "round"

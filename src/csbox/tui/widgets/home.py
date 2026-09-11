@@ -16,6 +16,7 @@ ACTION_DEFINITIONS = (
     ("start", "home.entry.start"),
     ("records", "home.entry.records"),
     ("evidence", "home.entry.evidence"),
+    ("submit", "home.entry.submit"),
     ("check", "home.entry.check"),
     ("pack", "home.entry.pack"),
     ("api", "home.entry.api"),

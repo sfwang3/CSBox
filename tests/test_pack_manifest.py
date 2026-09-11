@@ -445,6 +445,9 @@ def test_manifest_is_strict_self_consistent_and_contains_only_relative_entries(
         assert secret not in raw_manifest.decode("utf-8")
 
     assert report.entries[-1] == "manifest.json"
+    verification = PackService().verify_existing(destination, require_manifest=True)
+    assert verification.verified is True
+    assert verification.entries == report.entries
 
 
 def test_symlink_and_unsafe_destination_are_never_followed(tmp_path: Path) -> None:
