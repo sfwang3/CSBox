@@ -12,7 +12,7 @@ from csbox.submission.models import SubmissionManifest
 def _manifest_payload() -> dict[str, object]:
     return {
         "schema_version": 1,
-        "csbox_version": "0.7.0rc1",
+        "csbox_version": "0.7.0",
         "generated_at": "2026-09-11T12:00:00Z",
         "evidence_set_id": "set-1",
         "check": {

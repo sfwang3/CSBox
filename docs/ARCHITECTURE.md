@@ -82,6 +82,6 @@ API transport。
 
 ## Distribution 与安装态
 
-项目使用 Hatchling 的 `src/csbox` package layout。wheel 只包含运行时 Python package、locale JSON、Textual TCSS 和 distribution metadata；sdist 只保留公开 README、贡献指南、许可证、用户文档、`src/csbox` 与构建所需配置，不包含测试、参考图片或内部开发资料。当前 source candidate 是 `0.7.0rc1`，PyPI stable 仍是 `0.6.1`；RC 未发布到 PyPI，安装 `csbox` 得到的仍不是 RC。公开文档以 Simplified Chinese `README.md` 为默认 README，完整英文文档为 `README.en.md`。
+项目使用 Hatchling 的 `src/csbox` package layout。wheel 只包含运行时 Python package、locale JSON、Textual TCSS 和 distribution metadata；sdist 只保留公开 README、贡献指南、许可证、用户文档、`src/csbox` 与构建所需配置，不包含测试、参考图片或内部开发资料。当前稳定版是 `0.7.0`，已发布到 PyPI。公开文档以 Simplified Chinese `README.md` 为默认 README，完整英文文档为 `README.en.md`。
 
 安装后的入口是 `csbox` console script。用户可以用普通 venv 或 `uv tool install <wheel>` 安装，再从项目目录之外运行 `csbox --help`、`doctor`、`check` 和 `pack`；locale、TCSS 与 renderer 通过 package/resource 或系统字体查找，不依赖当前 Git checkout。

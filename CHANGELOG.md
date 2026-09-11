@@ -1,10 +1,15 @@
 # Changelog
 
-## 0.7.0rc1 (release candidate)
+## 0.7.0
 
-- **Submission Handoff:** add the beginner-first `Record → Evidence → Prepare Submission → Verify → manual upload` product path. One preflight and one coordinated transaction produce `report.docx`, the configured project ZIP, and `submission-manifest.json` without changing source project, Evidence, or Profile data.
-- **Integrity and boundaries:** expose READY/WARNING/BLOCKED readiness, preserve WARN/FAIL/SKIP truth, verify copied or moved handoffs offline, and keep CSBox local-first: prepared is not submitted, and CSBox never uploads.
-- **Documentation:** publish the Submission Handoff contract and distinguish the `0.7.0rc1` source candidate from the PyPI `0.6.1` stable release; the RC is not published to PyPI.
+- **Submission Handoff / 准备提交:** complete the beginner-first `Record → Evidence → Prepare Submission → Verify → manual upload` path. A coordinated preflight connects Evidence Set, Report Profile, Check, and a verified Pack archive without changing the source project, Evidence, or Profile data.
+- **Final three-file handoff:** produce `report.docx`, the configured project ZIP, and `submission-manifest.json` in one small final directory. The manifest records artifact sizes and SHA-256 digests, including its own canonical self-digest.
+- **Independent verification:** `csbox submit verify` verifies a copied or moved handoff using only its final contents, including the nested Pack manifest and project-archive integrity; it does not require the original project or a network connection.
+- **Safe refresh and stale-state protection:** `--force` refreshes only a demonstrably CSBox-owned, unchanged destination. Changes to Evidence, Report Profile, Check, Pack inputs, or destination state reject stale plans before publication.
+- **Atomic and rollback safety:** stage and verify the complete handoff before publication, use safe destination ownership checks and locking, and preserve the previous owned handoff when a refresh cannot complete.
+- **CLI + TUI:** expose the workflow through `csbox submit` and Home → `准备提交`, with visible READY/WARNING/BLOCKED preflight states, recovery guidance, and CJK/responsive layout support.
+- **Reusable Pack verification:** share `PackArchiveVerifier` for standalone and nested ZIP verification, with strict manifest schema, safe paths, archive entry integrity, and redacted public errors.
+- **Product boundaries:** Lab Evidence, API Evidence, Evidence Collection, Report Handoff, Check, and Pack remain local-first helpers for recording, checking, organizing, and delivering student-provided work. **CSBox does not upload coursework.** It does not generate coursework conclusions, answers, or prose; the user manually uploads the verified handoff.
 
 ## 0.6.1
 

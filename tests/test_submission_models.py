@@ -16,7 +16,7 @@ from csbox.submission.models import (
 def _manifest(files: tuple[dict[str, object], ...]) -> SubmissionManifest:
     return SubmissionManifest(
         schema_version=1,
-        csbox_version="0.7.0rc1",
+        csbox_version="0.7.0",
         generated_at="2026-09-11T12:00:00Z",
         evidence_set_id="set-1",
         check={
@@ -75,7 +75,7 @@ def test_submission_manifest_accepts_only_schema_v1_and_safe_artifacts() -> None
 
     manifest = SubmissionManifest(
         schema_version=1,
-        csbox_version="0.7.0rc1",
+        csbox_version="0.7.0",
         generated_at="2026-09-11T12:00:00Z",
         evidence_set_id="set-1",
         check={

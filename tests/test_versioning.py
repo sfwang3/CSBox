@@ -5,7 +5,7 @@ from typer.testing import CliRunner
 from csbox import __version__
 from csbox.cli.main import app
 
-EXPECTED_VERSION = "0.7.0rc1"
+EXPECTED_VERSION = "0.7.0"
 
 
 def test_version_is_single_runtime_source() -> None:

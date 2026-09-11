@@ -13,7 +13,7 @@ body:
     attributes:
       label: CSBox version
       description: Run `csbox --version` and paste the result.
-      placeholder: 0.6.1
+      placeholder: 0.7.0
     validations:
       required: true
   - type: dropdown

@@ -47,23 +47,25 @@ def test_public_readmes_have_the_two_file_pypi_safe_contract() -> None:
             assert f'src="{url}"' in text
         for command in COMMON_COMMANDS:
             assert command in text
-        assert "0.6.1" in text
+        assert "0.7.0" in text
         assert "CONTRIBUTING.md" in text
         assert "Check" in text
         assert "Pack" in text
         assert "does not generate" in text or "不生成" in text
 
 
-def test_readme_metadata_and_changelog_match_the_rc_baseline() -> None:
+def test_readme_metadata_and_changelog_match_the_final_release() -> None:
     pyproject = (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     changelog = (PROJECT_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
 
     assert 'readme = "README.md"' in pyproject
     assert '"README.en.md"' in pyproject
+    assert changelog.startswith("# Changelog\n\n## 0.7.0")
     assert "## 0.6.1" in changelog
-    rc_section = changelog.split("## 0.7.0rc1", maxsplit=1)[1].split("## 0.6.1", 1)[0]
-    assert "not published to PyPI" in rc_section
-    assert "尚未发布到 PyPI" not in rc_section
+    final_section = changelog.split("## 0.7.0", maxsplit=1)[1].split("## 0.6.1", 1)[0]
+    assert "submission-manifest.json" in final_section
+    assert "CSBox does not upload coursework." in final_section
+    assert "release candidate" not in final_section.lower()
 
 
 def test_readme_screenshot_targets_are_local_public_assets() -> None:

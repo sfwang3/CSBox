@@ -8,9 +8,9 @@ Record terminal work, keep evidence reviewable, and hand in a checked project bu
 
 [简体中文](https://github.com/sfwang3/CSBox/blob/main/README.md) · [English](https://github.com/sfwang3/CSBox/blob/main/README.en.md)
 
-[![CI](https://img.shields.io/github/actions/workflow/status/sfwang3/CSBox/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/sfwang3/CSBox/actions/workflows/ci.yml) [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/) [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-2ea44f?style=flat-square)](LICENSE) [![0.6.1](https://img.shields.io/badge/version-0.6.1-informational?style=flat-square)](CHANGELOG.md)
+[![CI](https://img.shields.io/github/actions/workflow/status/sfwang3/CSBox/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/sfwang3/CSBox/actions/workflows/ci.yml) [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/) [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-2ea44f?style=flat-square)](LICENSE) [![0.7.0](https://img.shields.io/badge/version-0.7.0-informational?style=flat-square)](CHANGELOG.md)
 
-**0.6.1 · stable release**
+**0.7.0 · stable release**
 
 </div>
 
@@ -49,7 +49,7 @@ On Home, use <kbd>↑</kbd>/<kbd>↓</kbd> or <kbd>Tab</kbd> to move, press <kbd
 
 ### Installation
 
-`0.6.1` is the current stable release on PyPI. Install it with `uv`:
+`0.7.0` is the current stable release on PyPI. Install it with `uv`:
 
 ```bash
 uv tool install csbox
@@ -66,7 +66,7 @@ uv sync
 uv run csbox --help
 ```
 
-To make a local command from that checkout, run `uv build` and install the wheel it creates; then return to the course/project folder and run `csbox`. Contributor checks are documented below. The current source candidate is `0.7.0rc1`; the public PyPI stable release remains `0.6.1`. The RC is not published to PyPI, so `uv tool install csbox` still installs the PyPI stable release, not the RC.
+To make a local command from that checkout, run `uv build` and install the wheel it creates; then return to the course/project folder and run `csbox`. Contributor checks are documented below. The current stable release is `0.7.0`, published on PyPI, and `uv tool install csbox` installs this stable release.
 
 ## Quick Start
 
@@ -82,7 +82,7 @@ For diagnostics, `csbox --help`, `csbox --version`, and `csbox doctor` are avail
 
 ```console
 $ csbox --version
-0.6.1
+0.7.0
 ```
 
 ## See the current UI

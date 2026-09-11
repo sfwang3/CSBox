@@ -138,7 +138,7 @@ def make_review_session(root: Path) -> SessionPaths:
                 "initialRows": 8,
                 "initialColumns": 48,
                 "cwd": "/tmp/csbox-readme-demo/课程项目",
-                "csboxVersion": "0.6.1",
+                "csboxVersion": "0.7.0",
             }
         ),
         encoding="utf-8",
